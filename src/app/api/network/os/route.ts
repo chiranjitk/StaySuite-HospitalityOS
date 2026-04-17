@@ -2,8 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { execSync } from 'child_process';
 import * as fs from 'fs';
 import { readInterfaceRolesFromOS } from '@/lib/interface-role-persist';
-import { listInterfaces, InterfaceInfo } from '@/lib/network/interface';
-import { listRoutes, RouteInfo } from '@/lib/network/route';
+import { listInterfaces as listInterfacesScript, InterfaceInfo } from '@/lib/network/interface';
+import { listRoutes as listRoutesScript, RouteInfo } from '@/lib/network/route';
 
 /**
  * GET /api/network/os - Get comprehensive OS network data
@@ -131,7 +131,9 @@ function mapToOsInterface(iface: InterfaceInfo, osPersistedRoles: Map<string, { 
 }
 
 /**
- * Get OS interfaces via shell script wrapper, enriched with role data.
+ * Get OS interfaces via shell script wrapper (with inline fallback).
+ * Tries shell script first, falls back to inline /sys/class/net/ reading
+ * if scripts are not deployed yet.
  */
 function getOsInterfaces(): OsInterface[] {
   // Read OS-persisted roles once
@@ -142,35 +144,206 @@ function getOsInterfaces(): OsInterface[] {
     osPersistedRoles = null;
   }
 
-  // Call shell script wrapper
-  const result = listInterfaces();
-  if (!result.success || !result.data) {
-    console.warn('[Network OS API] listInterfaces script failed:', result.error);
-    return [];
+  // Try shell script wrapper first
+  try {
+    const result = listInterfacesScript();
+    if (result.success && result.data && Array.isArray(result.data.interfaces)) {
+      return result.data.interfaces.map(iface => mapToOsInterface(iface, osPersistedRoles));
+    }
+    console.warn('[Network OS API] Shell script listInterfaces failed, using inline fallback:', result.error);
+  } catch (e) {
+    console.warn('[Network OS API] Shell script listInterfaces not available, using inline fallback:', e instanceof Error ? e.message : e);
   }
 
-  return result.data.interfaces.map(iface => mapToOsInterface(iface, osPersistedRoles));
+  // Inline fallback: read from /sys/class/net/ directly
+  return getOsInterfacesInline(osPersistedRoles);
 }
 
 /**
- * Get OS routes via shell script wrapper, mapped to OsRoute shape.
+ * Inline fallback for reading interfaces when shell scripts are not available.
  */
-function getOsRoutes(): OsRoute[] {
-  const result = listRoutes();
-  if (!result.success || !result.data) {
-    console.warn('[Network OS API] listRoutes script failed:', result.error);
-    return [];
+function getOsInterfacesInline(osPersistedRoles: Map<string, { role: string; priority: number }> | null): OsInterface[] {
+  const interfaces: OsInterface[] = [];
+  let netDirs: string[] = [];
+  try {
+    netDirs = fs.readdirSync('/sys/class/net/').sort();
+  } catch {
+    return interfaces;
   }
 
-  return result.data.routes.map((r: RouteInfo) => ({
-    destination: r.destination === 'default' ? '0.0.0.0/0' : r.destination,
-    gateway: r.gateway || '',
-    interface: r.interface || '',
-    metric: r.metric || 0,
-    scope: '',
-    protocol: r.protocol || '',
-    isDefault: r.destination === 'default',
-  }));
+  for (const ifaceName of netDirs) {
+    const basePath = `/sys/class/net/${ifaceName}`;
+    try {
+      const operstate = safeReadFile(`${basePath}/operstate`).trim();
+      const carrier = safeReadFile(`${basePath}/carrier`).trim();
+      const isUp = operstate === 'up' || carrier === '1';
+      const type = detectInterfaceType(ifaceName, basePath);
+      const mac = safeReadFile(`${basePath}/address`).trim() || '00:00:00:00:00:00';
+      const mtu = parseInt(safeReadFile(`${basePath}/mtu`).trim()) || 1500;
+      const speed = safeReadFile(`${basePath}/speed`).trim();
+      const duplex = safeReadFile(`${basePath}/duplex`).trim();
+
+      // Get IPs
+      const ipOutput = safeExec(`ip -o -4 addr show dev ${ifaceName} 2>/dev/null`);
+      const ipv4Addresses: string[] = [];
+      for (const line of ipOutput.trim().split('\n').filter(Boolean)) {
+        const match = line.match(/inet\s+([\d./]+)/);
+        if (match) ipv4Addresses.push(match[1]);
+      }
+
+      const ip6Output = safeExec(`ip -o -6 addr show dev ${ifaceName} 2>/dev/null`);
+      const ipv6Addresses: string[] = [];
+      for (const line of ip6Output.trim().split('\n').filter(Boolean)) {
+        const match = line.match(/inet6\s+([\S]+)/);
+        if (match) ipv6Addresses.push(match[1]);
+      }
+
+      // Stats
+      const rxBytes = parseInt(safeReadFile(`${basePath}/statistics/rx_bytes`).trim()) || 0;
+      const txBytes = parseInt(safeReadFile(`${basePath}/statistics/tx_bytes`).trim()) || 0;
+      const rxPackets = parseInt(safeReadFile(`${basePath}/statistics/rx_packets`).trim()) || 0;
+      const txPackets = parseInt(safeReadFile(`${basePath}/statistics/tx_packets`).trim()) || 0;
+      const rxErrors = parseInt(safeReadFile(`${basePath}/statistics/rx_errors`).trim()) || 0;
+      const txErrors = parseInt(safeReadFile(`${basePath}/statistics/tx_errors`).trim()) || 0;
+
+      // Bridge ports
+      let bridgePorts: string[] = [];
+      try {
+        const bridgePath = `${basePath}/brif`;
+        if (fs.existsSync(bridgePath)) {
+          bridgePorts = fs.readdirSync(bridgePath);
+        }
+      } catch {}
+
+      // Bond members
+      let bondMembers: string[] = [];
+      try {
+        const bondPath = `/sys/class/net/${ifaceName}/bonding/slaves`;
+        if (fs.existsSync(bondPath)) {
+          bondMembers = safeReadFile(bondPath).trim().split(/\s+/).filter(Boolean);
+        }
+      } catch {}
+
+      // Role
+      let role: OsInterface['role'] = 'unknown';
+      if (ifaceName === 'lo') {
+        role = 'management';
+      } else if (type === 'ethernet') {
+        role = 'lan';
+      } else if (type === 'wifi' || ifaceName.startsWith('wlan') || ifaceName.startsWith('wl')) {
+        role = 'guest';
+      } else if (type === 'bridge' || ifaceName.startsWith('br')) {
+        role = 'lan';
+      }
+      if (osPersistedRoles) {
+        const persisted = osPersistedRoles.get(ifaceName);
+        if (persisted && VALID_ROLE_VALUES.includes(persisted.role)) {
+          role = persisted.role as OsInterface['role'];
+        }
+      }
+
+      interfaces.push({
+        name: ifaceName,
+        type: type as OsInterface['type'],
+        macAddress: mac,
+        ipv4Addresses,
+        ipv6Addresses,
+        gateway: '',
+        dnsServers: [],
+        mtu,
+        state: isUp ? 'up' : 'down',
+        speed: speed !== '' ? `${speed} Mbps` : (type === 'loopback' ? '' : 'Unknown'),
+        duplex: duplex !== '' ? duplex : (type === 'loopback' ? '' : 'Unknown'),
+        rxBytes, txBytes, rxPackets, txPackets, rxErrors, txErrors,
+        isDefaultRoute: false,
+        vendor: '',
+        driver: '',
+        vlans: [],
+        bridgePorts,
+        bondMembers,
+        role,
+        dhcpEnabled: false,
+        createdAt: new Date().toISOString(),
+      });
+    } catch {
+      // Skip this interface if we can't read it
+    }
+  }
+
+  return interfaces;
+}
+
+function safeReadFile(path: string): string {
+  try { return fs.readFileSync(path, 'utf-8'); } catch { return ''; }
+}
+
+function detectInterfaceType(name: string, basePath: string): string {
+  if (name === 'lo') return 'loopback';
+  if (fs.existsSync(`${basePath}/bridge`)) return 'bridge';
+  if (fs.existsSync(`${basePath}/bonding`)) return 'bond';
+  if (name.includes('.')) return 'vlan';
+  if (name.startsWith('wlan') || name.startsWith('wl')) return 'wifi';
+  if (name.startsWith('br')) return 'bridge';
+  if (name.startsWith('bond')) return 'bond';
+  if (name.startsWith('veth') || name.startsWith('docker') || name.startsWith('virbr')) return 'virtual';
+  return 'ethernet';
+}
+
+/**
+ * Get OS routes via shell script wrapper (with inline fallback).
+ */
+function getOsRoutes(): OsRoute[] {
+  // Try shell script wrapper first
+  try {
+    const result = listRoutesScript();
+    if (result.success && result.data && Array.isArray(result.data.routes)) {
+      return result.data.routes.map((r: RouteInfo) => ({
+        destination: r.destination === 'default' ? '0.0.0.0/0' : r.destination,
+        gateway: r.gateway || '',
+        interface: r.interface || '',
+        metric: r.metric || 0,
+        scope: '',
+        protocol: r.protocol || '',
+        isDefault: r.destination === 'default',
+      }));
+    }
+    console.warn('[Network OS API] Shell script listRoutes failed, using inline fallback:', result.error);
+  } catch (e) {
+    console.warn('[Network OS API] Shell script listRoutes not available, using inline fallback:', e instanceof Error ? e.message : e);
+  }
+
+  // Inline fallback: parse `ip route show` directly
+  return getOsRoutesInline();
+}
+
+/**
+ * Inline fallback for reading routes when shell scripts are not available.
+ */
+function getOsRoutesInline(): OsRoute[] {
+  const routes: OsRoute[] = [];
+  const output = safeExec('ip -o route show 2>/dev/null');
+  for (const line of output.trim().split('\n').filter(Boolean)) {
+    try {
+      const parts = line.trim().split(/\s+/);
+      if (parts.length < 1) continue;
+      const destination = parts[0] === 'default' ? '0.0.0.0/0' : parts[0];
+      const viaIdx = parts.indexOf('via');
+      const devIdx = parts.indexOf('dev');
+      const metricIdx = parts.indexOf('metric');
+      routes.push({
+        destination,
+        gateway: viaIdx >= 0 ? (parts[viaIdx + 1] || '') : '',
+        interface: devIdx >= 0 ? (parts[devIdx + 1] || '') : '',
+        metric: metricIdx >= 0 ? parseInt(parts[metricIdx + 1]) || 0 : 0,
+        scope: parts.includes('link') ? 'link' : 'global',
+        protocol: '',
+        isDefault: parts[0] === 'default',
+      });
+    } catch {
+      // Skip malformed lines
+    }
+  }
+  return routes;
 }
 
 function getOsSystemInfo() {
