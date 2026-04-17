@@ -123,14 +123,15 @@ module.exports = {
       restart_delay: 3000,
     },
     {
-      name: 'kea-service',
+      name: 'dhcp-service',
       script: 'index.ts',
       interpreter: BUN_PATH,
-      cwd: path.join(PROJECT_ROOT, 'mini-services', 'kea-service'),
+      cwd: path.join(PROJECT_ROOT, 'mini-services', 'dhcp-service'),
       env: {
         PORT: 3011,
         PROJECT_ROOT: PROJECT_ROOT,
-        NODE_PATH: path.join(PROJECT_ROOT, 'mini-services', 'kea-service', 'node_modules'),
+        DATABASE_PATH: path.join(PROJECT_ROOT, 'db', 'custom.db'),
+        NODE_PATH: path.join(PROJECT_ROOT, 'mini-services', 'dhcp-service', 'node_modules'),
       },
       max_memory_restart: '512M',
       autorestart: true,
