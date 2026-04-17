@@ -84,7 +84,6 @@ export async function POST(request: NextRequest) {
     // Create bond with optional members
     const bond = await db.bondConfig.create({
       data: {
-        tenantId,
         tenant: { connect: { id: tenantId } },
         property: { connect: { id: propertyId } },
         name,

@@ -89,8 +89,8 @@ export async function POST(request: NextRequest) {
         flushConnectionsOnFailover,
       },
       create: {
-        tenantId,
-        propertyId,
+        tenant: { connect: { id: tenantId } },
+        property: { connect: { id: propertyId } },
         enabled,
         mode,
         healthCheckUrl,

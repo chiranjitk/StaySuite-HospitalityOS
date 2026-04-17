@@ -81,7 +81,6 @@ export async function POST(request: NextRequest) {
 
     const backup = await db.networkConfigBackup.create({
       data: {
-        tenantId: user.tenantId,
         tenant: { connect: { id: user.tenantId } },
         property: { connect: { id: propertyId } },
         name,

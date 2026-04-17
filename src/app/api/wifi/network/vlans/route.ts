@@ -114,7 +114,6 @@ export async function POST(request: NextRequest) {
     });
 
     if (!parentRecord && parentInterfaceId) {
-      // The frontend may send the interface name as parentInterfaceId
       parentRecord = await db.networkInterface.findFirst({
         where: { name: parentInterfaceId, tenantId },
       });
@@ -126,7 +125,6 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // If still not found, try extracting name from subInterface (e.g. "eth1.100" → "eth1")
     if (!parentRecord) {
       const ifaceName = subInterface.split('.')[0];
       parentRecord = await db.networkInterface.findFirst({
@@ -134,7 +132,6 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // Use connectOrCreate to safely link or auto-create the parent interface
     const parentIfaceName = parentRecord?.name
       || parentInterfaceName
       || (subInterface.includes('.') ? subInterface.split('.')[0] : null)
@@ -175,9 +172,9 @@ export async function POST(request: NextRequest) {
     }
 
     // Create VLAN with connectOrCreate for parent interface
+    // NOTE: When using relation connect, do NOT also pass scalar FK fields (tenantId/propertyId)
     const vlan = await db.vlanConfig.create({
       data: {
-        tenantId,
         tenant: { connect: { id: tenantId } },
         property: { connect: { id: propertyId } },
         parentInterface: {
@@ -189,7 +186,6 @@ export async function POST(request: NextRequest) {
               },
             },
             create: {
-              tenantId,
               tenant: { connect: { id: tenantId } },
               property: { connect: { id: propertyId } },
               name: parentIfaceName,
