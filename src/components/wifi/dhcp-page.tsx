@@ -687,7 +687,11 @@ export default function DhcpPage() {
           });
           const result = await response.json();
           if (result.success) {
-            toast({ title: 'Success', description: 'Subnet updated in Kea DHCP4 server.' });
+            if (result.persisted === false) {
+              toast({ title: '⚠️ Applied but not saved', description: result.message || 'Subnet updated live but failed to write to config file. Changes will be lost on reboot.', variant: 'destructive' });
+            } else {
+              toast({ title: 'Success', description: 'Subnet updated and persisted.' });
+            }
           } else {
             toast({ title: 'Error', description: result.error || 'Failed to update subnet in Kea.', variant: 'destructive' });
           }
@@ -699,7 +703,11 @@ export default function DhcpPage() {
           });
           const result = await response.json();
           if (result.success) {
-            toast({ title: 'Success', description: 'Subnet added to Kea DHCP4 server.' });
+            if (result.persisted === false) {
+              toast({ title: '⚠️ Applied but not saved', description: result.message || 'Subnet added live but failed to write to config file. Changes will be lost on reboot.', variant: 'destructive' });
+            } else {
+              toast({ title: 'Success', description: 'Subnet added and persisted.' });
+            }
           } else {
             toast({ title: 'Error', description: result.error || 'Failed to add subnet to Kea.', variant: 'destructive' });
           }
@@ -759,7 +767,11 @@ export default function DhcpPage() {
         const response = await fetch(`/api/kea/subnets/${id}`, { method: 'DELETE' });
         const result = await response.json();
         if (result.success) {
-          toast({ title: 'Success', description: 'Subnet removed from Kea DHCP4 server.' });
+          if (result.persisted === false) {
+            toast({ title: '⚠️ Deleted but not saved', description: result.message || 'Subnet removed live but failed to write to config file. Change will be lost on reboot.', variant: 'destructive' });
+          } else {
+            toast({ title: 'Success', description: 'Subnet removed and persisted.' });
+          }
         } else {
           toast({ title: 'Error', description: result.error || 'Failed to delete subnet from Kea.', variant: 'destructive' });
         }
@@ -853,7 +865,11 @@ export default function DhcpPage() {
           });
           const result = await response.json();
           if (result.success) {
-            toast({ title: 'Success', description: 'Reservation updated in Kea DHCP4 server.' });
+            if (result.persisted === false) {
+              toast({ title: '⚠️ Applied but not saved', description: result.message || 'Reservation updated live but failed to persist. Changes will be lost on reboot.', variant: 'destructive' });
+            } else {
+              toast({ title: 'Success', description: 'Reservation updated and persisted.' });
+            }
           } else {
             toast({ title: 'Error', description: result.error || 'Failed to update reservation in Kea.', variant: 'destructive' });
           }
@@ -865,7 +881,11 @@ export default function DhcpPage() {
           });
           const result = await response.json();
           if (result.success) {
-            toast({ title: 'Success', description: 'Reservation added to Kea DHCP4 server.' });
+            if (result.persisted === false) {
+              toast({ title: '⚠️ Applied but not saved', description: result.message || 'Reservation added live but failed to persist. Changes will be lost on reboot.', variant: 'destructive' });
+            } else {
+              toast({ title: 'Success', description: 'Reservation added and persisted.' });
+            }
           } else {
             toast({ title: 'Error', description: result.error || 'Failed to add reservation to Kea.', variant: 'destructive' });
           }

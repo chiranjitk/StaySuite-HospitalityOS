@@ -1017,17 +1017,28 @@ app.post('/api/subnets', async (c) => {
 
     const setResp = await keaCommand({ command: 'config-set', arguments: { Dhcp4: config } });
     if (!setResp || setResp[0]?.result !== 0) {
-      return c.json({ success: false, error: setResp?.[0]?.text || 'Failed to set config' });
+      return c.json({ success: false, error: setResp?.[0]?.text || 'Failed to apply config to Kea' });
     }
 
-    // Persist to file
-    await keaCommand({ command: 'config-write' });
+    // Persist to file so changes survive reboot
+    const writeResp = await keaCommand({ command: 'config-write' });
+    if (!writeResp || writeResp[0]?.result !== 0) {
+      log.error(`config-write FAILED after subnet create: ${writeResp?.[0]?.text || 'no response'}`);
+      // Still return success (live config was applied) but warn the user
+      return c.json({
+        success: true,
+        data: { id: String(newId), ...body },
+        message: 'Subnet applied (live) but WARNING: failed to write to config file — changes may not survive reboot',
+        persisted: false,
+      });
+    }
     await updateCache();
 
     return c.json({
       success: true,
       data: { id: String(newId), ...body },
-      message: 'Subnet added to Kea DHCP4 configuration'
+      message: 'Subnet added and persisted to config file',
+      persisted: true,
     });
   } catch (error) {
     return c.json({ success: false, error: String(error) });
@@ -1066,12 +1077,16 @@ app.put('/api/subnets/:id', async (c) => {
 
     const setResp = await keaCommand({ command: 'config-set', arguments: { Dhcp4: config } });
     if (!setResp || setResp[0]?.result !== 0) {
-      return c.json({ success: false, error: setResp?.[0]?.text || 'Failed to set config' });
+      return c.json({ success: false, error: setResp?.[0]?.text || 'Failed to apply config to Kea' });
     }
 
-    await keaCommand({ command: 'config-write' });
+    const writeResp = await keaCommand({ command: 'config-write' });
+    if (!writeResp || writeResp[0]?.result !== 0) {
+      log.error(`config-write FAILED after subnet update: ${writeResp?.[0]?.text || 'no response'}`);
+      return c.json({ success: true, data: { id, ...body }, message: 'Subnet updated (live) but WARNING: failed to persist — may not survive reboot', persisted: false });
+    }
 
-    return c.json({ success: true, data: { id, ...body }, message: 'Subnet updated in Kea DHCP4 configuration' });
+    return c.json({ success: true, data: { id, ...body }, message: 'Subnet updated and persisted to config file', persisted: true });
   } catch (error) {
     return c.json({ success: false, error: String(error) });
   }
@@ -1092,13 +1107,17 @@ app.delete('/api/subnets/:id', async (c) => {
 
     const setResp = await keaCommand({ command: 'config-set', arguments: { Dhcp4: config } });
     if (!setResp || setResp[0]?.result !== 0) {
-      return c.json({ success: false, error: setResp?.[0]?.text || 'Failed to set config' });
+      return c.json({ success: false, error: setResp?.[0]?.text || 'Failed to apply config to Kea' });
     }
 
-    await keaCommand({ command: 'config-write' });
+    const writeResp = await keaCommand({ command: 'config-write' });
+    if (!writeResp || writeResp[0]?.result !== 0) {
+      log.error(`config-write FAILED after subnet delete: ${writeResp?.[0]?.text || 'no response'}`);
+      return c.json({ success: true, message: `Subnet ${id} removed (live) but WARNING: failed to persist — may not survive reboot`, persisted: false });
+    }
     await updateCache();
 
-    return c.json({ success: true, message: `Subnet ${id} removed from Kea DHCP4 configuration` });
+    return c.json({ success: true, message: `Subnet ${id} removed and persisted to config file`, persisted: true });
   } catch (error) {
     return c.json({ success: false, error: String(error) });
   }
@@ -1221,12 +1240,16 @@ app.post('/api/reservations', async (c) => {
 
     const setResp = await keaCommand({ command: 'config-set', arguments: { Dhcp4: config } });
     if (!setResp || setResp[0]?.result !== 0) {
-      return c.json({ success: false, error: setResp?.[0]?.text || 'Failed to set config' });
+      return c.json({ success: false, error: setResp?.[0]?.text || 'Failed to apply config to Kea' });
     }
 
-    await keaCommand({ command: 'config-write' });
+    const writeResp = await keaCommand({ command: 'config-write' });
+    if (!writeResp || writeResp[0]?.result !== 0) {
+      log.error(`config-write FAILED after reservation add: ${writeResp?.[0]?.text || 'no response'}`);
+      return c.json({ success: true, data: newRes, message: 'Reservation added (live) but WARNING: failed to persist — may not survive reboot', persisted: false });
+    }
 
-    return c.json({ success: true, data: newRes, message: 'Reservation added to Kea DHCP4 configuration' });
+    return c.json({ success: true, data: newRes, message: 'Reservation added and persisted to config file', persisted: true });
   } catch (error) {
     return c.json({ success: false, error: String(error) });
   }
@@ -1255,12 +1278,16 @@ app.delete('/api/reservations/:subnetId/:mac', async (c) => {
 
     const setResp = await keaCommand({ command: 'config-set', arguments: { Dhcp4: config } });
     if (!setResp || setResp[0]?.result !== 0) {
-      return c.json({ success: false, error: setResp?.[0]?.text || 'Failed to set config' });
+      return c.json({ success: false, error: setResp?.[0]?.text || 'Failed to apply config to Kea' });
     }
 
-    await keaCommand({ command: 'config-write' });
+    const writeResp = await keaCommand({ command: 'config-write' });
+    if (!writeResp || writeResp[0]?.result !== 0) {
+      log.error(`config-write FAILED after reservation delete: ${writeResp?.[0]?.text || 'no response'}`);
+      return c.json({ success: true, message: `Reservation for ${macClean} removed (live) but WARNING: failed to persist — may not survive reboot`, persisted: false });
+    }
 
-    return c.json({ success: true, message: `Reservation for ${macClean} removed from subnet ${subnetId}` });
+    return c.json({ success: true, message: `Reservation for ${macClean} removed and persisted`, persisted: true });
   } catch (error) {
     return c.json({ success: false, error: String(error) });
   }
@@ -1344,14 +1371,19 @@ app.post('/api/interfaces', async (c) => {
 
     const setResp = await keaCommand({ command: 'config-set', arguments: { Dhcp4: config } });
     if (!setResp || setResp[0]?.result !== 0) {
-      return c.json({ success: false, error: setResp?.[0]?.text || 'Failed to set config' });
+      return c.json({ success: false, error: setResp?.[0]?.text || 'Failed to apply config to Kea' });
     }
 
-    await keaCommand({ command: 'config-write' });
+    const writeResp = await keaCommand({ command: 'config-write' });
+    if (!writeResp || writeResp[0]?.result !== 0) {
+      log.error(`config-write FAILED after interface change: ${writeResp?.[0]?.text || 'no response'}`);
+      return c.json({ success: true, message: `Interfaces updated (live) but WARNING: failed to persist — may not survive reboot`, persisted: false, data: { interfaces } });
+    }
 
     return c.json({
       success: true,
-      message: `Kea DHCP4 interfaces updated to: ${interfaces.join(', ')}. Restart required for full effect.`,
+      message: `Kea DHCP4 interfaces updated to: ${interfaces.join(', ')}. Changes persisted.`,
+      persisted: true,
       data: { interfaces },
     });
   } catch (error) {
