@@ -1,53 +1,51 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { execSync } from 'child_process';
 import { db } from '@/lib/db';
-import { setRole, listRoles } from '@/lib/network/role';
-import { writeInterfaceRoleToOS, readInterfaceRolesFromOS } from '@/lib/interface-role-persist';
+import {
+  scanConnections,
+  setNetTypeOnInterface,
+  getNetTypeFromInterface,
+} from '@/lib/network/nmcli';
+import { NET_TYPES, NET_TYPE_LABELS, isValidNetType, netTypeToLabel } from '@/lib/network/nettypes';
+
+function safeExec(cmd: string, timeout = 10000): string {
+  try { return execSync(cmd, { encoding: 'utf-8', timeout }); } catch (e: any) { return e.stderr?.trim() || e.stdout?.trim() || ''; }
+}
+
+const TENANT_ID = 'tenant-1';
+const PROPERTY_ID = 'property-1';
+const IFACE_NAME_RE = /^[a-zA-Z0-9._-]+$/;
 
 /**
  * Bulk Interface Roles API
  *
- * GET  /api/network/os/interfaces/roles — read all roles (OS first, DB fills gaps)
- * PUT  /api/network/os/interfaces/roles — write multiple roles at once (OS + DB)
+ * GET  /api/network/os/interfaces/roles — read all roles (nmcli + DB)
+ * PUT  /api/network/os/interfaces/roles — write multiple roles at once (nmcli + DB)
  *
- * Uses shell script wrappers for OS commands and file persistence.
+ * Uses nmcli wrapper for Rocky Linux 10 NetworkManager.
+ * Roles are stored as nettype in [staysuite] section of .nmconnection files.
  */
-
-const VALID_ROLES = ['wan', 'lan', 'dmz', 'management', 'wifi', 'guest', 'iot', 'unused'];
-
-const IFACE_NAME_RE = /^[a-zA-Z0-9._-]+$/;
-
-// Hardcoded tenant/property — will be replaced with auth context later
-const TENANT_ID = 'tenant-1';
-const PROPERTY_ID = 'property-1';
 
 // ─── GET ────────────────────────────────────────────────────────────────────
 
 export async function GET() {
   try {
-    // Read from OS via shell script wrapper (with inline fallback)
-    let osRolesList: Array<{ interface: string; role: string; priority: number }> = [];
-    try {
-      const osResult = listRoles();
-      if (osResult.success && osResult.data) {
-        osRolesList = osResult.data.roles;
-      }
-    } catch (e: any) {
-      console.warn(`[Bulk Roles API] Shell script listRoles failed: ${e.message}, using inline fallback`);
-    }
+    // 1. Scan all .nmconnection files and group by nettype via nmcli wrapper
+    const connections = scanConnections();
+    const osRolesList: Array<{ interface: string; role: string; priority: number; nettype: number }> = [];
 
-    // Inline fallback: read roles directly from /etc/network/interfaces
-    if (osRolesList.length === 0) {
-      try {
-        const rolesMap = readInterfaceRolesFromOS();
-        for (const [ifaceName, info] of rolesMap) {
-          osRolesList.push({ interface: ifaceName, role: info.role, priority: info.priority });
-        }
-      } catch (e: any) {
-        console.warn(`[Bulk Roles API] Inline role read failed: ${e.message}`);
+    for (const conn of connections) {
+      if (isValidNetType(conn.nettype) && conn.nettype !== NET_TYPES.UNUSED) {
+        osRolesList.push({
+          interface: conn.name || conn.deviceName,
+          role: netTypeToLabel(conn.nettype).toLowerCase(),
+          priority: conn.priority,
+          nettype: conn.nettype,
+        });
       }
     }
 
-    // Also read from DB to merge
+    // 2. Also read from DB to merge
     const dbRoles = await db.interfaceRole.findMany({
       where: { propertyId: PROPERTY_ID },
     });
@@ -62,7 +60,7 @@ export async function GET() {
       source: 'os' | 'database';
     }>();
 
-    // DB entries first (lower priority) — include the interface name from the relation
+    // DB entries first (lower priority)
     for (const dbRole of dbRoles) {
       const iface = await db.networkInterface.findUnique({ where: { id: dbRole.interfaceId } });
       merged.set(iface?.name || dbRole.interfaceId, {
@@ -150,10 +148,6 @@ export async function PUT(request: NextRequest) {
         errors.push(`roles[${i}].role is required`);
         continue;
       }
-
-      if (!VALID_ROLES.includes(entry.role)) {
-        errors.push(`roles[${i}].role "${entry.role}" is invalid`);
-      }
     }
 
     if (errors.length > 0) {
@@ -176,17 +170,31 @@ export async function PUT(request: NextRequest) {
             ? entry.priority
             : 0;
 
-        // 1. Write to OS via shell script wrapper (with inline fallback)
+        // Convert role label to nettype number
+        let nettype = NET_TYPES.UNUSED;
+        const lowerRole = role.toLowerCase();
+        for (const [key, value] of Object.entries(NET_TYPES)) {
+          if (key.toLowerCase() === lowerRole) {
+            nettype = value;
+            break;
+          }
+        }
+
+        // 1. Set nettype via nmcli wrapper (with inline fallback)
         let osOk = false;
         try {
-          const osResult = setRole(ifaceName, role, priority);
-          if (osResult.success) osOk = true;
-        } catch { /* continue to fallback */ }
+          setNetTypeOnInterface(ifaceName, nettype, priority);
+          osOk = true;
+        } catch (e: any) {
+          console.warn(`[Bulk Roles API] nmcli setNetType failed for ${ifaceName}: ${e.message}, trying inline fallback`);
+        }
 
         if (!osOk) {
+          // Inline fallback: nmcli con reload + up
           try {
-            const fb = await writeInterfaceRoleToOS(ifaceName, role, priority);
-            if (fb.success) osOk = true;
+            safeExec(`sudo nmcli con reload`);
+            safeExec(`sudo nmcli con up "${ifaceName}" 2>/dev/null`);
+            osOk = true;
           } catch { /* DB-only mode */ }
         }
 
@@ -233,10 +241,7 @@ export async function PUT(request: NextRequest) {
           });
           dbSuccess = true;
         } catch (dbErr: any) {
-          console.error(
-            `[Bulk Roles API] DB upsert failed for ${ifaceName}:`,
-            dbErr
-          );
+          console.error(`[Bulk Roles API] DB upsert failed for ${ifaceName}:`, dbErr);
         }
 
         return {

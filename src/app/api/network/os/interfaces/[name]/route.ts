@@ -2,43 +2,93 @@ import { NextRequest, NextResponse } from 'next/server';
 import { execSync } from 'child_process';
 import { db } from '@/lib/db';
 import {
+  scanConnections,
   setStaticIP,
   setDHCP,
-  flushIPs,
-  setMTU,
+  disableInterface,
+  setMtu,
   interfaceUp,
   interfaceDown,
-} from '@/lib/network/ip-config';
-import { persistIPConfig } from '@/lib/network/persist';
+  NmConnectionInfo,
+} from '@/lib/network/nmcli';
 
 function safeExec(cmd: string, timeout = 10000): string {
-  try { return execSync(cmd, { encoding: 'utf-8', timeout }); } catch (e: any) { return e.stderr?.trim() || e.stdout?.trim() || ''; }
+  try {
+    return execSync(cmd, { encoding: 'utf-8', timeout });
+  } catch (e: any) {
+    return e.stderr?.trim() || e.stdout?.trim() || '';
+  }
 }
-
-/**
- * POST /api/network/os/interfaces/[name] - Interface actions:
- *   - mtu: Set MTU
- *   - action: up/down
- *   - ipAddress + netmask + gateway + mode (static/dhcp/disabled): Set IP configuration
- *
- * Tries shell script wrappers first, falls back to inline ip commands.
- */
 
 const TENANT_ID = 'tenant-1';
 const PROPERTY_ID = 'property-1';
+const VALID_NAME = /^[a-zA-Z0-9._-]+$/;
 
-function tryShellScript(fn: () => { success: boolean; data?: any; error?: string }, fallback: () => { success: boolean; data?: any; error?: string }): { success: boolean; data?: any; error?: string } {
+function tryNmcli(fn: () => void, fallback: () => { success: boolean; data?: any; error?: string }): { success: boolean; data?: any; error?: string } {
   try {
-    const result = fn();
-    if (result.success) return result;
-    console.warn(`[Network OS API] Script failed: ${result.error}, using inline fallback`);
-    return fallback();
+    fn();
+    return { success: true };
   } catch (e: any) {
-    console.warn(`[Network OS API] Script error: ${e.message}, using inline fallback`);
+    console.warn(`[Network OS API] nmcli failed: ${e.message}, using inline fallback`);
     return fallback();
   }
 }
 
+/**
+ * GET  /api/network/os/interfaces/[name] - Read single interface details from nmcli
+ * POST /api/network/os/interfaces/[name] - Update interface (IP config, MTU, up/down, description)
+ * DELETE /api/network/os/interfaces/[name] - Delete virtual interface ONLY (reject for physical)
+ *
+ * Uses nmcli wrapper for Rocky Linux 10 NetworkManager.
+ * Falls back to inline ip/nmcli commands on failure.
+ */
+
+// ────────────────────────────────────────────────────────────
+// GET — Read single interface details
+// ────────────────────────────────────────────────────────────
+export async function GET(
+  _request: NextRequest,
+  { params }: { params: Promise<{ name: string }> }
+) {
+  try {
+    const { name } = await params;
+
+    if (!VALID_NAME.test(name)) {
+      return NextResponse.json(
+        { success: false, error: { code: 'INVALID_NAME', message: 'Invalid interface name' } },
+        { status: 400 }
+      );
+    }
+
+    // 1. Scan all connections from nmcli
+    const connections = scanConnections();
+    const iface = connections.find(
+      c => c.name === name || c.deviceName === name
+    );
+
+    if (!iface) {
+      return NextResponse.json(
+        { success: false, error: { code: 'NOT_FOUND', message: `Interface "${name}" not found` } },
+        { status: 404 }
+      );
+    }
+
+    return NextResponse.json({
+      success: true,
+      data: iface,
+    });
+  } catch (error) {
+    console.error('[Network OS API] Interface GET error:', error);
+    return NextResponse.json(
+      { success: false, error: { code: 'OS_ERROR', message: 'Failed to read interface details' } },
+      { status: 500 }
+    );
+  }
+}
+
+// ────────────────────────────────────────────────────────────
+// POST — Update interface (IP config, MTU, up/down, description)
+// ────────────────────────────────────────────────────────────
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ name: string }> }
@@ -47,13 +97,21 @@ export async function POST(
     const { name } = await params;
     const body = await request.json();
 
+    if (!VALID_NAME.test(name)) {
+      return NextResponse.json(
+        { success: false, error: { code: 'INVALID_NAME', message: 'Invalid interface name' } },
+        { status: 400 }
+      );
+    }
+
     // ── MTU ──
     if (body.mtu !== undefined) {
       const mtu = parseInt(body.mtu, 10);
-      const result = tryShellScript(
-        () => setMTU(name, mtu),
+      const result = tryNmcli(
+        () => setMtu(name, mtu),
         () => {
-          safeExec(`sudo ip link set ${name} mtu ${mtu}`);
+          safeExec(`sudo nmcli con mod ${name} 802-3-ethernet.mtu ${mtu}`);
+          safeExec(`sudo nmcli con up ${name}`);
           return { success: true, data: { interface: name, state: 'mtu-updated' } };
         }
       );
@@ -74,9 +132,12 @@ export async function POST(
 
     // ── Up ──
     if (body.action === 'up') {
-      const result = tryShellScript(
+      const result = tryNmcli(
         () => interfaceUp(name),
-        () => { safeExec(`sudo ip link set ${name} up`); return { success: true, data: { interface: name, state: 'up' } }; }
+        () => {
+          safeExec(`sudo nmcli con up ${name}`);
+          return { success: true, data: { interface: name, state: 'up' } };
+        }
       );
 
       if (!result.success) {
@@ -95,9 +156,12 @@ export async function POST(
 
     // ── Down ──
     if (body.action === 'down') {
-      const result = tryShellScript(
+      const result = tryNmcli(
         () => interfaceDown(name),
-        () => { safeExec(`sudo ip link set ${name} down`); return { success: true, data: { interface: name, state: 'down' } }; }
+        () => {
+          safeExec(`sudo nmcli con down ${name}`);
+          return { success: true, data: { interface: name, state: 'down' } };
+        }
       );
 
       if (!result.success) {
@@ -161,33 +225,26 @@ export async function POST(
 
       const results: { step: string; success: boolean; message: string }[] = [];
 
-      // 1. Apply at OS level — shell script with inline fallback
+      // 1. Apply at OS level via nmcli wrapper
       if (mode === 'static' && body.ipAddress) {
         const netmask = body.netmask || '255.255.255.0';
-        // Convert netmask to CIDR
-        const maskParts = netmask.split('.').map(Number);
-        let cidr = 0;
-        for (const p of maskParts) cidr += (p >>> 0).toString(2).split('1').length - 1;
+        const dns = [];
+        if (body.dnsPrimary) dns.push(body.dnsPrimary);
+        if (body.dnsSecondary) dns.push(body.dnsSecondary);
 
-        const osResult = tryShellScript(
-          () => setStaticIP({
-            interface: name,
-            ipAddress: body.ipAddress,
-            netmask,
-            gateway: body.gateway,
-            dnsPrimary: body.dnsPrimary,
-            dnsSecondary: body.dnsSecondary,
-          }),
+        const osResult = tryNmcli(
+          () => setStaticIP(name, body.ipAddress, netmask, body.gateway, dns.length > 0 ? dns : undefined),
           () => {
-            // Inline fallback: flush, add addr, add gateway
-            safeExec(`sudo ip addr flush dev ${name} 2>/dev/null`);
-            const addrOutput = safeExec(`sudo ip addr add ${body.ipAddress}/${cidr} dev ${name} 2>&1`);
-            if (addrOutput.includes('File exists')) {
-              return { success: false, error: `IP ${body.ipAddress} already assigned to ${name}` };
-            }
-            if (body.gateway) {
-              safeExec(`sudo ip route add default via ${body.gateway} dev ${name} 2>/dev/null`);
-            }
+            // Inline fallback: use nmcli directly
+            const maskParts = netmask.split('.').map(Number);
+            let cidr = 0;
+            for (const p of maskParts) cidr += (p >>> 0).toString(2).split('1').length - 1;
+
+            let cmd = `sudo nmcli con mod ${name} ipv4.method manual ipv4.addresses ${body.ipAddress}/${cidr}`;
+            if (body.gateway) cmd += ` ipv4.gateway ${body.gateway}`;
+            if (dns.length > 0) cmd += ` ipv4.dns ${dns.join(',')}`;
+            safeExec(cmd);
+            safeExec(`sudo nmcli con up ${name}`);
             return { success: true, data: { interface: name, mode: 'static', ipAddress: body.ipAddress, cidr } };
           }
         );
@@ -198,13 +255,13 @@ export async function POST(
             { status: 500 }
           );
         }
-        results.push({ step: 'set-static', success: true, message: 'Static IP applied' });
+        results.push({ step: 'set-static', success: true, message: 'Static IP applied via nmcli' });
       } else if (mode === 'dhcp') {
-        const osResult = tryShellScript(
+        const osResult = tryNmcli(
           () => setDHCP(name),
           () => {
-            safeExec(`sudo ip addr flush dev ${name} 2>/dev/null`);
-            safeExec(`sudo dhclient -1 ${name} 2>/dev/null || sudo systemctl restart networking 2>/dev/null`);
+            safeExec(`sudo nmcli con mod ${name} ipv4.method auto`);
+            safeExec(`sudo nmcli con up ${name}`);
             return { success: true, data: { interface: name, mode: 'dhcp' } };
           }
         );
@@ -215,51 +272,27 @@ export async function POST(
             { status: 500 }
           );
         }
-        results.push({ step: 'dhcp', success: true, message: 'DHCP enabled' });
+        results.push({ step: 'dhcp', success: true, message: 'DHCP enabled via nmcli' });
       } else if (mode === 'disabled') {
-        const osResult = tryShellScript(
-          () => flushIPs(name),
+        const osResult = tryNmcli(
+          () => disableInterface(name),
           () => {
-            safeExec(`sudo ip addr flush dev ${name} 2>/dev/null`);
-            safeExec(`sudo ip link set ${name} down 2>/dev/null`);
+            safeExec(`sudo nmcli con mod ${name} ipv4.method disabled`);
+            safeExec(`sudo nmcli con down ${name}`);
             return { success: true, data: { interface: name, mode: 'disabled' } };
           }
         );
 
         if (!osResult.success) {
           return NextResponse.json(
-            { success: false, error: { code: 'FLUSH_FAILED', message: osResult.error || 'Failed to flush IPs' } },
+            { success: false, error: { code: 'FLUSH_FAILED', message: osResult.error || 'Failed to disable interface' } },
             { status: 500 }
           );
         }
-        results.push({ step: 'flush', success: true, message: 'IPs flushed' });
+        results.push({ step: 'disable', success: true, message: 'Interface disabled via nmcli' });
       }
 
-      // 2. Persist to /etc/network/interfaces via shell script (non-blocking)
-      try {
-        const persistResult = persistIPConfig({
-          interface: name,
-          mode,
-          ipAddress: body.ipAddress,
-          netmask: body.netmask,
-          gateway: body.gateway,
-          dnsPrimary: body.dnsPrimary,
-          dnsSecondary: body.dnsSecondary,
-        });
-        if (!persistResult.success) {
-          console.warn(`[Network OS API] File persist failed for ${name}: ${persistResult.error} — continuing with DB only`);
-        }
-        results.push({
-          step: 'file-persist',
-          success: persistResult.success,
-          message: persistResult.success ? 'Config persisted to interfaces file' : (persistResult.error || 'File persist failed'),
-        });
-      } catch (e) {
-        console.warn(`[Network OS API] File persist error for ${name}:`, e);
-        results.push({ step: 'file-persist', success: false, message: 'File persist skipped (script not available)' });
-      }
-
-      // 3. Store in database (InterfaceConfig)
+      // 2. Store in database (InterfaceConfig)
       try {
         let dbIface = await db.networkInterface.findUnique({
           where: { propertyId_name: { propertyId: PROPERTY_ID, name } },
@@ -324,6 +357,66 @@ export async function POST(
     console.error('[Network OS API] Interface action error:', error);
     return NextResponse.json(
       { success: false, error: { code: 'OS_ERROR', message: 'Failed to modify interface' } },
+      { status: 500 }
+    );
+  }
+}
+
+// ────────────────────────────────────────────────────────────
+// DELETE — Delete virtual interface ONLY (reject for physical)
+// ────────────────────────────────────────────────────────────
+export async function DELETE(
+  _request: NextRequest,
+  { params }: { params: Promise<{ name: string }> }
+) {
+  try {
+    const { name } = await params;
+
+    if (!VALID_NAME.test(name)) {
+      return NextResponse.json(
+        { success: false, error: { code: 'INVALID_NAME', message: 'Invalid interface name' } },
+        { status: 400 }
+      );
+    }
+
+    // Check if interface is physical — physical interfaces cannot be deleted
+    const connections = scanConnections();
+    const iface = connections.find(
+      c => c.name === name || c.deviceName === name
+    );
+
+    if (!iface) {
+      return NextResponse.json(
+        { success: false, error: { code: 'NOT_FOUND', message: `Interface "${name}" not found` } },
+        { status: 404 }
+      );
+    }
+
+    if (iface.isPhysical) {
+      return NextResponse.json(
+        { success: false, error: { code: 'PHYSICAL_INTERFACE', message: `Cannot delete physical interface "${name}". Only virtual interfaces (VLAN, bridge, bond) can be deleted.` } },
+        { status: 403 }
+      );
+    }
+
+    // Delete via nmcli
+    try {
+      safeExec(`sudo nmcli con down ${name} 2>/dev/null || true`);
+      safeExec(`sudo nmcli con delete ${name}`);
+    } catch (e: any) {
+      console.warn(`[Network OS API] nmcli delete failed for ${name}: ${e.message}, trying inline fallback`);
+      safeExec(`sudo nmcli con delete "${name}" 2>/dev/null`);
+    }
+
+    return NextResponse.json({
+      success: true,
+      message: `Virtual interface "${name}" deleted successfully`,
+      data: { name, type: iface.type },
+    });
+  } catch (error) {
+    console.error('[Network OS API] Interface delete error:', error);
+    return NextResponse.json(
+      { success: false, error: { code: 'OS_ERROR', message: 'Failed to delete interface' } },
       { status: 500 }
     );
   }

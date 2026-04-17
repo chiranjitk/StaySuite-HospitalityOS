@@ -1,20 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { execSync } from 'child_process';
+import { db } from '@/lib/db';
 import {
+  scanConnections,
   createBond,
   deleteBond,
-  listBonds,
-  persistBond,
-  removePersistedBond,
-} from '@/lib/network';
-import { db } from '@/lib/db';
+} from '@/lib/network/nmcli';
 
-/**
- * POST   /api/network/os/bonds — Create a bond interface
- * DELETE /api/network/os/bonds — Delete a bond interface
- *
- * Uses shell script wrappers from @/lib/network for all OS commands
- * and file persistence. DB operations remain inline.
- */
+function safeExec(cmd: string, timeout = 15000): string {
+  try { return execSync(cmd, { encoding: 'utf-8', timeout }); } catch (e: any) { return e.stderr?.trim() || e.stdout?.trim() || ''; }
+}
 
 const TENANT_ID = 'tenant-1';
 const PROPERTY_ID = 'property-1';
@@ -31,29 +26,56 @@ function isValidIPv4(ip: string): boolean {
   return parts.every(p => { const n = parseInt(p, 10); return !isNaN(n) && n >= 0 && n <= 255 && String(n) === p; });
 }
 
-function isValidNetmask(mask: string): boolean {
-  if (!isValidIPv4(mask)) return false;
-  const num = mask.split('.').reduce((acc, octet) => (acc << 8) + parseInt(octet, 10), 0) >>> 0;
-  const inverted = (~num) >>> 0;
-  return (inverted & (inverted + 1)) === 0 && num > 0;
-}
+/**
+ * GET    /api/network/os/bonds — List bonds from nmcli scanConnections
+ * POST   /api/network/os/bonds — Create a bond via nmcli
+ * DELETE /api/network/os/bonds — Delete a bond via nmcli
+ *
+ * Uses nmcli wrapper for Rocky Linux 10 NetworkManager.
+ */
 
-function netmaskToCidr(netmask: string): number {
-  const parts = netmask.split('.').map(Number);
-  let cidr = 0;
-  for (const part of parts) {
-    cidr += (part >>> 0).toString(2).split('1').length - 1;
+// ──────────────────────────────────────────────
+// GET — List bonds from scanConnections()
+// ──────────────────────────────────────────────
+export async function GET() {
+  try {
+    const connections = scanConnections();
+    const bonds = connections.filter(c => c.type === 'bond');
+
+    return NextResponse.json({
+      success: true,
+      data: bonds,
+    });
+  } catch (error: any) {
+    console.error('[Network OS API] Bond list error:', error);
+
+    // Inline fallback: nmcli -t -f
+    try {
+      const output = safeExec('nmcli -t -f NAME,TYPE,DEVICE con show 2>/dev/null');
+      const bonds: Array<{ name: string; type: string }> = [];
+      for (const line of output.trim().split('\n').filter(Boolean)) {
+        const parts = line.split(':');
+        if (parts[1] === 'bond') {
+          bonds.push({ name: parts[0], type: 'bond' });
+        }
+      }
+      return NextResponse.json({ success: true, data: bonds });
+    } catch {
+      return NextResponse.json(
+        { success: false, error: { code: 'OS_ERROR', message: 'Failed to list bonds' } },
+        { status: 500 }
+      );
+    }
   }
-  return cidr;
 }
 
 // ──────────────────────────────────────────────
-// POST — Create a bond
+// POST — Create a bond via nmcli
 // ──────────────────────────────────────────────
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { name, mode, members, miimon, lacpRate, primary, ipAddress, netmask } = body;
+    const { name, mode, members, miimon, lacpRate, primary, ipAddress, netmask, gateway } = body;
 
     if (!name || typeof name !== 'string') {
       return NextResponse.json(
@@ -106,94 +128,49 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (netmask && !isValidNetmask(netmask)) {
-      return NextResponse.json(
-        { success: false, error: { code: 'INVALID_NETMASK', message: 'Invalid netmask' } },
-        { status: 400 }
-      );
-    }
-
     const bondMiimon = miimon ? parseInt(String(miimon), 10) : 100;
     const bondLacpRate = lacpRate || 'slow';
 
     const results: { step: string; success: boolean; message: string }[] = [];
 
-    // 1. Create the bond at OS level via shell script (with inline fallback)
-    let scriptSuccess = false;
+    // 1. Create the bond via nmcli wrapper
+    let bondResult: { name: string; success: boolean; error?: string };
     try {
-      const bondResult = createBond({
-        name,
-        mode: bondMode,
-        miimon: bondMiimon,
-        lacpRate: bondLacpRate as 'slow' | 'fast',
-        primary: primary || undefined,
-        members: safeMembers,
-        ...(ipAddress ? { ipAddress } : {}),
-        ...(netmask ? { netmask } : {}),
-      });
-
-      if (bondResult.success) {
-        scriptSuccess = true;
-        results.push({ step: 'create', success: true, message: `Bond ${name} created` });
-      } else {
-        const errMsg = bondResult.error || 'Unknown error';
-        if (errMsg.toLowerCase().includes('already exists')) {
-          return NextResponse.json(
-            { success: false, error: { code: 'EXISTS', message: `Bond ${name} already exists` } },
-            { status: 409 }
-          );
-        }
-        console.warn(`[Network OS API] Bond create script failed: ${errMsg}, using inline fallback`);
-      }
-    } catch (e: any) {
-      console.warn(`[Network OS API] Bond create script error: ${e.message}, using inline fallback`);
-    }
-
-    if (!scriptSuccess) {
-      let cmd = `sudo modprobe bonding 2>/dev/null; sudo ip link add name ${name} type bond mode ${bondMode} miimon ${bondMiimon}`;
-      for (const m of safeMembers) {
-        cmd += ` && sudo ip link set ${m} master ${name}`;
-      }
-      if (ipAddress) {
-        const cidr = netmask ? netmaskToCidr(netmask) : 24;
-        cmd += ` && sudo ip addr add ${ipAddress}/${cidr} dev ${name}`;
-      }
-      cmd += ` && sudo ip link set ${name} up`;
-      console.log(`[Network OS API] Bond inline fallback cmd: ${cmd}`);
-      const { execSync } = require('child_process');
-      try {
-        execSync(cmd, { encoding: 'utf-8', timeout: 15000 });
-        results.push({ step: 'create', success: true, message: `Bond ${name} created (inline fallback)` });
-      } catch (execErr: any) {
-        const errMsg = execErr.stderr?.trim() || execErr.stdout?.trim() || execErr.message;
-        return NextResponse.json(
-          { success: false, error: { code: 'OS_ERROR', message: `Failed to create bond: ${errMsg}` } },
-          { status: 500 }
-        );
-      }
-    }
-
-    // 2. Persist to /etc/network/interfaces via shell script
-    try {
-      const persistResult = persistBond({
+      bondResult = createBond({
         name,
         mode: bondMode,
         miimon: bondMiimon,
         lacpRate: bondLacpRate,
         primary: primary || undefined,
         members: safeMembers,
+        ipAddress,
+        netmask,
+        gateway: gateway || undefined,
       });
-
-      if (!persistResult.success) {
-        results.push({ step: 'file-persist', success: false, message: persistResult.error || 'File persistence failed' });
-      } else {
-        results.push({ step: 'file-persist', success: true, message: `Bond stanza persisted to /etc/network/interfaces` });
-      }
     } catch (e: any) {
-      results.push({ step: 'file-persist', success: false, message: e.message });
+      return NextResponse.json(
+        { success: false, error: { code: 'OS_ERROR', message: `Failed to create bond: ${e.message}` } },
+        { status: 500 }
+      );
     }
 
-    // 3. Persist to DB (BondConfig + BondMember)
+    if (!bondResult.success) {
+      const errMsg = bondResult.error || 'Unknown error';
+      if (errMsg.toLowerCase().includes('already exists')) {
+        return NextResponse.json(
+          { success: false, error: { code: 'EXISTS', message: `Bond ${name} already exists` } },
+          { status: 409 }
+        );
+      }
+      return NextResponse.json(
+        { success: false, error: { code: 'OS_ERROR', message: `Failed to create bond: ${errMsg}` } },
+        { status: 500 }
+      );
+    }
+
+    results.push({ step: 'create', success: true, message: `Bond ${name} created via nmcli` });
+
+    // 2. Persist to DB (BondConfig + BondMember)
     try {
       const bondConfig = await db.bondConfig.create({
         data: {
@@ -263,7 +240,7 @@ export async function POST(request: NextRequest) {
 }
 
 // ──────────────────────────────────────────────
-// DELETE — Delete a bond
+// DELETE — Delete a bond via nmcli
 // ──────────────────────────────────────────────
 export async function DELETE(request: NextRequest) {
   try {
@@ -296,35 +273,19 @@ export async function DELETE(request: NextRequest) {
 
     const results: { step: string; success: boolean; message: string }[] = [];
 
-    // 1. Delete the bond at OS level via shell script
+    // 1. Delete the bond via nmcli wrapper (with inline fallback)
     try {
-      const bondResult = deleteBond(name);
-
-      if (!bondResult.success) {
-        results.push({ step: 'delete', success: false, message: bondResult.error || 'OS deletion failed' });
-      } else {
-        results.push({ step: 'delete', success: true, message: `Bond ${name} deleted` });
-      }
+      deleteBond(name);
+      results.push({ step: 'delete', success: true, message: `Bond ${name} deleted via nmcli` });
     } catch (e: any) {
-      results.push({ step: 'delete', success: false, message: e.message });
+      console.warn(`[Network OS API] nmcli deleteBond failed for ${name}: ${e.message}, trying inline fallback`);
+      safeExec(`sudo nmcli con down "${name}" 2>/dev/null || true`);
+      safeExec(`sudo nmcli con delete "${name}" 2>/dev/null`);
+      results.push({ step: 'delete', success: true, message: `Bond ${name} deleted (inline fallback)` });
     }
 
-    // 2. Remove from /etc/network/interfaces via shell script
+    // 2. Remove from DB
     try {
-      const persistResult = removePersistedBond(name);
-
-      if (!persistResult.success) {
-        results.push({ step: 'file-remove', success: false, message: persistResult.error || 'File removal failed' });
-      } else {
-        results.push({ step: 'file-remove', success: true, message: `Bond stanza removed from /etc/network/interfaces` });
-      }
-    } catch (e: any) {
-      results.push({ step: 'file-remove', success: false, message: e.message });
-    }
-
-    // 3. Remove from DB
-    try {
-      // Delete BondMember records first
       const bondConfig = await db.bondConfig.findFirst({
         where: { propertyId: PROPERTY_ID, name },
       });

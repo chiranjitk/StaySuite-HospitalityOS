@@ -1,25 +1,31 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { execSync } from 'child_process';
 import { db } from '@/lib/db';
-import { setRole, removeRole, listRoles } from '@/lib/network/role';
-import { writeInterfaceRoleToOS, removeInterfaceRoleFromOS, readInterfaceRolesFromOS } from '@/lib/interface-role-persist';
+import {
+  scanConnections,
+  setNetTypeOnInterface,
+  getNetTypeFromInterface,
+} from '@/lib/network/nmcli';
+import { NET_TYPES, isValidNetType, netTypeToLabel } from '@/lib/network/nettypes';
+
+function safeExec(cmd: string, timeout = 10000): string {
+  try { return execSync(cmd, { encoding: 'utf-8', timeout }); } catch (e: any) { return e.stderr?.trim() || e.stdout?.trim() || ''; }
+}
+
+const TENANT_ID = 'tenant-1';
+const PROPERTY_ID = 'property-1';
+const IFACE_NAME_RE = /^[a-zA-Z0-9._-]+$/;
 
 /**
  * Interface Role API
  *
- * GET    /api/network/os/interfaces/[name]/role  — read role (OS first, DB fallback)
- * PUT    /api/network/os/interfaces/[name]/role  — set role (OS + DB)
- * DELETE /api/network/os/interfaces/[name]/role  — remove role (OS + DB)
+ * GET    /api/network/os/interfaces/[name]/role  — read nettype from .nmconnection file
+ * PUT    /api/network/os/interfaces/[name]/role  — set nettype via nmcli
+ * DELETE /api/network/os/interfaces/[name]/role  — remove nettype (set to UNUSED)
  *
- * Uses shell script wrappers for OS commands and file persistence.
+ * Uses nmcli wrapper for Rocky Linux 10 NetworkManager.
+ * Roles are stored as nettype in [staysuite] section of .nmconnection files.
  */
-
-const VALID_ROLES = ['wan', 'lan', 'dmz', 'management', 'wifi', 'guest', 'iot', 'unused'];
-
-const IFACE_NAME_RE = /^[a-zA-Z0-9._-]+$/;
-
-// Hardcoded tenant/property — will be replaced with auth context later
-const TENANT_ID = 'tenant-1';
-const PROPERTY_ID = 'property-1';
 
 // ─── GET ────────────────────────────────────────────────────────────────────
 
@@ -37,30 +43,35 @@ export async function GET(
       );
     }
 
-    // 1. Try OS-persisted roles first via shell script
+    // 1. Get nettype from .nmconnection file via nmcli wrapper
     let osRole = null;
     try {
-      const osResult = listRoles();
-      if (osResult.success && osResult.data) {
-        const found = osResult.data.roles.find(r => r.interface === name);
-        if (found) {
-          osRole = found;
-        }
+      const connections = scanConnections();
+      const conn = connections.find(c => c.name === name || c.deviceName === name);
+      if (conn && isValidNetType(conn.nettype)) {
+        osRole = {
+          role: netTypeToLabel(conn.nettype).toLowerCase(),
+          priority: conn.priority,
+          nettype: conn.nettype,
+        };
       }
     } catch (e: any) {
-      console.warn(`[Interface Role API] Shell script listRoles failed for ${name}: ${e.message}, using inline fallback`);
+      console.warn(`[Interface Role API] nmcli scan failed for ${name}: ${e.message}, using inline fallback`);
     }
 
-    // 1b. Inline fallback: read roles directly from /etc/network/interfaces
+    // Inline fallback: getNetTypeFromInterface
     if (!osRole) {
       try {
-        const rolesMap = readInterfaceRolesFromOS();
-        const persisted = rolesMap.get(name);
-        if (persisted) {
-          osRole = { interface: name, role: persisted.role, priority: persisted.priority };
+        const nettype = getNetTypeFromInterface(name);
+        if (isValidNetType(nettype)) {
+          osRole = {
+            role: netTypeToLabel(nettype).toLowerCase(),
+            priority: 0,
+            nettype,
+          };
         }
       } catch (e: any) {
-        console.warn(`[Interface Role API] Inline role read failed for ${name}: ${e.message}`);
+        console.warn(`[Interface Role API] getNetTypeFromInterface failed for ${name}: ${e.message}`);
       }
     }
 
@@ -76,7 +87,7 @@ export async function GET(
       });
     }
 
-    // 2. Fallback to database — need to find NetworkInterface by name first
+    // 2. Fallback to database
     const dbIface = await db.networkInterface.findUnique({
       where: { propertyId_name: { propertyId: PROPERTY_ID, name } },
     });
@@ -150,13 +161,23 @@ export async function PUT(
       );
     }
 
-    if (!VALID_ROLES.includes(role)) {
+    // Convert role label to nettype number
+    let nettype = NET_TYPES.UNUSED;
+    const lowerRole = role.toLowerCase();
+    for (const [key, value] of Object.entries(NET_TYPES)) {
+      if (key.toLowerCase() === lowerRole) {
+        nettype = value;
+        break;
+      }
+    }
+
+    if (!isValidNetType(nettype)) {
       return NextResponse.json(
         {
           success: false,
           error: {
             code: 'INVALID_ROLE',
-            message: `Invalid role "${role}". Must be one of: ${VALID_ROLES.join(', ')}`,
+            message: `Invalid role "${role}". Must be one of: ${Object.keys(NET_TYPES).join(', ')}`,
           },
         },
         { status: 400 }
@@ -166,37 +187,28 @@ export async function PUT(
     const safePriority = typeof priority === 'number' && priority >= 0 ? priority : 0;
     const safeIsPrimary = typeof isPrimary === 'boolean' ? isPrimary : false;
 
-    // 1. Set role via shell script wrapper (with inline fallback)
+    // 1. Set nettype via nmcli wrapper (with inline fallback)
     let osSuccess = false;
     try {
-      const osResult = setRole(name, role, safePriority);
-      if (osResult.success) {
-        osSuccess = true;
-      } else {
-        console.warn(`[Interface Role API] Shell script role set failed for ${name}: ${osResult.error}, using inline fallback`);
-      }
+      setNetTypeOnInterface(name, nettype, safePriority);
+      osSuccess = true;
     } catch (e: any) {
-      console.warn(`[Interface Role API] Shell script role set error for ${name}: ${e.message}, using inline fallback`);
+      console.warn(`[Interface Role API] nmcli setNetType failed for ${name}: ${e.message}, trying inline fallback`);
     }
 
-    // 1b. Inline fallback: write role tags directly to /etc/network/interfaces
+    // Inline fallback: nmcli con reload + up
     if (!osSuccess) {
       try {
-        const fbResult = await writeInterfaceRoleToOS(name, role, safePriority);
-        if (fbResult.success) {
-          osSuccess = true;
-          console.log(`[Interface Role API] Inline fallback role set succeeded for ${name}`);
-        } else {
-          console.warn(`[Interface Role API] Inline fallback role set also failed for ${name}: ${fbResult.message}`);
-        }
+        safeExec(`sudo nmcli con reload`);
+        safeExec(`sudo nmcli con up "${name}" 2>/dev/null`);
+        osSuccess = true;
       } catch (e: any) {
-        console.warn(`[Interface Role API] Inline fallback role set error for ${name}: ${e.message}`);
+        console.warn(`[Interface Role API] Inline fallback role set failed for ${name}: ${e.message}`);
       }
     }
 
-    // 2. Upsert to database — ensure NetworkInterface record exists first
+    // 2. Upsert to database
     try {
-      // Find or create the NetworkInterface record so FK constraint is satisfied
       let dbIface = await db.networkInterface.findUnique({
         where: { propertyId_name: { propertyId: PROPERTY_ID, name } },
       });
@@ -206,7 +218,7 @@ export async function PUT(
             tenantId: TENANT_ID,
             propertyId: PROPERTY_ID,
             name,
-            type: 'ethernet', // default; will be corrected when OS data is synced
+            type: 'ethernet',
             status: 'up',
           },
         });
@@ -236,14 +248,10 @@ export async function PUT(
         },
       });
     } catch (dbErr: any) {
-      console.error(
-        `[Interface Role API] DB upsert failed for ${name}:`,
-        dbErr
-      );
-      // OS write succeeded but DB failed — report partial success
+      console.error(`[Interface Role API] DB upsert failed for ${name}:`, dbErr);
       return NextResponse.json({
         success: true,
-        warning: 'Role persisted to OS file but database update failed. Role may reset on DB migration.',
+        warning: 'Role persisted to OS but database update failed.',
         data: {
           interfaceName: name,
           role,
@@ -262,7 +270,7 @@ export async function PUT(
         role,
         priority: safePriority,
         isPrimary: safeIsPrimary,
-        persistedToOS: osResult.success,
+        persistedToOS: osSuccess,
         persistedToDB: true,
       },
     });
@@ -291,31 +299,23 @@ export async function DELETE(
       );
     }
 
-    // 1. Remove from OS via shell script wrapper (with inline fallback)
+    // 1. Remove nettype by setting to UNUSED via nmcli wrapper (with inline fallback)
     let osSuccess = false;
     try {
-      const osResult = removeRole(name);
-      if (osResult.success) {
-        osSuccess = true;
-      } else {
-        console.warn(`[Interface Role API] Shell script role remove failed for ${name}: ${osResult.error}, using inline fallback`);
-      }
+      setNetTypeOnInterface(name, NET_TYPES.UNUSED, 0);
+      osSuccess = true;
     } catch (e: any) {
-      console.warn(`[Interface Role API] Shell script role remove error for ${name}: ${e.message}, using inline fallback`);
+      console.warn(`[Interface Role API] nmcli setNetType UNUSED failed for ${name}: ${e.message}, trying inline fallback`);
     }
 
-    // 1b. Inline fallback: remove role tags directly from /etc/network/interfaces
+    // Inline fallback: nmcli con reload + up
     if (!osSuccess) {
       try {
-        const fbResult = await removeInterfaceRoleFromOS(name);
-        if (fbResult.success) {
-          osSuccess = true;
-          console.log(`[Interface Role API] Inline fallback role remove succeeded for ${name}`);
-        } else {
-          console.warn(`[Interface Role API] Inline fallback role remove also failed for ${name}: ${fbResult.message}`);
-        }
+        safeExec(`sudo nmcli con reload`);
+        safeExec(`sudo nmcli con up "${name}" 2>/dev/null`);
+        osSuccess = true;
       } catch (e: any) {
-        console.warn(`[Interface Role API] Inline fallback role remove error for ${name}: ${e.message}`);
+        console.warn(`[Interface Role API] Inline fallback role remove failed for ${name}: ${e.message}`);
       }
     }
 
@@ -340,10 +340,7 @@ export async function DELETE(
         }
       }
     } catch (dbErr: any) {
-      console.error(
-        `[Interface Role API] DB delete failed for ${name}:`,
-        dbErr
-      );
+      console.error(`[Interface Role API] DB delete failed for ${name}:`, dbErr);
     }
 
     return NextResponse.json({

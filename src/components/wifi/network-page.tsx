@@ -96,6 +96,12 @@ interface NetworkInterface {
   txBytes: number;
   description: string;
   allIps: string[];  // All IPs including secondaries, e.g. ["192.168.1.1", "192.168.1.2"]
+  nettype?: number;  // 0=LAN, 1=WAN, 2=VLAN, 3=Bridge, 4=Bond, 5=Management, 6=Guest, 7=IoT, 8=Unused
+  nettypeLabel?: string; // 'WAN', 'LAN', etc.
+  isPhysical?: boolean;
+  secondaryIps?: string[];
+  ipv4Gateway?: string;
+  ipv4Cidr?: number;
   _osData?: any;
 }
 
@@ -308,6 +314,20 @@ const roleBadgeColor: Record<string, string> = {
   unused: 'bg-muted text-muted-foreground border-muted-foreground/20',
 };
 
+// Nettype label to badge color mapping (Rocky 10 nmcli architecture)
+const nettypeBadgeColor: Record<string, string> = {
+  'WAN': 'bg-gradient-to-r from-orange-500/20 to-amber-500/20 text-orange-700 dark:text-orange-400 border-orange-500/30',
+  'LAN': 'bg-gradient-to-r from-emerald-500/20 to-green-500/20 text-emerald-700 dark:text-emerald-400 border-emerald-500/30',
+  'VLAN': 'bg-gradient-to-r from-purple-500/20 to-violet-500/20 text-purple-700 dark:text-purple-400 border-purple-500/30',
+  'Bridge': 'bg-gradient-to-r from-cyan-500/20 to-sky-500/20 text-cyan-700 dark:text-cyan-400 border-cyan-500/30',
+  'Bond': 'bg-gradient-to-r from-pink-500/20 to-rose-500/20 text-pink-700 dark:text-pink-400 border-pink-500/30',
+  'Management': 'bg-gradient-to-r from-slate-500/20 to-gray-500/20 text-slate-700 dark:text-slate-400 border-slate-500/30',
+  'Guest': 'bg-gradient-to-r from-amber-500/20 to-yellow-500/20 text-amber-700 dark:text-amber-400 border-amber-500/30',
+  'IoT': 'bg-gradient-to-r from-teal-500/20 to-cyan-500/20 text-teal-700 dark:text-teal-400 border-teal-500/30',
+  'Unused': 'bg-muted text-muted-foreground border-muted-foreground/20',
+  'Unknown': 'bg-muted text-muted-foreground border-muted-foreground/20',
+};
+
 const protocolBadgeColor: Record<string, string> = {
   'TCP': 'bg-teal-500/15 text-teal-700 dark:text-teal-400',
   'UDP': 'bg-amber-500/15 text-amber-700 dark:text-amber-400',
@@ -481,14 +501,14 @@ export default function NetworkPage() {
   const fetchInterfaces = useCallback(async () => {
     setLoadingInterfaces(true);
     try {
-      // Try real OS data first via direct OS API (no kea-service dependency)
-      const osRes = await fetch('/api/network/os?section=interfaces');
+      // New Rocky 10 nmcli scan architecture: scan .nmconnection files via single endpoint
+      const osRes = await fetch('/api/network/os?section=all');
       const osResult = await osRes.json();
-      if (osResult.success && Array.isArray(osResult.data) && osResult.data.length > 0) {
-        // Filter out virtual/system interfaces — only keep physical, VLAN, bridge, bond, wireless
+      if (osResult.success && osResult.data?.interfaces && Array.isArray(osResult.data.interfaces) && osResult.data.interfaces.length > 0) {
+        // Filter out virtual/system interfaces
         const excludedPrefixes = ['lo', 'dummy', 'ifb', 'imq', 'sit', 'tun', 'tap', 'veth', 'virbr', 'nlmon', 'erspan', 'gre', 'gretap', 'ip6gre', 'ip6tnl', 'ipip', 'teql', 'bonding_masters'];
-        const filteredOS = osResult.data.filter((iface: any) => {
-          const name = iface.name as string;
+        const filteredOS = osResult.data.interfaces.filter((iface: any) => {
+          const name = iface.deviceName || iface.name;
           return !excludedPrefixes.some(p => name === p || name.startsWith(p));
         });
 
@@ -504,92 +524,85 @@ export default function NetworkPage() {
               }
             }
           }
-        } catch { /* ignore DB fetch errors — use OS description as fallback */ }
+        } catch { /* ignore DB fetch errors */ }
+
+        // CIDR to netmask conversion helper
+        const cidrToNetmask = (cidr: number): string => {
+          if (isNaN(cidr) || cidr < 0 || cidr > 32) return '—';
+          const mask = cidr === 0 ? 0 : (~0 << (32 - cidr)) >>> 0;
+          return `${(mask >>> 24) & 255}.${(mask >>> 16) & 255}.${(mask >>> 8) & 255}.${mask & 255}`;
+        };
 
         const mapped: NetworkInterface[] = filteredOS.map((iface: any) => {
           const typeMap: Record<string, NetworkInterface['type']> = {
-            ethernet: 'ethernet', wifi: 'wireless', loopback: 'ethernet',
+            '802-3-ethernet': 'ethernet', ethernet: 'ethernet', wifi: 'wireless', loopback: 'ethernet',
             bridge: 'bridge', bond: 'bond', vlan: 'vlan',
             virtual: 'ethernet', tunnel: 'ethernet', unknown: 'ethernet',
           };
           return {
-            id: iface.name,
-            name: iface.name,
+            id: iface.name || iface.deviceName,
+            name: iface.deviceName || iface.name,
             type: typeMap[iface.type] || 'ethernet',
-            status: iface.state === 'up' || iface.state === 'unknown' ? 'up' : 'down',
-            ipAddress: iface.ipv4Addresses?.[0]?.split('/')[0] || '—',
-            subnet: (() => {
-              const cidr = iface.ipv4Addresses?.[0]?.split('/')[1];
-              if (!cidr) return '—';
-              const prefix = parseInt(cidr, 10);
-              if (isNaN(prefix) || prefix < 0 || prefix > 32) return '—';
-              const mask = prefix === 0 ? 0 : (~0 << (32 - prefix)) >>> 0;
-              return `${(mask >>> 24) & 255}.${(mask >>> 16) & 255}.${(mask >>> 8) & 255}.${mask & 255}`;
-            })(),
-            mac: iface.macAddress || '—',
-            speed: iface.speed || '—',
+            status: iface.state === 'up' ? 'up' : 'down',
+            ipAddress: iface.ipv4Address || '—',
+            subnet: cidrToNetmask(iface.ipv4Cidr || 0),
+            mac: '—',
+            speed: '—',
             mtu: iface.mtu || 1500,
-            rxBytes: iface.rxBytes || 0,
-            txBytes: iface.txBytes || 0,
-            description: dbDescriptions[iface.name] || (iface.isDefaultRoute ? 'Default route (WAN)' : (iface.driver || '')),
-            allIps: (iface.ipv4Addresses || []).map((addr: string) => addr.split('/')[0]),
-            _osData: iface, // Keep raw OS data for detail views
+            rxBytes: 0,
+            txBytes: 0,
+            description: dbDescriptions[iface.deviceName] || dbDescriptions[iface.name] || '',
+            allIps: [
+              ...(iface.ipv4Address && iface.ipv4Address !== '—' ? [iface.ipv4Address] : []),
+              ...(iface.secondaryIps || []),
+            ],
+            nettype: iface.nettype,
+            nettypeLabel: iface.nettypeLabel,
+            isPhysical: iface.isPhysical,
+            secondaryIps: iface.secondaryIps || [],
+            ipv4Gateway: iface.ipv4Gateway,
+            ipv4Cidr: iface.ipv4Cidr,
+            _osData: iface,
           };
         });
         setInterfaces(mapped);
         setOsDataLoaded(true);
 
-        // Also derive bridges, bonds, vlans from OS data
-        const osBridges: BridgeEntry[] = osResult.data
-          .filter((i: any) => i.type === 'bridge')
-          .map((i: any) => ({
-            id: i.name,
-            name: i.name,
-            members: i.bridgePorts || [],
-            stp: false,
-            forwardDelay: 15,
-            enabled: i.state === 'up',
-          }));
-        if (osBridges.length > 0) setBridges(osBridges);
+        // Derive bridges from scan data
+        if (osResult.data.bridges?.length > 0) {
+          setBridges(osResult.data.bridges.map((b: any) => ({
+            id: b.name, name: b.name, members: [], stp: b.bridgeStp || false,
+            forwardDelay: b.bridgeForwardDelay || 15, enabled: b.state === 'up',
+          })));
+        }
 
-        const osBonds: BondEntry[] = osResult.data
-          .filter((i: any) => i.type === 'bond')
-          .map((i: any) => ({
-            id: i.name,
-            name: i.name,
-            mode: 'active-backup',
-            members: i.bondMembers || [],
-            miimon: 100,
-            lacpRate: 'slow',
-            primary: i.bondMembers?.[0] || '',
-          }));
-        if (osBonds.length > 0) setBonds(osBonds);
+        // Derive bonds from scan data
+        if (osResult.data.bonds?.length > 0) {
+          setBonds(osResult.data.bonds.map((b: any) => ({
+            id: b.name, name: b.name, mode: b.bondMode || 'active-backup',
+            members: [], miimon: b.bondMiimon || 100, lacpRate: b.bondLacpRate || 'slow', primary: '',
+          })));
+        }
 
-        const osVlans: VLANEntry[] = osResult.data
-          .filter((i: any) => i.type === 'vlan')
-          .map((i: any) => {
-            const parts = i.name.split('.');
-            return {
-              id: i.name,
-              vlanId: parseInt(parts[1]) || 0,
-              subInterface: i.name,
-              parent: parts[0] || '',
-              description: i.ipv4Addresses?.[0] || '',
-              mtu: i.mtu || 1500,
-              enabled: i.state === 'up',
-              dhcpSubnet: i.ipv4Addresses?.[0] || '',
-            };
-          });
-        if (osVlans.length > 0) setVlans(osVlans);
+        // Derive VLANs from scan data
+        if (osResult.data.vlans?.length > 0) {
+          setVlans(osResult.data.vlans.map((v: any) => ({
+            id: v.name, vlanId: v.vlanId || 0, subInterface: v.name,
+            parent: v.vlanParent || '', description: v.ipv4Address || '',
+            mtu: v.mtu || 1500, enabled: v.state === 'up',
+            dhcpSubnet: v.ipv4Address ? `${v.ipv4Address}/${v.ipv4Cidr || 24}` : '',
+          })));
+        }
 
-        // Derive roles from OS data
-        const osRoles: InterfaceRole[] = osResult.data
-          .filter((i: any) => i.type !== 'loopback')
+        // Derive roles from nettype
+        const nettypeToRoleMap: Record<number, string> = { 1: 'wan', 0: 'lan', 5: 'management', 6: 'wifi', 3: 'lan', 7: 'lan' };
+        const osRoles: InterfaceRole[] = osResult.data.interfaces
+          .filter((i: any) => i.nettype && i.nettype !== 8)
           .map((i: any) => ({
             interfaceId: i.name,
-            interfaceName: i.name,
-            role: i.role === 'wan' ? 'wan' : i.role === 'management' ? 'management' : i.role === 'guest' ? 'wifi' : i.role === 'lan' ? 'lan' : 'unused',
-            priority: i.isDefaultRoute ? 1 : 0,
+            interfaceName: i.deviceName || i.name,
+            role: (nettypeToRoleMap[i.nettype] || 'unused') as InterfaceRole['role'],
+            priority: i.priority || 0,
           }));
         if (osRoles.length > 0) setRoles(osRoles);
       } else {
@@ -913,14 +926,17 @@ export default function NetworkPage() {
     setSelectedInterface(iface);
     setInterfaceAliases([]);
     const matchedRole = roles.find(r => r.interfaceName === iface.name);
+    // Map nettype back to role label for the dropdown
+    const nettypeToRole: Record<number, string> = { 1: 'wan', 0: 'lan', 2: 'vlan', 3: 'bridge', 4: 'bond', 5: 'management', 6: 'guest', 7: 'iot', 8: 'unused' };
+    const roleFromNettype = iface.nettype !== undefined && iface.nettype >= 0 ? nettypeToRole[iface.nettype] || 'unused' : undefined;
     setEditInterfaceData({
       name: iface.name, mtu: iface.mtu, description: iface.description,
       mode: iface.ipAddress === '—' ? 'dhcp' : 'static',
       ipAddress: iface.ipAddress === '—' ? '' : iface.ipAddress,
       netmask: iface.subnet === '—' ? '' : iface.subnet,
-      gateway: '',
-      role: matchedRole?.role || 'unused',
-      priority: matchedRole?.priority || 0
+      gateway: iface.ipv4Gateway || '',
+      role: roleFromNettype || matchedRole?.role || 'unused',
+      priority: (iface._osData?.priority as number) || matchedRole?.priority || 0
     });
     handleFetchAliases(iface.name);
     setEditInterfaceOpen(true);
@@ -988,17 +1004,20 @@ export default function NetworkPage() {
           }
         }
 
-        // 3. Apply role change
-        if (editInterfaceData.role !== (matchedRole?.role || 'unused') || editInterfaceData.priority !== (matchedRole?.priority || 0)) {
+        // 3. Apply role/nettype change (Rocky 10: uses nettype in .nmconnection)
+        const nettypeMap: Record<string, number> = { wan: 1, lan: 0, dmz: 7, management: 5, wifi: 6, guest: 6, iot: 7, unused: 8 };
+        const currentNettype = selectedInterface.nettype ?? (matchedRole ? nettypeMap[matchedRole.role] ?? 8 : 8);
+        const newNettype = nettypeMap[editInterfaceData.role] ?? 8;
+        if (newNettype !== currentNettype || editInterfaceData.priority !== (selectedInterface._osData?.priority || 0)) {
           try {
             const roleRes = await fetch(`/api/network/os/interfaces/${selectedInterface.name}/role`, {
               method: 'PUT',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ role: editInterfaceData.role, priority: editInterfaceData.priority }),
+              body: JSON.stringify({ nettype: newNettype, priority: editInterfaceData.priority }),
             });
             const roleResult = await roleRes.json();
             if (roleResult.success) {
-              toast({ title: 'Role Updated', description: `${selectedInterface.name} set to ${editInterfaceData.role.toUpperCase()}` });
+              toast({ title: 'Role Updated', description: `${selectedInterface.name} set to ${editInterfaceData.role.toUpperCase()} (nettype=${newNettype})` });
             } else if (roleResult.warning) {
               toast({ title: 'Role Updated (partial)', description: roleResult.warning, variant: 'default' });
             } else {
@@ -1124,6 +1143,8 @@ export default function NetworkPage() {
           osBody.ipAddress = newVlan.ipAddress;
           osBody.netmask = newVlan.netmask;
         }
+        // Pass nettype for Rocky 10 .nmconnection [staysuite] section
+        osBody.nettype = 2; // VLAN
         const osRes = await fetch('/api/network/os/vlans', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1204,7 +1225,7 @@ export default function NetworkPage() {
     try {
       const res = await fetch('/api/network/os/bridges', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newBridge),
+        body: JSON.stringify({ ...newBridge, nettype: 3 }), // nettype=3 = Bridge
       });
       const result = await res.json();
       if (result.success) {
@@ -1244,7 +1265,7 @@ export default function NetworkPage() {
     try {
       const res = await fetch('/api/network/os/bonds', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newBond),
+        body: JSON.stringify({ ...newBond, nettype: 4 }), // nettype=4 = Bond
       });
       const result = await res.json();
       if (result.success) {
@@ -1912,9 +1933,18 @@ export default function NetworkPage() {
                         <Badge variant="outline" className={cn('text-[10px] border', typeBadgeColor[iface.type])}>
                           {iface.type}
                         </Badge>
-                        {matchedRole && (
+                        {iface.nettypeLabel ? (
+                          <Badge variant="outline" className={cn('text-[10px] border', nettypeBadgeColor[iface.nettypeLabel] || roleBadgeColor[matchedRole?.role || 'unused'])}>
+                            {iface.nettypeLabel}
+                          </Badge>
+                        ) : matchedRole ? (
                           <Badge variant="outline" className={cn('text-[10px] border', roleBadgeColor[matchedRole.role])}>
                             {matchedRole.role.toUpperCase()}
+                          </Badge>
+                        ) : null}
+                        {iface.isPhysical && (
+                          <Badge variant="outline" className="text-[10px] border bg-slate-500/10 text-slate-600 dark:text-slate-400 border-slate-500/20">
+                            Physical
                           </Badge>
                         )}
                         <div className={cn(

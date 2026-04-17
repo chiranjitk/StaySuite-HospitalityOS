@@ -1,25 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { execSync } from 'child_process';
 import { db } from '@/lib/db';
-import {
-  addRoute,
-  deleteRoute,
-  addDefaultRoute,
-  listRoutes,
-  RouteInfo,
-} from '@/lib/network/route';
-import {
-  persistRouteAdd,
-  persistRouteRemove,
-} from '@/lib/network/persist';
+import { addRoute, removeRoute } from '@/lib/network/nmcli';
 
-/**
- * POST   /api/network/os/routes — Add a static route
- * GET    /api/network/os/routes — Get all current routes (OS + DB)
- * DELETE /api/network/os/routes — Remove a route
- *
- * Uses shell script wrappers from @/lib/network for OS-level operations.
- * Persists to /etc/network/interfaces via persist.sh and StaticRoute in DB.
- */
+function safeExec(cmd: string, timeout = 10000): string {
+  try { return execSync(cmd, { encoding: 'utf-8', timeout }); } catch (e: any) { return e.stderr?.trim() || e.stdout?.trim() || ''; }
+}
 
 const TENANT_ID = 'tenant-1';
 const PROPERTY_ID = 'property-1';
@@ -32,9 +18,6 @@ function isValidIPv4(ip: string): boolean {
   return parts.every(p => { const n = parseInt(p, 10); return !isNaN(n) && n >= 0 && n <= 255 && String(n) === p; });
 }
 
-/**
- * Validate a CIDR destination (e.g., 10.0.0.0/24, 0.0.0.0/0, or 192.168.1.0/32)
- */
 function isValidDestination(dest: string): boolean {
   const parts = dest.split('/');
   if (parts.length !== 2 && parts.length !== 1) return false;
@@ -46,16 +29,83 @@ function isValidDestination(dest: string): boolean {
   return true;
 }
 
+interface RouteEntry {
+  destination: string;
+  gateway: string;
+  interface: string;
+  metric: number;
+  protocol: string;
+  isDefault: boolean;
+}
+
+/**
+ * POST   /api/network/os/routes — Add a static route via nmcli
+ * GET    /api/network/os/routes — Get all current routes (OS + DB)
+ * DELETE /api/network/os/routes — Remove a route via nmcli
+ *
+ * Uses nmcli wrapper for Rocky Linux 10 NetworkManager.
+ * Routes are managed per-connection via nmcli con mod +ipv4.routes/-ipv4.routes.
+ */
+
 // ──────────────────────────────────────────────────
 // GET /api/network/os/routes — List all routes
 // ──────────────────────────────────────────────────
 export async function GET() {
   try {
-    // 1. Get OS routes via shell script wrapper
-    const listResult = listRoutes();
-    const osRoutes: RouteInfo[] = (listResult.success && listResult.data)
-      ? listResult.data.routes
-      : [];
+    // 1. Get OS routes via nmcli -j route show or ip route
+    let osRoutes: RouteEntry[] = [];
+    try {
+      const output = safeExec('nmcli -j route show 2>/dev/null');
+      if (output) {
+        const parsed = JSON.parse(output);
+        if (Array.isArray(parsed)) {
+          for (const route of parsed) {
+            const dest = route.dst || '';
+            const gw = route.gw || '';
+            const dev = route.dev || '';
+            const metric = parseInt(route.metric, 10) || 0;
+            const proto = route.proto || route.src ? 'static' : 'kernel';
+
+            if (dest && gw) {
+              osRoutes.push({
+                destination: dest,
+                gateway: gw,
+                interface: dev,
+                metric,
+                protocol: proto,
+                isDefault: dest === '0.0.0.0/0' || dest === 'default',
+              });
+            }
+          }
+        }
+      }
+    } catch {
+      // Fallback to ip route
+      try {
+        const output = safeExec('ip -4 route show 2>/dev/null');
+        for (const line of output.trim().split('\n').filter(Boolean)) {
+          const parts = line.split(/\s+/);
+          if (parts.length >= 3) {
+            const dest = parts[0] || 'unknown';
+            const gw = parts.find((p, i) => parts[i - 1] === 'via') || '';
+            const dev = parts.find((p, i) => parts[i - 1] === 'dev') || '';
+            const metricMatch = line.match(/metric\s+(\d+)/);
+            const metric = metricMatch ? parseInt(metricMatch[1], 10) : 0;
+
+            osRoutes.push({
+              destination: dest,
+              gateway: gw,
+              interface: dev,
+              metric,
+              protocol: 'kernel',
+              isDefault: dest === 'default',
+            });
+          }
+        }
+      } catch (e: any) {
+        console.warn('[Network OS API] ip route fallback also failed:', e.message);
+      }
+    }
 
     // 2. Get DB routes
     let dbRoutes: any[] = [];
@@ -99,8 +149,8 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const routeDest = isDefault ? 'default' : destination;
-    if (routeDest !== 'default' && !isValidDestination(routeDest)) {
+    const routeDest = isDefault ? '0.0.0.0/0' : destination;
+    if (routeDest && !isValidDestination(routeDest) && routeDest !== '0.0.0.0/0') {
       return NextResponse.json(
         { success: false, error: { code: 'INVALID_DESTINATION', message: 'Invalid destination format (expected IP/CIDR)' } },
         { status: 400 }
@@ -131,44 +181,38 @@ export async function POST(request: NextRequest) {
 
     const results: { step: string; success: boolean; message: string }[] = [];
 
-    // 1. Add route at OS level via shell script wrapper
-    if (isDefault) {
-      const addResult = addDefaultRoute(gateway, interfaceName);
-      results.push({
-        step: 'add-route',
-        success: addResult.success,
-        message: addResult.success ? 'Default route added' : addResult.error || 'Failed to add default route',
-      });
-    } else {
-      const addResult = addRoute({ destination: routeDest, gateway, metric: routeMetric, interface: interfaceName });
-      results.push({
-        step: 'add-route',
-        success: addResult.success,
-        message: addResult.success ? 'Route added' : addResult.error || 'Failed to add route',
-      });
+    // 1. Add route at OS level via nmcli wrapper (with inline fallback)
+    let addOk = false;
+    try {
+      addRoute(interfaceName, routeDest, gateway, routeMetric);
+      addOk = true;
+    } catch (e: any) {
+      console.warn(`[Network OS API] nmcli addRoute failed: ${e.message}, trying inline fallback`);
+      // Inline fallback: nmcli directly
+      try {
+        const metricArg = routeMetric ? ` ${routeMetric}` : '';
+        safeExec(`sudo nmcli con mod "${interfaceName}" +ipv4.routes "${routeDest} ${gateway}${metricArg}"`);
+        addOk = true;
+      } catch (fbErr: any) {
+        console.warn(`[Network OS API] Inline fallback addRoute also failed: ${fbErr.message}`);
+      }
     }
 
-    // 2. Persist to /etc/network/interfaces via shell script wrapper
-    const destForFile = routeDest === 'default' ? 'default' : routeDest;
-    const persistResult = persistRouteAdd({ interface: interfaceName, destination: destForFile, gateway });
     results.push({
-      step: 'file-persist',
-      success: persistResult.success,
-      message: persistResult.success
-        ? `Route persisted to interfaces file`
-        : persistResult.error || 'Failed to persist route',
+      step: 'add-route',
+      success: addOk,
+      message: addOk ? 'Route added via nmcli' : 'Failed to add route at OS level',
     });
 
-    // 3. Save to DB (StaticRoute) — only if OS route add succeeded
-    if (results[0].success) {
+    // 2. Save to DB (StaticRoute)
+    if (addOk) {
       try {
-        const dbDest = isDefault ? '0.0.0.0/0' : routeDest;
         await db.staticRoute.create({
           data: {
             tenantId: TENANT_ID,
             propertyId: PROPERTY_ID,
-            name: routeName || `route-${dbDest}-${gateway}`,
-            destination: dbDest,
+            name: routeName || `route-${routeDest}-${gateway}`,
+            destination: routeDest,
             gateway,
             metric: routeMetric,
             interfaceName,
@@ -236,30 +280,31 @@ export async function DELETE(request: NextRequest) {
 
     const results: { step: string; success: boolean; message: string }[] = [];
 
-    // 1. Remove route at OS level via shell script wrapper
-    const delResult = deleteRoute(destination, gateway);
-    results.push({
-      step: 'del-route',
-      success: delResult.success,
-      message: delResult.success ? 'Route deleted' : delResult.error || 'Failed to delete route',
-    });
-
-    // 2. Remove from /etc/network/interfaces via shell script wrapper
-    const destForFile = (destination === 'default' || destination === '0.0.0.0/0') ? 'default' : destination;
+    // 1. Remove route at OS level via nmcli wrapper (with inline fallback)
+    let delOk = false;
     if (interfaceName) {
-      const persistResult = persistRouteRemove(interfaceName, destForFile, gateway);
-      results.push({
-        step: 'file-remove',
-        success: persistResult.success,
-        message: persistResult.success
-          ? 'Route removed from interfaces file'
-          : persistResult.error || 'Failed to remove route from file',
-      });
-    } else {
-      results.push({ step: 'file-remove', success: false, message: 'Skipped: no interfaceName provided' });
+      try {
+        removeRoute(interfaceName, destination, gateway);
+        delOk = true;
+      } catch (e: any) {
+        console.warn(`[Network OS API] nmcli removeRoute failed: ${e.message}, trying inline fallback`);
+        // Inline fallback: nmcli directly
+        try {
+          safeExec(`sudo nmcli con mod "${interfaceName}" -ipv4.routes "${destination} ${gateway}"`);
+          delOk = true;
+        } catch (fbErr: any) {
+          console.warn(`[Network OS API] Inline fallback removeRoute also failed: ${fbErr.message}`);
+        }
+      }
     }
 
-    // 3. Remove from DB
+    results.push({
+      step: 'del-route',
+      success: delOk,
+      message: delOk ? 'Route removed via nmcli' : 'Failed to remove route at OS level',
+    });
+
+    // 2. Remove from DB
     try {
       const dbDest = destination === 'default' ? '0.0.0.0/0' : destination;
       await db.staticRoute.deleteMany({

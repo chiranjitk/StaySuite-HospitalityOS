@@ -1,50 +1,22 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { execSync } from 'child_process';
 import { db } from '@/lib/db';
-import { addAlias, removeAlias, listAliases } from '@/lib/network/alias';
-import { persistAliasAdd, persistAliasRemove } from '@/lib/network/persist';
+import {
+  scanConnections,
+  addSecondaryIP,
+  removeSecondaryIP,
+} from '@/lib/network/nmcli';
 import { netmaskToCidr } from '@/lib/network/executor';
+import { NM_CONNECTIONS_DIR } from '@/lib/network/nettypes';
+import { parseNmConnectionFile, getSecondaryAddresses, getPrimaryAddress } from '@/lib/network/nmconnection';
 
 function safeExec(cmd: string, timeout = 5000): string {
   try { return execSync(cmd, { encoding: 'utf-8', timeout }); } catch { return ''; }
 }
 
-/**
- * POST   /api/network/os/interfaces/[name]/aliases — Add a secondary IP alias
- * GET    /api/network/os/interfaces/[name]/aliases — List all aliases for the interface
- * DELETE /api/network/os/interfaces/[name]/aliases — Remove an alias IP
- *
- * Uses shell script wrappers for OS commands and file persistence.
- * Persists InterfaceAlias in DB after successful OS operations.
- */
-
 const TENANT_ID = 'tenant-1';
 const PROPERTY_ID = 'property-1';
-
 const VALID_NAME = /^[a-zA-Z0-9._-]+$/;
-
-// Inline fallback: read aliases directly from `ip addr show`
-function getAliasesInline(ifaceName: string): { ip: string; cidr: number; netmask: string }[] {
-  const aliases: { ip: string; cidr: number; netmask: string }[] = [];
-  const output = safeExec(`ip -o -4 addr show dev ${ifaceName} 2>/dev/null`);
-  const lines = output.trim().split('\n').filter(Boolean);
-
-  // Skip the first address (primary), return the rest as aliases
-  let isFirst = true;
-  for (const line of lines) {
-    const match = line.match(/inet\s+([\d.]+)\/(\d+)/);
-    if (match) {
-      if (isFirst) {
-        isFirst = false;
-        continue; // Skip primary IP
-      }
-      const ip = match[1];
-      const cidr = parseInt(match[2], 10);
-      aliases.push({ ip, cidr, netmask: cidrToNetmask(cidr) });
-    }
-  }
-  return aliases;
-}
 
 function cidrToNetmask(cidr: number): string {
   const masks = [
@@ -60,8 +32,28 @@ function cidrToNetmask(cidr: number): string {
   return masks[cidr] || '255.255.255.0';
 }
 
+/** Parse "ip/cidr" string from .nmconnection address fields */
+function parseAddressStr(addr: string): { ip: string; cidr: number } | null {
+  if (!addr) return null;
+  const slashIdx = addr.indexOf('/');
+  if (slashIdx < 0) return null;
+  return {
+    ip: addr.substring(0, slashIdx),
+    cidr: parseInt(addr.substring(slashIdx + 1), 10) || 24,
+  };
+}
+
+/**
+ * POST   /api/network/os/interfaces/[name]/aliases — Add a secondary IP alias
+ * GET    /api/network/os/interfaces/[name]/aliases — List all aliases for the interface
+ * DELETE /api/network/os/interfaces/[name]/aliases — Remove an alias IP
+ *
+ * Uses nmcli wrapper for Rocky Linux 10 NetworkManager.
+ * Aliases are stored as additional ipv4.addresses in .nmconnection files.
+ */
+
 // ────────────────────────────────────────────────────────────
-// GET /api/network/os/interfaces/[name]/aliases — List aliases
+// GET — List secondary IPs from .nmconnection file
 // ────────────────────────────────────────────────────────────
 export async function GET(
   _request: NextRequest,
@@ -77,22 +69,36 @@ export async function GET(
       );
     }
 
-    // 1. List aliases from OS — try shell script first, fallback to inline
+    // 1. Get secondary IPs from .nmconnection file via nmcli wrapper
     let osAliases: { ip: string; cidr: number; netmask: string }[] = [];
     try {
-      const osResult = listAliases(name);
-      if (osResult.success && osResult.data && Array.isArray(osResult.data.aliases)) {
-        osAliases = osResult.data.aliases.map(a => ({
-          ip: a.ipAddress,
-          cidr: a.cidr,
-          netmask: a.netmask,
-        }));
-      } else {
-        // Inline fallback: parse ip addr show
-        osAliases = getAliasesInline(name);
+      const connections = scanConnections();
+      const conn = connections.find(c => c.name === name || c.deviceName === name);
+      if (conn && conn.secondaryIps) {
+        osAliases = conn.secondaryIps.map(addrStr => {
+          const parsed = parseAddressStr(addrStr);
+          return parsed
+            ? { ip: parsed.ip, cidr: parsed.cidr, netmask: cidrToNetmask(parsed.cidr) }
+            : { ip: addrStr, cidr: 24, netmask: '255.255.255.0' };
+        });
       }
-    } catch {
-      osAliases = getAliasesInline(name);
+    } catch (e: any) {
+      console.warn(`[Network OS API] nmcli alias list failed for ${name}: ${e.message}, using inline fallback`);
+      // Inline fallback: parse ip addr show
+      const output = safeExec(`ip -o -4 addr show dev ${name} 2>/dev/null`);
+      const lines = output.trim().split('\n').filter(Boolean);
+      let isFirst = true;
+      for (const line of lines) {
+        const match = line.match(/inet\s+([\d.]+)\/(\d+)/);
+        if (match) {
+          if (isFirst) { isFirst = false; continue; }
+          osAliases.push({
+            ip: match[1],
+            cidr: parseInt(match[2], 10),
+            netmask: cidrToNetmask(parseInt(match[2], 10)),
+          });
+        }
+      }
     }
 
     // 2. Fetch from DB
@@ -129,7 +135,7 @@ export async function GET(
 }
 
 // ────────────────────────────────────────────────────────────
-// POST /api/network/os/interfaces/[name]/aliases — Add alias
+// POST — Add secondary IP via nmcli con mod +ipv4.addresses
 // ────────────────────────────────────────────────────────────
 export async function POST(
   request: NextRequest,
@@ -155,39 +161,43 @@ export async function POST(
     }
 
     const aliasNetmask = netmask || '255.255.255.0';
+    const cidr = netmaskToCidr(aliasNetmask);
     const results: { step: string; success: boolean; message: string }[] = [];
 
-    // 1. Add alias at OS level via shell script
-    const addResult = addAlias({ interface: name, ipAddress, netmask: aliasNetmask });
-
-    if (!addResult.success) {
-      const errMsg = addResult.error || 'Failed to add alias';
-      if (errMsg.includes('File exists') || errMsg.includes('exists')) {
+    // 1. Add alias at OS level via nmcli wrapper (with inline fallback)
+    let addOk = false;
+    try {
+      addSecondaryIP(name, ipAddress, cidr);
+      addOk = true;
+    } catch (e: any) {
+      const errMsg = e.message || '';
+      if (errMsg.includes('already exists') || errMsg.includes('exists') || errMsg.includes('is already')) {
         return NextResponse.json(
           { success: false, error: { code: 'EXISTS', message: `IP ${ipAddress} already exists on ${name}` } },
           { status: 409 }
         );
       }
+      console.warn(`[Network OS API] nmcli addSecondaryIP failed for ${ipAddress} on ${name}: ${errMsg}, trying inline fallback`);
+
+      // Inline fallback: nmcli directly
+      try {
+        safeExec(`sudo nmcli con mod "${name}" +ipv4.addresses ${ipAddress}/${cidr}`);
+        safeExec(`sudo nmcli con up "${name}"`);
+        addOk = true;
+      } catch (fbErr: any) {
+        console.warn(`[Network OS API] Inline fallback alias add also failed for ${ipAddress} on ${name}: ${fbErr.message}`);
+      }
+    }
+
+    if (!addOk) {
       return NextResponse.json(
-        { success: false, error: { code: 'ADD_FAILED', message: errMsg } },
+        { success: false, error: { code: 'ADD_FAILED', message: 'Failed to add alias at OS level' } },
         { status: 500 }
       );
     }
-    results.push({ step: 'add-addr', success: true, message: 'Alias added at OS level' });
+    results.push({ step: 'add-addr', success: true, message: 'Alias added via nmcli' });
 
-    // 2. Persist to /etc/network/interfaces via shell script
-    const persistResult = persistAliasAdd({ interface: name, ipAddress, netmask: aliasNetmask });
-
-    if (!persistResult.success) {
-      console.warn(`[Network OS API] File persist failed for alias on ${name}: ${persistResult.error} — continuing with DB only`);
-    }
-    results.push({
-      step: 'file-persist',
-      success: persistResult.success,
-      message: persistResult.success ? 'Alias persisted to interfaces file' : (persistResult.error || 'File persist failed'),
-    });
-
-    // 3. Save to DB (InterfaceAlias)
+    // 2. Save to DB (InterfaceAlias)
     try {
       let netIface = await db.networkInterface.findUnique({
         where: { propertyId_name: { propertyId: PROPERTY_ID, name } },
@@ -221,7 +231,6 @@ export async function POST(
       results.push({ step: 'database', success: false, message: dbErr.message });
     }
 
-    const cidr = addResult.data?.cidr || 24;
     return NextResponse.json({
       success: true,
       message: `Alias ${ipAddress}/${cidr} added to ${name}`,
@@ -238,7 +247,7 @@ export async function POST(
 }
 
 // ────────────────────────────────────────────────────────────
-// DELETE /api/network/os/interfaces/[name]/aliases — Remove alias
+// DELETE — Remove secondary IP via nmcli con mod -ipv4.addresses
 // ────────────────────────────────────────────────────────────
 export async function DELETE(
   request: NextRequest,
@@ -264,46 +273,25 @@ export async function DELETE(
       );
     }
 
+    const cidr = netmaskToCidr(netmask);
     const results: { step: string; success: boolean; message: string }[] = [];
 
-    // 1. Remove at OS level via shell script (with inline fallback)
+    // 1. Remove at OS level via nmcli wrapper (with inline fallback)
     let osRemoveOk = false;
     try {
-      const removeResult = removeAlias(name, ip, netmask);
-      if (removeResult.success) {
-        osRemoveOk = true;
-      } else {
-        console.warn(`[Network OS API] Shell script alias remove failed for ${ip} on ${name}: ${removeResult.error}, trying inline fallback`);
-      }
+      removeSecondaryIP(name, ip, cidr);
+      osRemoveOk = true;
     } catch (e: any) {
-      console.warn(`[Network OS API] Shell script alias remove error for ${ip} on ${name}: ${e.message}, trying inline fallback`);
-    }
+      console.warn(`[Network OS API] nmcli removeSecondaryIP failed for ${ip} on ${name}: ${e.message}, trying inline fallback`);
 
-    // Inline fallback: try ip addr del directly
-    if (!osRemoveOk) {
+      // Inline fallback: nmcli directly
       try {
-        const cidr = cidrToNetmask(netmask) === netmask
-          ? Object.entries({
-              '0.0.0.0': 0, '128.0.0.0': 1, '192.0.0.0': 2, '224.0.0.0': 3,
-              '240.0.0.0': 4, '248.0.0.0': 5, '252.0.0.0': 6, '254.0.0.0': 7,
-              '255.0.0.0': 8, '255.128.0.0': 9, '255.192.0.0': 10, '255.224.0.0': 11,
-              '255.240.0.0': 12, '255.248.0.0': 13, '255.252.0.0': 14, '255.254.0.0': 15,
-              '255.255.0.0': 16, '255.255.128.0': 17, '255.255.192.0': 18, '255.255.224.0': 19,
-              '255.255.240.0': 20, '255.255.248.0': 21, '255.255.252.0': 22, '255.255.254.0': 23,
-              '255.255.255.0': 24, '255.255.255.128': 25, '255.255.255.192': 26,
-              '255.255.255.224': 27, '255.255.255.240': 28, '255.255.255.248': 29,
-              '255.255.255.252': 30, '255.255.255.254': 31, '255.255.255.255': 32,
-            }).find(([, v]) => v === netmaskToCidr(netmask))?.[1] || 24
-          : 24;
-        const delOutput = safeExec(`sudo ip addr del ${ip}/${cidr} dev ${name} 2>&1`);
-        // ip addr del returns error if IP doesn't exist, that's OK — we still want to clean up DB
-        osRemoveOk = true; // Consider it success — the IP is gone (or was never there)
-        if (delOutput.includes('Cannot find device') || delOutput.includes('not found')) {
-          console.log(`[Network OS API] Alias ${ip} was not on ${name} (already removed or never existed)`);
-        }
-      } catch (e: any) {
-        console.warn(`[Network OS API] Inline alias remove also failed for ${ip} on ${name}: ${e.message}`);
-        // Still continue to DB cleanup
+        safeExec(`sudo nmcli con mod "${name}" -ipv4.addresses ${ip}/${cidr}`);
+        safeExec(`sudo nmcli con up "${name}"`);
+        osRemoveOk = true;
+      } catch (fbErr: any) {
+        console.warn(`[Network OS API] Inline fallback alias remove also failed for ${ip} on ${name}: ${fbErr.message}`);
+        // Still continue to DB cleanup — IP may already be gone
         osRemoveOk = true;
       }
     }
@@ -311,22 +299,10 @@ export async function DELETE(
     results.push({
       step: 'del-addr',
       success: osRemoveOk,
-      message: osRemoveOk ? 'Alias removed from OS (or did not exist)' : 'OS remove failed',
+      message: osRemoveOk ? 'Alias removed via nmcli' : 'OS remove failed',
     });
 
-    // 2. Remove from /etc/network/interfaces via shell script
-    const persistResult = persistAliasRemove(name, ip);
-
-    if (!persistResult.success) {
-      console.warn(`[Network OS API] File remove failed for alias ${ip} on ${name}: ${persistResult.error} — continuing with DB only`);
-    }
-    results.push({
-      step: 'file-remove',
-      success: persistResult.success,
-      message: persistResult.success ? 'Alias removed from interfaces file' : (persistResult.error || 'File remove failed'),
-    });
-
-    // 3. Remove from DB
+    // 2. Remove from DB
     try {
       const netIface = await db.networkInterface.findUnique({
         where: { propertyId_name: { propertyId: PROPERTY_ID, name } },
@@ -342,7 +318,6 @@ export async function DELETE(
       results.push({ step: 'database', success: false, message: dbErr.message });
     }
 
-    const cidr = netmaskToCidr(netmask);
     return NextResponse.json({
       success: true,
       message: `Alias ${ip}/${cidr} removed from ${name}`,

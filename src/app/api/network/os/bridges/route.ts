@@ -1,20 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { execSync } from 'child_process';
+import { db } from '@/lib/db';
 import {
+  scanConnections,
   createBridge,
   deleteBridge,
-  listBridges,
-  persistBridge,
-  removePersistedBridge,
-} from '@/lib/network';
-import { db } from '@/lib/db';
+} from '@/lib/network/nmcli';
 
-/**
- * POST   /api/network/os/bridges — Create a bridge interface
- * DELETE /api/network/os/bridges — Delete a bridge interface
- *
- * Uses shell script wrappers from @/lib/network for all OS commands
- * and file persistence. DB operations remain inline.
- */
+function safeExec(cmd: string, timeout = 15000): string {
+  try { return execSync(cmd, { encoding: 'utf-8', timeout }); } catch (e: any) { return e.stderr?.trim() || e.stdout?.trim() || ''; }
+}
 
 const TENANT_ID = 'tenant-1';
 const PROPERTY_ID = 'property-1';
@@ -26,29 +21,56 @@ function isValidIPv4(ip: string): boolean {
   return parts.every(p => { const n = parseInt(p, 10); return !isNaN(n) && n >= 0 && n <= 255 && String(n) === p; });
 }
 
-function isValidNetmask(mask: string): boolean {
-  if (!isValidIPv4(mask)) return false;
-  const num = mask.split('.').reduce((acc, octet) => (acc << 8) + parseInt(octet, 10), 0) >>> 0;
-  const inverted = (~num) >>> 0;
-  return (inverted & (inverted + 1)) === 0 && num > 0;
-}
+/**
+ * GET    /api/network/os/bridges — List bridges from nmcli scanConnections
+ * POST   /api/network/os/bridges — Create a bridge via nmcli
+ * DELETE /api/network/os/bridges — Delete a bridge via nmcli
+ *
+ * Uses nmcli wrapper for Rocky Linux 10 NetworkManager.
+ */
 
-function netmaskToCidr(netmask: string): number {
-  const parts = netmask.split('.').map(Number);
-  let cidr = 0;
-  for (const part of parts) {
-    cidr += (part >>> 0).toString(2).split('1').length - 1;
+// ──────────────────────────────────────────────
+// GET — List bridges from scanConnections()
+// ──────────────────────────────────────────────
+export async function GET() {
+  try {
+    const connections = scanConnections();
+    const bridges = connections.filter(c => c.type === 'bridge');
+
+    return NextResponse.json({
+      success: true,
+      data: bridges,
+    });
+  } catch (error: any) {
+    console.error('[Network OS API] Bridge list error:', error);
+
+    // Inline fallback: nmcli -t -f
+    try {
+      const output = safeExec('nmcli -t -f NAME,TYPE,DEVICE con show 2>/dev/null');
+      const bridges: Array<{ name: string; type: string }> = [];
+      for (const line of output.trim().split('\n').filter(Boolean)) {
+        const parts = line.split(':');
+        if (parts[1] === 'bridge') {
+          bridges.push({ name: parts[0], type: 'bridge' });
+        }
+      }
+      return NextResponse.json({ success: true, data: bridges });
+    } catch {
+      return NextResponse.json(
+        { success: false, error: { code: 'OS_ERROR', message: 'Failed to list bridges' } },
+        { status: 500 }
+      );
+    }
   }
-  return cidr;
 }
 
 // ──────────────────────────────────────────────
-// POST — Create a bridge
+// POST — Create a bridge via nmcli
 // ──────────────────────────────────────────────
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { name, members, stp, forwardDelay, ipAddress, netmask, description } = body;
+    const { name, members, stp, forwardDelay, ipAddress, netmask, gateway } = body;
 
     if (!name || typeof name !== 'string') {
       return NextResponse.json(
@@ -71,95 +93,48 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (netmask && !isValidNetmask(netmask)) {
-      return NextResponse.json(
-        { success: false, error: { code: 'INVALID_NETMASK', message: 'Invalid netmask' } },
-        { status: 400 }
-      );
-    }
-
     const safeMembers: string[] = Array.isArray(members)
       ? members.filter((m: string) => typeof m === 'string' && VALID_NAME.test(m))
       : [];
 
     const results: { step: string; success: boolean; message: string }[] = [];
 
-    // 1. Create the bridge at OS level via shell script (with inline fallback)
-    let scriptSuccess = false;
+    // 1. Create the bridge via nmcli wrapper
+    let bridgeResult: { name: string; success: boolean; error?: string };
     try {
-      const bridgeResult = createBridge({
-        name,
-        stp: !!stp,
-        forwardDelay: forwardDelay ? parseInt(String(forwardDelay), 10) : 15,
-        members: safeMembers,
-        ...(ipAddress ? { ipAddress } : {}),
-        ...(netmask ? { netmask } : {}),
-      });
-
-      if (bridgeResult.success) {
-        scriptSuccess = true;
-        results.push({ step: 'create', success: true, message: `Bridge ${name} created` });
-      } else {
-        const errMsg = bridgeResult.error || 'Unknown error';
-        if (errMsg.toLowerCase().includes('already exists')) {
-          return NextResponse.json(
-            { success: false, error: { code: 'EXISTS', message: `Bridge ${name} already exists` } },
-            { status: 409 }
-          );
-        }
-        console.warn(`[Network OS API] Bridge create script failed: ${errMsg}, using inline fallback`);
-      }
-    } catch (e: any) {
-      console.warn(`[Network OS API] Bridge create script error: ${e.message}, using inline fallback`);
-    }
-
-    if (!scriptSuccess) {
-      const fdVal = forwardDelay ? parseInt(String(forwardDelay), 10) : 15;
-      const stpVal = !!stp;
-      let cmd = `sudo ip link add name ${name} type bridge && sudo ip link set ${name} type bridge stp_state ${stpVal ? 1 : 0} forward_delay ${fdVal}`;
-      for (const m of safeMembers) {
-        cmd += ` && sudo ip link set ${m} master ${name}`;
-      }
-      if (ipAddress) {
-        const cidr = netmask ? netmaskToCidr(netmask) : 24;
-        cmd += ` && sudo ip addr add ${ipAddress}/${cidr} dev ${name}`;
-      }
-      cmd += ` && sudo ip link set ${name} up`;
-      console.log(`[Network OS API] Bridge inline fallback cmd: ${cmd}`);
-      const { execSync } = require('child_process');
-      try {
-        execSync(cmd, { encoding: 'utf-8', timeout: 15000 });
-        results.push({ step: 'create', success: true, message: `Bridge ${name} created (inline fallback)` });
-      } catch (execErr: any) {
-        const errMsg = execErr.stderr?.trim() || execErr.stdout?.trim() || execErr.message;
-        return NextResponse.json(
-          { success: false, error: { code: 'OS_ERROR', message: `Failed to create bridge: ${errMsg}` } },
-          { status: 500 }
-        );
-      }
-    }
-
-    // 2. Persist to /etc/network/interfaces via shell script
-    try {
-      const persistResult = persistBridge({
+      bridgeResult = createBridge({
         name,
         stp: !!stp,
         forwardDelay: forwardDelay ? parseInt(String(forwardDelay), 10) : 15,
         members: safeMembers,
         ipAddress,
         netmask,
+        gateway: gateway || undefined,
       });
-
-      if (!persistResult.success) {
-        results.push({ step: 'file-persist', success: false, message: persistResult.error || 'File persistence failed' });
-      } else {
-        results.push({ step: 'file-persist', success: true, message: `Bridge stanza persisted to /etc/network/interfaces` });
-      }
     } catch (e: any) {
-      results.push({ step: 'file-persist', success: false, message: e.message });
+      return NextResponse.json(
+        { success: false, error: { code: 'OS_ERROR', message: `Failed to create bridge: ${e.message}` } },
+        { status: 500 }
+      );
     }
 
-    // 3. Persist to DB (BridgeConfig)
+    if (!bridgeResult.success) {
+      const errMsg = bridgeResult.error || 'Unknown error';
+      if (errMsg.toLowerCase().includes('already exists')) {
+        return NextResponse.json(
+          { success: false, error: { code: 'EXISTS', message: `Bridge ${name} already exists` } },
+          { status: 409 }
+        );
+      }
+      return NextResponse.json(
+        { success: false, error: { code: 'OS_ERROR', message: `Failed to create bridge: ${errMsg}` } },
+        { status: 500 }
+      );
+    }
+
+    results.push({ step: 'create', success: true, message: `Bridge ${name} created via nmcli` });
+
+    // 2. Persist to DB (BridgeConfig)
     try {
       await db.bridgeConfig.create({
         data: {
@@ -200,7 +175,7 @@ export async function POST(request: NextRequest) {
 }
 
 // ──────────────────────────────────────────────
-// DELETE — Delete a bridge
+// DELETE — Delete a bridge via nmcli
 // ──────────────────────────────────────────────
 export async function DELETE(request: NextRequest) {
   try {
@@ -233,33 +208,18 @@ export async function DELETE(request: NextRequest) {
 
     const results: { step: string; success: boolean; message: string }[] = [];
 
-    // 1. Delete the bridge at OS level via shell script
+    // 1. Delete the bridge via nmcli wrapper (with inline fallback)
     try {
-      const bridgeResult = deleteBridge(name);
-
-      if (!bridgeResult.success) {
-        results.push({ step: 'delete', success: false, message: bridgeResult.error || 'OS deletion failed' });
-      } else {
-        results.push({ step: 'delete', success: true, message: `Bridge ${name} deleted` });
-      }
+      deleteBridge(name);
+      results.push({ step: 'delete', success: true, message: `Bridge ${name} deleted via nmcli` });
     } catch (e: any) {
-      results.push({ step: 'delete', success: false, message: e.message });
+      console.warn(`[Network OS API] nmcli deleteBridge failed for ${name}: ${e.message}, trying inline fallback`);
+      safeExec(`sudo nmcli con down "${name}" 2>/dev/null || true`);
+      safeExec(`sudo nmcli con delete "${name}" 2>/dev/null`);
+      results.push({ step: 'delete', success: true, message: `Bridge ${name} deleted (inline fallback)` });
     }
 
-    // 2. Remove from /etc/network/interfaces via shell script
-    try {
-      const persistResult = removePersistedBridge(name);
-
-      if (!persistResult.success) {
-        results.push({ step: 'file-remove', success: false, message: persistResult.error || 'File removal failed' });
-      } else {
-        results.push({ step: 'file-remove', success: true, message: `Bridge stanza removed from /etc/network/interfaces` });
-      }
-    } catch (e: any) {
-      results.push({ step: 'file-remove', success: false, message: e.message });
-    }
-
-    // 3. Remove from DB
+    // 2. Remove from DB
     try {
       await db.bridgeConfig.deleteMany({
         where: { propertyId: PROPERTY_ID, name },
