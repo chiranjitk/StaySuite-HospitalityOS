@@ -199,3 +199,4 @@ skills/
 .env.local
 .env.production
 .env.development
+db/
