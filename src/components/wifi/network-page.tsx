@@ -421,13 +421,12 @@ function TrafficGraph({ rx, tx }: { rx: number; tx: number }) {
 
 // ─── TAB CONFIG ──────────────────────────────────────────────────────────────
 
-type TabId = 'interfaces' | 'vlans' | 'bridges-bonds' | 'wan-lan' | 'routes' | 'multiwan' | 'port-forwarding' | 'content-filtering' | 'schedules' | 'backup';
+type TabId = 'interfaces' | 'vlans' | 'bridges-bonds' | 'routes' | 'multiwan' | 'port-forwarding' | 'content-filtering' | 'schedules' | 'backup';
 
 const tabs: { id: TabId; label: string; icon: React.ReactNode }[] = [
   { id: 'interfaces', label: 'Interfaces', icon: <Network className="h-4 w-4" /> },
   { id: 'vlans', label: 'VLANs', icon: <Server className="h-4 w-4" /> },
   { id: 'bridges-bonds', label: 'Bridges & Bonds', icon: <ArrowRightLeft className="h-4 w-4" /> },
-  { id: 'wan-lan', label: 'WAN/LAN Mapping', icon: <Globe className="h-4 w-4" /> },
   { id: 'routes', label: 'Routes', icon: <Route className="h-4 w-4" /> },
   { id: 'multiwan', label: 'Multi-WAN', icon: <Workflow className="h-4 w-4" /> },
   { id: 'port-forwarding', label: 'Port Forwarding', icon: <Wifi className="h-4 w-4" /> },
@@ -485,13 +484,6 @@ export default function NetworkPage() {
   // Real OS data state
   const [osSystemInfo, setOsSystemInfo] = useState<{ hostname: string; kernel: string; osRelease: string; uptimeFormatted: string; loadAverage: string; memory: { total: number; used: number; usagePercent: number }; cpuCount: number } | null>(null);
   const [osDataLoaded, setOsDataLoaded] = useState(false);
-
-  // WAN failover config
-  const [failoverConfig, setFailoverConfig] = useState({
-    healthCheckUrl: 'https://1.1.1.1',
-    failoverThreshold: 3,
-    autoSwitchback: true,
-  });
 
   // Form states
   const [newInterface, setNewInterface] = useState({ name: '', type: 'ethernet', mtu: 1500, description: '' });
@@ -1536,74 +1528,6 @@ export default function NetworkPage() {
       }
     } catch {
       toast({ title: 'Error', description: 'Failed to restore backup', variant: 'destructive' });
-    }
-  };
-
-  // ── Role handlers (persist to OS + DB) ──
-  const [roleSaving, setRoleSaving] = useState<string | null>(null);
-
-  const handleRoleChange = async (interfaceId: string, newRole: InterfaceRole['role']) => {
-    setRoleSaving(interfaceId);
-    // Optimistic update
-    setRoles(prev => prev.map(r => r.interfaceId === interfaceId ? { ...r, role: newRole } : r));
-    try {
-      const currentRole = roles.find(r => r.interfaceId === interfaceId);
-      const res = await fetch(`/api/network/os/interfaces/${encodeURIComponent(interfaceId)}/role`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ role: newRole, priority: currentRole?.priority || 0 }),
-      });
-      const result = await res.json();
-      if (result.success) {
-        const sources = [];
-        if (result.data?.persistedToOS) sources.push('OS (/etc/network/interfaces)');
-        if (result.data?.persistedToDB) sources.push('Database');
-        toast({ title: 'Role Updated', description: `${interfaceId} → ${newRole.toUpperCase()} saved to ${sources.join(' + ')}` });
-      } else {
-        toast({ title: 'Error', description: result.error?.message || 'Failed to persist role', variant: 'destructive' });
-      }
-    } catch {
-      toast({ title: 'Error', description: 'Failed to save role', variant: 'destructive' });
-    } finally {
-      setRoleSaving(null);
-    }
-  };
-
-  const handleMovePriority = (interfaceId: string, direction: 'up' | 'down') => {
-    setRoles(prev => {
-      const arr = [...prev].sort((a, b) => a.priority - b.priority);
-      const idx = arr.findIndex(r => r.interfaceId === interfaceId);
-      if (idx < 0) return prev;
-      if (direction === 'up' && idx > 0) {
-        [arr[idx - 1].priority, arr[idx].priority] = [arr[idx].priority, arr[idx - 1].priority];
-      } else if (direction === 'down' && idx < arr.length - 1) {
-        [arr[idx + 1].priority, arr[idx].priority] = [arr[idx].priority, arr[idx + 1].priority];
-      }
-      return prev.map(r => arr.find(a => a.interfaceId === r.interfaceId) || r);
-    });
-  };
-
-  const handleSaveAllRoles = async () => {
-    try {
-      const res = await fetch('/api/network/os/interfaces/roles', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          roles: roles.map(r => ({
-            interfaceName: r.interfaceName,
-            role: r.role,
-            priority: r.priority,
-          })),
-        }),
-      });
-      const result = await res.json();
-      if (result.success) {
-        toast({ title: 'All Roles Saved', description: `${result.data.total} interface roles persisted to OS + Database` });
-      } else {
-        toast({ title: 'Error', description: 'Failed to save some roles', variant: 'destructive' });
-      }
-    } catch {
-      toast({ title: 'Error', description: 'Failed to save roles', variant: 'destructive' });
     }
   };
 
@@ -2698,207 +2622,7 @@ export default function NetworkPage() {
           </div>
         )}
 
-        {/* ═══════ TAB 4: WAN/LAN MAPPING ═══════ */}
-        {activeTab === 'wan-lan' && (
-          <div className="space-y-6">
-            {/* Persistence Info Banner */}
-            <Card className="border-sky-500/30 bg-gradient-to-r from-sky-50 to-cyan-50 dark:from-sky-950/20 dark:to-cyan-950/20">
-              <CardContent className="p-4">
-                <div className="flex items-start gap-3">
-                  <Shield className="h-5 w-5 text-sky-600 mt-0.5 shrink-0" />
-                  <div className="flex-1">
-                    <p className="text-sm font-semibold text-sky-800 dark:text-sky-300">Dual Persistence: OS + Database</p>
-                    <p className="text-xs text-sky-700/70 dark:text-sky-400/70 mt-1">
-                      Role assignments are persisted to <code className="bg-sky-100 dark:bg-sky-900 px-1 rounded font-mono text-[10px]">/etc/network/interfaces</code> via comment tags
-                      (<code className="bg-sky-100 dark:bg-sky-900 px-1 rounded font-mono text-[10px]"># STAYSUITE_ROLE: wan</code>) and
-                      the database. Roles survive system reboots and are read automatically at startup.
-                    </p>
-                  </div>
-                  <Button size="sm" variant="outline" className="shrink-0 border-sky-300 text-sky-700 dark:text-sky-300 hover:bg-sky-100 dark:hover:bg-sky-900"
-                    onClick={handleSaveAllRoles}>
-                    <Save className="h-3.5 w-3.5 mr-1.5" />
-                    Save All Roles
-                  </Button>
-                </div>
-              </CardContent>
-            </Card>
-
-            {/* WAN Failover Config */}
-            <Card className="border-orange-500/30 bg-gradient-to-r from-orange-50 to-amber-50 dark:from-orange-950/20 dark:to-amber-950/20">
-              <CardHeader className="pb-3">
-                <CardTitle className="text-base flex items-center gap-2">
-                  <Globe className="h-4 w-4 text-orange-600" />
-                  WAN Failover Configuration
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                  <div className="space-y-2">
-                    <Label className="text-xs">Health Check URL</Label>
-                    <Input
-                      value={failoverConfig.healthCheckUrl}
-                      onChange={e => setFailoverConfig(p => ({ ...p, healthCheckUrl: e.target.value }))}
-                      className="h-8 text-sm"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label className="text-xs">Failover Threshold (failures)</Label>
-                    <Input
-                      type="number"
-                      value={failoverConfig.failoverThreshold}
-                      onChange={e => setFailoverConfig(p => ({ ...p, failoverThreshold: parseInt(e.target.value) || 3 }))}
-                      className="h-8 text-sm"
-                    />
-                  </div>
-                  <div className="space-y-2 flex items-end">
-                    <div className="flex items-center gap-3 pb-1">
-                      <Switch
-                        checked={failoverConfig.autoSwitchback}
-                        onCheckedChange={v => setFailoverConfig(p => ({ ...p, autoSwitchback: v }))}
-                      />
-                      <Label className="text-sm">Auto Switchback</Label>
-                    </div>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-
-            {/* Traffic Flow Indicator */}
-            <div className="flex items-center justify-center gap-4 py-4">
-              <div className="flex items-center gap-2">
-                <Globe className="h-5 w-5 text-orange-500" />
-                <span className="text-sm font-semibold text-orange-700 dark:text-orange-400">WAN</span>
-              </div>
-              <div className="flex items-center gap-1">
-                <div className="h-0.5 w-12 bg-gradient-to-r from-orange-500 to-teal-500 rounded-full" />
-                <div className="h-3 w-3 rounded-full bg-teal-500 shadow-sm shadow-teal-500/50 animate-pulse" />
-                <Server className="h-5 w-5 text-teal-600 mx-1" />
-                <div className="h-3 w-3 rounded-full bg-emerald-500 shadow-sm shadow-emerald-500/50 animate-pulse" />
-                <div className="h-0.5 w-12 bg-gradient-to-r from-teal-500 to-emerald-500 rounded-full" />
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="text-sm font-semibold text-emerald-700 dark:text-emerald-400">LAN</span>
-                <Monitor className="h-5 w-5 text-emerald-500" />
-              </div>
-            </div>
-
-            {/* WAN Interfaces */}
-            <div>
-              <h3 className="text-sm font-semibold mb-3 flex items-center gap-2">
-                <span className="h-2 w-2 rounded-full bg-orange-500" />
-                WAN Interfaces
-              </h3>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {roles.filter(r => r.role === 'wan').sort((a, b) => a.priority - b.priority).map((role) => {
-                  const iface = interfaces.find(i => i.id === role.interfaceId);
-                  if (!iface) return null;
-                  return (
-                    <Card key={role.interfaceId} className="transition-all duration-200 hover:scale-[1.01] hover:shadow-md border-orange-500/20">
-                      <CardContent className="p-4">
-                        <div className="flex items-center justify-between mb-3">
-                          <div className="flex items-center gap-2">
-                            <div className="p-1.5 rounded-lg bg-orange-500/10">
-                              <Globe className="h-4 w-4 text-orange-600" />
-                            </div>
-                            <div>
-                              <p className="font-semibold text-sm">{iface.name}</p>
-                              <p className="text-xs text-muted-foreground font-mono">{iface.ipAddress}</p>
-                            </div>
-                          </div>
-                          <div className="flex items-center gap-2">
-                            <Badge className="bg-gradient-to-r from-orange-500/20 to-amber-500/20 text-orange-700 dark:text-orange-400 border border-orange-500/30 text-[10px]">
-                              Priority #{role.priority}
-                            </Badge>
-                            <div className="flex flex-col gap-0.5">
-                              <Button variant="ghost" size="sm" className="h-5 w-5 p-0" onClick={() => handleMovePriority(role.interfaceId, 'up')}>
-                                <ChevronUp className="h-3 w-3" />
-                              </Button>
-                              <Button variant="ghost" size="sm" className="h-5 w-5 p-0" onClick={() => handleMovePriority(role.interfaceId, 'down')}>
-                                <ChevronDown className="h-3 w-3" />
-                              </Button>
-                            </div>
-                          </div>
-                        </div>
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                            <span className="font-mono">{iface.speed}</span>
-                            <span>•</span>
-                            <span>MTU {iface.mtu}</span>
-                          </div>
-                          <div className={cn('h-2 w-2 rounded-full', iface.status === 'up' ? 'bg-emerald-500' : 'bg-gray-400')} />
-                        </div>
-                      </CardContent>
-                    </Card>
-                  );
-                })}
-              </div>
-            </div>
-
-            {/* LAN & Other Interfaces */}
-            <div>
-              <h3 className="text-sm font-semibold mb-3 flex items-center gap-2">
-                <span className="h-2 w-2 rounded-full bg-emerald-500" />
-                LAN / Other Interfaces
-              </h3>
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                {roles.filter(r => r.role !== 'wan').map((role) => {
-                  const iface = interfaces.find(i => i.id === role.interfaceId);
-                  if (!iface) return null;
-                  return (
-                    <Card key={role.interfaceId} className="transition-all duration-200 hover:scale-[1.01] hover:shadow-md">
-                      <CardContent className="p-4">
-                        <div className="flex items-center justify-between mb-3">
-                          <div className="flex items-center gap-2">
-                            <div className={cn(
-                              'p-1.5 rounded-lg',
-                              role.role === 'lan' ? 'bg-teal-500/10' :
-                              role.role === 'management' ? 'bg-violet-500/10' :
-                              role.role === 'wifi' ? 'bg-cyan-500/10' :
-                              role.role === 'dmz' ? 'bg-red-500/10' : 'bg-muted'
-                            )}>
-                              {role.role === 'wifi' ? <Wifi className="h-4 w-4 text-cyan-600" /> :
-                               role.role === 'management' ? <Shield className="h-4 w-4 text-violet-600" /> :
-                               <Monitor className="h-4 w-4 text-teal-600" />}
-                            </div>
-                            <div>
-                              <p className="font-semibold text-sm">{iface.name}</p>
-                              <p className="text-xs text-muted-foreground font-mono">{iface.ipAddress}</p>
-                            </div>
-                          </div>
-                          <Badge variant="outline" className={cn('text-[10px] border', roleBadgeColor[role.role])}>
-                            {role.role.toUpperCase()}
-                          </Badge>
-                        </div>
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                            <span className="font-mono">{iface.speed}</span>
-                            <span>•</span>
-                            <span>{iface.description}</span>
-                          </div>
-                          <Select value={role.role} onValueChange={v => handleRoleChange(role.interfaceId, v as InterfaceRole['role'])} disabled={roleSaving === role.interfaceId}>
-                            <SelectTrigger className="w-28 h-7 text-[11px]">
-                              {roleSaving === role.interfaceId ? <Loader2 className="h-3 w-3 animate-spin" /> : <SelectValue />}
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="wan">WAN</SelectItem>
-                              <SelectItem value="lan">LAN</SelectItem>
-                              <SelectItem value="dmz">DMZ</SelectItem>
-                              <SelectItem value="management">Management</SelectItem>
-                              <SelectItem value="wifi">WiFi</SelectItem>
-                              <SelectItem value="unused">Unused</SelectItem>
-                            </SelectContent>
-                          </Select>
-                        </div>
-                      </CardContent>
-                    </Card>
-                  );
-                })}
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* ═══════ TAB 5: ROUTES ═══════ */}
+        {/* ═══════ TAB 4: ROUTES ═══════ */}
         {activeTab === 'routes' && (
           <div className="space-y-6">
             <div className="flex justify-between items-center">
@@ -3143,7 +2867,7 @@ export default function NetworkPage() {
                   {multiWanConfig.wanMembers.length === 0 ? (
                     <div className="p-8 text-center text-sm text-muted-foreground">
                       <Globe className="h-8 w-8 mx-auto mb-2 text-muted-foreground/50" />
-                      No WAN members added. Click "Add WAN Link" or assign WAN role to interfaces in the WAN/LAN Mapping tab.
+                      No WAN members added. Click "Add WAN Link" to configure WAN interfaces.
                     </div>
                   ) : (
                   <Table>
