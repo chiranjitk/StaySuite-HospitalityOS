@@ -95,16 +95,17 @@ interface NetworkInterface {
   rxBytes: number;
   txBytes: number;
   description: string;
+  allIps: string[];  // All IPs including secondaries, e.g. ["192.168.1.1", "192.168.1.2"]
   _osData?: any;
 }
 
 const fallbackInterfaces: NetworkInterface[] = [
-  { id: 'if-1', name: 'eth0', type: 'ethernet', status: 'up', ipAddress: '10.0.1.1', subnet: '255.255.255.0', mac: '00:1A:2B:3C:4D:01', speed: '1 Gbps', mtu: 1500, rxBytes: 4521984320, txBytes: 2847190230, description: 'Primary WAN uplink' },
-  { id: 'if-2', name: 'eth1', type: 'ethernet', status: 'up', ipAddress: '192.168.1.1', subnet: '255.255.255.0', mac: '00:1A:2B:3C:4D:02', speed: '1 Gbps', mtu: 1500, rxBytes: 1289472340, txBytes: 984712340, description: 'LAN - Floor 1' },
-  { id: 'if-3', name: 'br0', type: 'bridge', status: 'up', ipAddress: '172.16.0.1', subnet: '255.255.0.0', mac: '00:1A:2B:3C:4D:03', speed: '2 Gbps', mtu: 1500, rxBytes: 3241987234, txBytes: 2847198234, description: 'Management bridge' },
-  { id: 'if-4', name: 'bond0', type: 'bond', status: 'up', ipAddress: '10.0.2.1', subnet: '255.255.255.0', mac: '00:1A:2B:3C:4D:04', speed: '2 Gbps', mtu: 9000, rxBytes: 8947192340, txBytes: 6742198340, description: 'WAN failover bond' },
-  { id: 'if-5', name: 'wlan0', type: 'wireless', status: 'up', ipAddress: '192.168.10.1', subnet: '255.255.255.0', mac: '00:1A:2B:3C:4D:05', speed: '300 Mbps', mtu: 1500, rxBytes: 2847192340, txBytes: 1247198234, description: 'Guest WiFi AP' },
-  { id: 'if-6', name: 'eth2', type: 'ethernet', status: 'down', ipAddress: '—', subnet: '—', mac: '00:1A:2B:3C:4D:06', speed: '1 Gbps', mtu: 1500, rxBytes: 0, txBytes: 0, description: 'Unused - Future expansion' },
+  { id: 'if-1', name: 'eth0', type: 'ethernet', status: 'up', ipAddress: '10.0.1.1', subnet: '255.255.255.0', mac: '00:1A:2B:3C:4D:01', speed: '1 Gbps', mtu: 1500, rxBytes: 4521984320, txBytes: 2847190230, description: 'Primary WAN uplink', allIps: ['10.0.1.1'] },
+  { id: 'if-2', name: 'eth1', type: 'ethernet', status: 'up', ipAddress: '192.168.1.1', subnet: '255.255.255.0', mac: '00:1A:2B:3C:4D:02', speed: '1 Gbps', mtu: 1500, rxBytes: 1289472340, txBytes: 984712340, description: 'LAN - Floor 1', allIps: ['192.168.1.1'] },
+  { id: 'if-3', name: 'br0', type: 'bridge', status: 'up', ipAddress: '172.16.0.1', subnet: '255.255.0.0', mac: '00:1A:2B:3C:4D:03', speed: '2 Gbps', mtu: 1500, rxBytes: 3241987234, txBytes: 2847198234, description: 'Management bridge', allIps: ['172.16.0.1'] },
+  { id: 'if-4', name: 'bond0', type: 'bond', status: 'up', ipAddress: '10.0.2.1', subnet: '255.255.255.0', mac: '00:1A:2B:3C:4D:04', speed: '2 Gbps', mtu: 9000, rxBytes: 8947192340, txBytes: 6742198340, description: 'WAN failover bond', allIps: ['10.0.2.1'] },
+  { id: 'if-5', name: 'wlan0', type: 'wireless', status: 'up', ipAddress: '192.168.10.1', subnet: '255.255.255.0', mac: '00:1A:2B:3C:4D:05', speed: '300 Mbps', mtu: 1500, rxBytes: 2847192340, txBytes: 1247198234, description: 'Guest WiFi AP', allIps: ['192.168.10.1'] },
+  { id: 'if-6', name: 'eth2', type: 'ethernet', status: 'down', ipAddress: '—', subnet: '—', mac: '00:1A:2B:3C:4D:06', speed: '1 Gbps', mtu: 1500, rxBytes: 0, txBytes: 0, description: 'Unused - Future expansion', allIps: ['—'] },
 ];
 
 interface VLANEntry {
@@ -531,6 +532,7 @@ export default function NetworkPage() {
             rxBytes: iface.rxBytes || 0,
             txBytes: iface.txBytes || 0,
             description: dbDescriptions[iface.name] || (iface.isDefaultRoute ? 'Default route (WAN)' : (iface.driver || '')),
+            allIps: (iface.ipv4Addresses || []).map((addr: string) => addr.split('/')[0]),
             _osData: iface, // Keep raw OS data for detail views
           };
         });
@@ -1239,22 +1241,28 @@ export default function NetworkPage() {
     try {
       const osRes = await fetch(`/api/network/os/interfaces/${ifaceName}/aliases`);
       const osResult = await osRes.json();
-      if (osResult.success && Array.isArray(osResult.data)) {
-        setInterfaceAliases(osResult.data.map((a: any) => ({ ipAddress: a.ipAddress, netmask: a.netmask, description: a.description || '' })));
-      } else {
-        // Derive from _osData if available
-        const iface = interfaces.find(i => i.name === ifaceName);
-        if (iface?._osData?.ipv4Addresses?.length > 1) {
-          const extra = iface._osData.ipv4Addresses.slice(1).map((addr: string) => {
-            const [ip, cidr] = addr.split('/');
-            const prefix = parseInt(cidr || '24', 10);
-            const mask = prefix === 0 ? 0 : (~0 << (32 - prefix)) >>> 0;
-            return { ipAddress: ip, netmask: `${(mask >>> 24) & 255}.${(mask >>> 16) & 255}.${(mask >>> 8) & 255}.${mask & 255}`, description: '' };
-          });
-          setInterfaceAliases(extra);
+      if (osResult.success && osResult.data) {
+        // New format: { data: { interfaceName, osAliases, dbAliases } }
+        const aliases = osResult.data.osAliases || [];
+        if (aliases.length > 0) {
+          setInterfaceAliases(aliases.map((a: any) => ({ ipAddress: a.ip, netmask: a.netmask, description: '' })));
         } else {
-          setInterfaceAliases([]);
+          // Fallback: derive from _osData
+          const iface = interfaces.find(i => i.name === ifaceName);
+          if (iface?._osData?.ipv4Addresses?.length > 1) {
+            const extra = iface._osData.ipv4Addresses.slice(1).map((addr: string) => {
+              const [ip, cidr] = addr.split('/');
+              const prefix = parseInt(cidr || '24', 10);
+              const mask = prefix === 0 ? 0 : (~0 << (32 - prefix)) >>> 0;
+              return { ipAddress: ip, netmask: `${(mask >>> 24) & 255}.${(mask >>> 16) & 255}.${(mask >>> 8) & 255}.${mask & 255}`, description: '' };
+            });
+            setInterfaceAliases(extra);
+          } else {
+            setInterfaceAliases([]);
+          }
         }
+      } else {
+        setInterfaceAliases([]);
       }
     } catch { setInterfaceAliases([]); }
   };
@@ -1879,8 +1887,10 @@ export default function NetworkPage() {
                   <CardContent className="pt-0">
                     <div className="grid grid-cols-2 gap-2 text-xs">
                       <div className="space-y-0.5">
-                        <span className="text-muted-foreground">IP Address</span>
-                        <p className="font-mono font-medium">{iface.ipAddress}</p>
+                        <span className="text-muted-foreground">IP Address{iface.allIps.length > 1 ? 'es' : ''}</span>
+                        {iface.allIps.map((ip, idx) => (
+                          <p key={idx} className="font-mono font-medium text-xs">{ip}</p>
+                        ))}
                       </div>
                       <div className="space-y-0.5">
                         <span className="text-muted-foreground">Subnet</span>
@@ -1968,7 +1978,11 @@ export default function NetworkPage() {
                               </div>
                             </div>
                           </TableCell>
-                          <TableCell className="font-mono text-sm">{iface.ipAddress}</TableCell>
+                          <TableCell className="font-mono text-sm">
+                            {iface.allIps.map((ip, idx) => (
+                              <span key={idx}>{ip}{idx < iface.allIps.length - 1 ? ', ' : ''}</span>
+                            ))}
+                          </TableCell>
                           <TableCell className="font-mono text-sm">{iface.subnet}</TableCell>
                           <TableCell className="font-mono text-sm">{iface.mac}</TableCell>
                           <TableCell className="text-sm">{iface.speed}</TableCell>

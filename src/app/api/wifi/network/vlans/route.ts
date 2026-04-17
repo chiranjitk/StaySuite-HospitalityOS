@@ -7,7 +7,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { requirePermission } from '@/lib/auth/tenant-context';
-import { createVlan } from '@/lib/network';
 
 // GET /api/wifi/network/vlans - List all VLANs
 export async function GET(request: NextRequest) {
@@ -172,27 +171,8 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Execute OS-level VLAN creation via shell script
-    try {
-      const osResult = createVlan({
-        parentInterface: parentIfaceName,
-        vlanId: parseInt(vlanId, 10),
-        name: subInterface,
-        mtu: parseInt(mtu, 10),
-      });
-      if (!osResult.success) {
-        return NextResponse.json(
-          { success: false, error: { code: 'OS_ERROR', message: `Failed to create VLAN at OS level: ${osResult.error}` } },
-          { status: 500 },
-        );
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return NextResponse.json(
-        { success: false, error: { code: 'OS_ERROR', message: `Failed to create VLAN at OS level: ${msg}` } },
-        { status: 500 },
-      );
-    }
+    // OS-level VLAN creation is handled by the frontend calling /api/network/os/vlans first.
+    // This route only persists the VLAN configuration to the database.
 
     // Create VLAN with connectOrCreate for parent interface
     // NOTE: When using relation connect, do NOT also pass scalar FK fields (tenantId/propertyId)
@@ -235,9 +215,20 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ success: true, data: vlan }, { status: 201 });
   } catch (error) {
     console.error('Error creating VLAN:', error);
+    console.error('Full error details:', JSON.stringify(error, null, 2));
     const msg = error instanceof Error ? error.message : String(error);
+    const prismaCode = (error as { code?: string })?.code;
+    const prismaMeta = (error as { meta?: unknown })?.meta;
     return NextResponse.json(
-      { success: false, error: { code: 'INTERNAL_ERROR', message: `Failed to create VLAN: ${msg}` } },
+      {
+        success: false,
+        error: {
+          code: prismaCode === 'P2002' ? 'DUPLICATE_ENTRY' : 'INTERNAL_ERROR',
+          message: `Failed to create VLAN: ${msg}`,
+          ...(prismaCode && { prismaCode }),
+          ...(prismaMeta && { prismaMeta }),
+        },
+      },
       { status: 500 },
     );
   }
