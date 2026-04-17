@@ -230,6 +230,41 @@ export async function POST(
       });
     }
 
+    // ── Description (metadata-only, saves to DB) ──
+    if (body.description !== undefined && body.mode === undefined) {
+      try {
+        const existing = await db.networkInterface.findUnique({
+          where: { propertyId_name: { propertyId: PROPERTY_ID, name } },
+        });
+        if (existing) {
+          await db.networkInterface.update({
+            where: { id: existing.id },
+            data: { description: body.description },
+          });
+        } else {
+          await db.networkInterface.create({
+            data: {
+              tenantId: TENANT_ID,
+              propertyId: PROPERTY_ID,
+              name,
+              type: 'ethernet',
+              status: 'up',
+              description: body.description,
+            },
+          });
+        }
+        return NextResponse.json({
+          success: true,
+          message: `Description updated for ${name}`,
+        });
+      } catch (dbErr: any) {
+        return NextResponse.json({
+          success: false,
+          error: { code: 'DB_ERROR', message: dbErr.message },
+        }, { status: 500 });
+      }
+    }
+
     // ── IP Address / Subnet / Gateway Configuration ──
     if (body.mode !== undefined) {
       const mode = body.mode as 'dhcp' | 'static';

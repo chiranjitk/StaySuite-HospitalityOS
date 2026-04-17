@@ -426,6 +426,21 @@ export default function NetworkPage() {
           const name = iface.name as string;
           return !excludedPrefixes.some(p => name === p || name.startsWith(p));
         });
+
+        // Fetch DB-stored interface descriptions to override OS driver names
+        let dbDescriptions: Record<string, string> = {};
+        try {
+          const dbRes = await fetch(`/api/wifi/network/interfaces?${propertyId ? 'propertyId=' + propertyId : ''}`);
+          const dbResult = await dbRes.json();
+          if (dbResult.success && Array.isArray(dbResult.data)) {
+            for (const row of dbResult.data) {
+              if (row.name && row.description) {
+                dbDescriptions[row.name as string] = row.description as string;
+              }
+            }
+          }
+        } catch { /* ignore DB fetch errors — use OS description as fallback */ }
+
         const mapped: NetworkInterface[] = filteredOS.map((iface: any) => {
           const typeMap: Record<string, NetworkInterface['type']> = {
             ethernet: 'ethernet', wifi: 'wireless', loopback: 'ethernet',
@@ -451,7 +466,7 @@ export default function NetworkPage() {
             mtu: iface.mtu || 1500,
             rxBytes: iface.rxBytes || 0,
             txBytes: iface.txBytes || 0,
-            description: iface.isDefaultRoute ? 'Default route (WAN)' : iface.driver || '',
+            description: dbDescriptions[iface.name] || (iface.isDefaultRoute ? 'Default route (WAN)' : (iface.driver || '')),
             _osData: iface, // Keep raw OS data for detail views
           };
         });
@@ -829,7 +844,16 @@ export default function NetworkPage() {
         }
       }
 
-      // When using OS data, the OS API calls above handle everything — no DB metadata call needed
+      // When using OS data, the OS API calls above handle everything
+      // Also save description to DB via OS API
+      if (osDataLoaded && editInterfaceData.description !== selectedInterface.description) {
+        await fetch(`/api/network/os/interfaces/${selectedInterface.name}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ description: editInterfaceData.description }),
+        });
+      }
+
       if (osDataLoaded) {
         toast({ title: 'Interface Updated', description: `${editInterfaceData.name} configuration saved.` });
         setEditInterfaceOpen(false);
