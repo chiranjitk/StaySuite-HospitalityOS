@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { setRole, removeRole, listRoles } from '@/lib/network/role';
+import { writeInterfaceRoleToOS, removeInterfaceRoleFromOS, readInterfaceRolesFromOS } from '@/lib/interface-role-persist';
 
 /**
  * Interface Role API
@@ -37,13 +38,29 @@ export async function GET(
     }
 
     // 1. Try OS-persisted roles first via shell script
-    const osResult = listRoles();
     let osRole = null;
+    try {
+      const osResult = listRoles();
+      if (osResult.success && osResult.data) {
+        const found = osResult.data.roles.find(r => r.interface === name);
+        if (found) {
+          osRole = found;
+        }
+      }
+    } catch (e: any) {
+      console.warn(`[Interface Role API] Shell script listRoles failed for ${name}: ${e.message}, using inline fallback`);
+    }
 
-    if (osResult.success && osResult.data) {
-      const found = osResult.data.roles.find(r => r.interface === name);
-      if (found) {
-        osRole = found;
+    // 1b. Inline fallback: read roles directly from /etc/network/interfaces
+    if (!osRole) {
+      try {
+        const rolesMap = readInterfaceRolesFromOS();
+        const persisted = rolesMap.get(name);
+        if (persisted) {
+          osRole = { interface: name, role: persisted.role, priority: persisted.priority };
+        }
+      } catch (e: any) {
+        console.warn(`[Interface Role API] Inline role read failed for ${name}: ${e.message}`);
       }
     }
 
@@ -149,12 +166,32 @@ export async function PUT(
     const safePriority = typeof priority === 'number' && priority >= 0 ? priority : 0;
     const safeIsPrimary = typeof isPrimary === 'boolean' ? isPrimary : false;
 
-    // 1. Set role via shell script wrapper
-    const osResult = setRole(name, role, safePriority);
-    if (!osResult.success) {
-      console.warn(
-        `[Interface Role API] OS write failed for ${name}: ${osResult.error} — continuing with DB only`
-      );
+    // 1. Set role via shell script wrapper (with inline fallback)
+    let osSuccess = false;
+    try {
+      const osResult = setRole(name, role, safePriority);
+      if (osResult.success) {
+        osSuccess = true;
+      } else {
+        console.warn(`[Interface Role API] Shell script role set failed for ${name}: ${osResult.error}, using inline fallback`);
+      }
+    } catch (e: any) {
+      console.warn(`[Interface Role API] Shell script role set error for ${name}: ${e.message}, using inline fallback`);
+    }
+
+    // 1b. Inline fallback: write role tags directly to /etc/network/interfaces
+    if (!osSuccess) {
+      try {
+        const fbResult = await writeInterfaceRoleToOS(name, role, safePriority);
+        if (fbResult.success) {
+          osSuccess = true;
+          console.log(`[Interface Role API] Inline fallback role set succeeded for ${name}`);
+        } else {
+          console.warn(`[Interface Role API] Inline fallback role set also failed for ${name}: ${fbResult.message}`);
+        }
+      } catch (e: any) {
+        console.warn(`[Interface Role API] Inline fallback role set error for ${name}: ${e.message}`);
+      }
     }
 
     // 2. Upsert to database — ensure NetworkInterface record exists first
@@ -212,7 +249,7 @@ export async function PUT(
           role,
           priority: safePriority,
           isPrimary: safeIsPrimary,
-          persistedToOS: osResult.success,
+          persistedToOS: osSuccess,
           persistedToDB: false,
         },
       });
@@ -254,12 +291,32 @@ export async function DELETE(
       );
     }
 
-    // 1. Remove from OS via shell script wrapper
-    const osResult = removeRole(name);
-    if (!osResult.success) {
-      console.warn(
-        `[Interface Role API] OS remove failed for ${name}: ${osResult.error} — continuing with DB only`
-      );
+    // 1. Remove from OS via shell script wrapper (with inline fallback)
+    let osSuccess = false;
+    try {
+      const osResult = removeRole(name);
+      if (osResult.success) {
+        osSuccess = true;
+      } else {
+        console.warn(`[Interface Role API] Shell script role remove failed for ${name}: ${osResult.error}, using inline fallback`);
+      }
+    } catch (e: any) {
+      console.warn(`[Interface Role API] Shell script role remove error for ${name}: ${e.message}, using inline fallback`);
+    }
+
+    // 1b. Inline fallback: remove role tags directly from /etc/network/interfaces
+    if (!osSuccess) {
+      try {
+        const fbResult = await removeInterfaceRoleFromOS(name);
+        if (fbResult.success) {
+          osSuccess = true;
+          console.log(`[Interface Role API] Inline fallback role remove succeeded for ${name}`);
+        } else {
+          console.warn(`[Interface Role API] Inline fallback role remove also failed for ${name}: ${fbResult.message}`);
+        }
+      } catch (e: any) {
+        console.warn(`[Interface Role API] Inline fallback role remove error for ${name}: ${e.message}`);
+      }
     }
 
     // 2. Remove from database
@@ -293,7 +350,7 @@ export async function DELETE(
       success: true,
       data: {
         interfaceName: name,
-        removedFromOS: osResult.success,
+        removedFromOS: osSuccess,
         removedFromDB: dbDeleted,
       },
     });

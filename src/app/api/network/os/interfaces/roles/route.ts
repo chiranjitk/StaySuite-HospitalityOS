@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { setRole, listRoles } from '@/lib/network/role';
+import { writeInterfaceRoleToOS, readInterfaceRolesFromOS } from '@/lib/interface-role-persist';
 
 /**
  * Bulk Interface Roles API
@@ -23,8 +24,28 @@ const PROPERTY_ID = 'property-1';
 
 export async function GET() {
   try {
-    // Read from OS via shell script wrapper
-    const osResult = listRoles();
+    // Read from OS via shell script wrapper (with inline fallback)
+    let osRolesList: Array<{ interface: string; role: string; priority: number }> = [];
+    try {
+      const osResult = listRoles();
+      if (osResult.success && osResult.data) {
+        osRolesList = osResult.data.roles;
+      }
+    } catch (e: any) {
+      console.warn(`[Bulk Roles API] Shell script listRoles failed: ${e.message}, using inline fallback`);
+    }
+
+    // Inline fallback: read roles directly from /etc/network/interfaces
+    if (osRolesList.length === 0) {
+      try {
+        const rolesMap = readInterfaceRolesFromOS();
+        for (const [ifaceName, info] of rolesMap) {
+          osRolesList.push({ interface: ifaceName, role: info.role, priority: info.priority });
+        }
+      } catch (e: any) {
+        console.warn(`[Bulk Roles API] Inline role read failed: ${e.message}`);
+      }
+    }
 
     // Also read from DB to merge
     const dbRoles = await db.interfaceRole.findMany({
@@ -55,18 +76,16 @@ export async function GET() {
     }
 
     // OS entries override DB
-    if (osResult.success && osResult.data) {
-      for (const info of osResult.data.roles) {
-        const existing = merged.get(info.interface);
-        merged.set(info.interface, {
-          interfaceName: info.interface,
-          role: info.role,
-          priority: info.priority,
-          isPrimary: existing?.isPrimary ?? false,
-          enabled: existing?.enabled ?? true,
-          source: 'os',
-        });
-      }
+    for (const info of osRolesList) {
+      const existing = merged.get(info.interface);
+      merged.set(info.interface, {
+        interfaceName: info.interface,
+        role: info.role,
+        priority: info.priority,
+        isPrimary: existing?.isPrimary ?? false,
+        enabled: existing?.enabled ?? true,
+        source: 'os',
+      });
     }
 
     return NextResponse.json({
@@ -157,8 +176,19 @@ export async function PUT(request: NextRequest) {
             ? entry.priority
             : 0;
 
-        // 1. Write to OS via shell script wrapper
-        const osResult = setRole(ifaceName, role, priority);
+        // 1. Write to OS via shell script wrapper (with inline fallback)
+        let osOk = false;
+        try {
+          const osResult = setRole(ifaceName, role, priority);
+          if (osResult.success) osOk = true;
+        } catch { /* continue to fallback */ }
+
+        if (!osOk) {
+          try {
+            const fb = await writeInterfaceRoleToOS(ifaceName, role, priority);
+            if (fb.success) osOk = true;
+          } catch { /* DB-only mode */ }
+        }
 
         // 2. Upsert to DB — ensure NetworkInterface exists for FK
         let dbSuccess = false;
@@ -213,7 +243,7 @@ export async function PUT(request: NextRequest) {
           interfaceName: ifaceName,
           role,
           priority,
-          persistedToOS: osResult.success,
+          persistedToOS: osOk,
           persistedToDB: dbSuccess,
         };
       })

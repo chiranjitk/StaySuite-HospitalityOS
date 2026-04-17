@@ -930,63 +930,103 @@ export default function NetworkPage() {
     if (!selectedInterface) return;
     try {
       const matchedRole = roles.find(r => r.interfaceName === selectedInterface.name);
-      
-      // If using OS data, apply MTU via OS API
-      if (osDataLoaded && editInterfaceData.mtu !== selectedInterface.mtu) {
-        const mtuRes = await fetch(`/api/network/os/interfaces/${selectedInterface.name}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ mtu: editInterfaceData.mtu }),
-        });
-        const mtuResult = await mtuRes.json();
-        if (mtuResult.success) {
-          toast({ title: 'MTU Updated', description: `MTU for ${selectedInterface.name} set to ${editInterfaceData.mtu}` });
-        }
-      }
+      const errors: string[] = [];
 
-      // If IP config changed, call IP config API
-      if (osDataLoaded && (editInterfaceData.mode !== (selectedInterface.ipAddress === '—' ? 'dhcp' : 'static') ||
-          editInterfaceData.ipAddress !== selectedInterface.ipAddress ||
-          editInterfaceData.netmask !== selectedInterface.subnet)) {
-        await fetch(`/api/network/os/interfaces/${selectedInterface.name}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ 
-            mode: editInterfaceData.mode, 
-            ipAddress: editInterfaceData.ipAddress, 
-            netmask: editInterfaceData.netmask,
-            gateway: editInterfaceData.gateway 
-          }),
-        });
-      }
-
-      // If role changed, call role API
-      if (editInterfaceData.role !== (matchedRole?.role || 'unused') || editInterfaceData.priority !== (matchedRole?.priority || 0)) {
-        const roleRes = await fetch(`/api/network/os/interfaces/${selectedInterface.name}/role`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ role: editInterfaceData.role, priority: editInterfaceData.priority }),
-        });
-        const roleResult = await roleRes.json();
-        if (roleResult.success) {
-          toast({ title: 'Role Updated', description: `${selectedInterface.name} set to ${editInterfaceData.role.toUpperCase()}` });
-        } else if (roleResult.warning) {
-          toast({ title: 'Role Updated (partial)', description: roleResult.warning, variant: 'default' });
-        }
-      }
-
-      // When using OS data, the OS API calls above handle everything
-      // Also save description to DB via OS API
-      if (osDataLoaded && editInterfaceData.description !== selectedInterface.description) {
-        await fetch(`/api/network/os/interfaces/${selectedInterface.name}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ description: editInterfaceData.description }),
-        });
-      }
-
+      // If using OS data, apply changes via OS APIs
       if (osDataLoaded) {
-        toast({ title: 'Interface Updated', description: `${editInterfaceData.name} configuration saved.` });
+        // 1. Apply MTU if changed
+        if (editInterfaceData.mtu !== selectedInterface.mtu) {
+          try {
+            const mtuRes = await fetch(`/api/network/os/interfaces/${selectedInterface.name}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ mtu: editInterfaceData.mtu }),
+            });
+            const mtuResult = await mtuRes.json();
+            if (mtuResult.success) {
+              toast({ title: 'MTU Updated', description: `MTU for ${selectedInterface.name} set to ${editInterfaceData.mtu}` });
+            } else {
+              errors.push(`MTU: ${mtuResult.error?.message || 'failed'}`);
+            }
+          } catch (e: any) {
+            errors.push(`MTU: ${e.message}`);
+          }
+        }
+
+        // 2. Apply IP config — detect mode from _osData if available
+        const currentMode = (selectedInterface as any)._osData
+          ? (editInterfaceData.mode === 'dhcp' ? 'dhcp' : 'static')
+          : (selectedInterface.ipAddress === '—' ? 'dhcp' : 'static');
+        const ipChanged = editInterfaceData.mode !== currentMode ||
+          editInterfaceData.ipAddress !== selectedInterface.ipAddress ||
+          editInterfaceData.netmask !== selectedInterface.subnet ||
+          editInterfaceData.gateway !== '';
+
+        // Also always apply when switching between dhcp/static
+        if (ipChanged || editInterfaceData.mode !== currentMode) {
+          try {
+            const ipRes = await fetch(`/api/network/os/interfaces/${selectedInterface.name}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                mode: editInterfaceData.mode,
+                ...(editInterfaceData.mode === 'static' ? {
+                  ipAddress: editInterfaceData.ipAddress,
+                  netmask: editInterfaceData.netmask,
+                  gateway: editInterfaceData.gateway,
+                } : {}),
+              }),
+            });
+            const ipResult = await ipRes.json();
+            if (ipResult.success) {
+              toast({ title: 'IP Config Updated', description: `${selectedInterface.name} set to ${editInterfaceData.mode.toUpperCase()}` });
+            } else {
+              errors.push(`IP Config: ${ipResult.error?.message || 'failed'}`);
+            }
+          } catch (e: any) {
+            errors.push(`IP Config: ${e.message}`);
+          }
+        }
+
+        // 3. Apply role change
+        if (editInterfaceData.role !== (matchedRole?.role || 'unused') || editInterfaceData.priority !== (matchedRole?.priority || 0)) {
+          try {
+            const roleRes = await fetch(`/api/network/os/interfaces/${selectedInterface.name}/role`, {
+              method: 'PUT',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ role: editInterfaceData.role, priority: editInterfaceData.priority }),
+            });
+            const roleResult = await roleRes.json();
+            if (roleResult.success) {
+              toast({ title: 'Role Updated', description: `${selectedInterface.name} set to ${editInterfaceData.role.toUpperCase()}` });
+            } else if (roleResult.warning) {
+              toast({ title: 'Role Updated (partial)', description: roleResult.warning, variant: 'default' });
+            } else {
+              errors.push(`Role: ${roleResult.error?.message || 'failed'}`);
+            }
+          } catch (e: any) {
+            errors.push(`Role: ${e.message}`);
+          }
+        }
+
+        // 4. Save description to DB
+        if (editInterfaceData.description !== selectedInterface.description) {
+          try {
+            await fetch(`/api/network/os/interfaces/${selectedInterface.name}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ description: editInterfaceData.description }),
+            });
+          } catch (e: any) {
+            errors.push(`Description: ${e.message}`);
+          }
+        }
+
+        if (errors.length > 0) {
+          toast({ title: 'Partial Update', description: `Some changes failed: ${errors.join('; ')}`, variant: 'destructive' });
+        } else {
+          toast({ title: 'Interface Updated', description: `${editInterfaceData.name} configuration saved.` });
+        }
         setEditInterfaceOpen(false);
         fetchInterfaces();
         return;

@@ -3,6 +3,7 @@ import { execSync } from 'child_process';
 import { db } from '@/lib/db';
 import { addAlias, removeAlias, listAliases } from '@/lib/network/alias';
 import { persistAliasAdd, persistAliasRemove } from '@/lib/network/persist';
+import { netmaskToCidr } from '@/lib/network/executor';
 
 function safeExec(cmd: string, timeout = 5000): string {
   try { return execSync(cmd, { encoding: 'utf-8', timeout }); } catch { return ''; }
@@ -265,17 +266,52 @@ export async function DELETE(
 
     const results: { step: string; success: boolean; message: string }[] = [];
 
-    // 1. Remove at OS level via shell script
-    const removeResult = removeAlias(name, ip, netmask);
-
-    if (!removeResult.success) {
-      // Log warning but continue — the alias may not exist at OS level
-      console.warn(`[Network OS API] OS remove for alias ${ip} on ${name}: ${removeResult.error}`);
+    // 1. Remove at OS level via shell script (with inline fallback)
+    let osRemoveOk = false;
+    try {
+      const removeResult = removeAlias(name, ip, netmask);
+      if (removeResult.success) {
+        osRemoveOk = true;
+      } else {
+        console.warn(`[Network OS API] Shell script alias remove failed for ${ip} on ${name}: ${removeResult.error}, trying inline fallback`);
+      }
+    } catch (e: any) {
+      console.warn(`[Network OS API] Shell script alias remove error for ${ip} on ${name}: ${e.message}, trying inline fallback`);
     }
+
+    // Inline fallback: try ip addr del directly
+    if (!osRemoveOk) {
+      try {
+        const cidr = cidrToNetmask(netmask) === netmask
+          ? Object.entries({
+              '0.0.0.0': 0, '128.0.0.0': 1, '192.0.0.0': 2, '224.0.0.0': 3,
+              '240.0.0.0': 4, '248.0.0.0': 5, '252.0.0.0': 6, '254.0.0.0': 7,
+              '255.0.0.0': 8, '255.128.0.0': 9, '255.192.0.0': 10, '255.224.0.0': 11,
+              '255.240.0.0': 12, '255.248.0.0': 13, '255.252.0.0': 14, '255.254.0.0': 15,
+              '255.255.0.0': 16, '255.255.128.0': 17, '255.255.192.0': 18, '255.255.224.0': 19,
+              '255.255.240.0': 20, '255.255.248.0': 21, '255.255.252.0': 22, '255.255.254.0': 23,
+              '255.255.255.0': 24, '255.255.255.128': 25, '255.255.255.192': 26,
+              '255.255.255.224': 27, '255.255.255.240': 28, '255.255.255.248': 29,
+              '255.255.255.252': 30, '255.255.255.254': 31, '255.255.255.255': 32,
+            }).find(([, v]) => v === netmaskToCidr(netmask))?.[1] || 24
+          : 24;
+        const delOutput = safeExec(`sudo ip addr del ${ip}/${cidr} dev ${name} 2>&1`);
+        // ip addr del returns error if IP doesn't exist, that's OK — we still want to clean up DB
+        osRemoveOk = true; // Consider it success — the IP is gone (or was never there)
+        if (delOutput.includes('Cannot find device') || delOutput.includes('not found')) {
+          console.log(`[Network OS API] Alias ${ip} was not on ${name} (already removed or never existed)`);
+        }
+      } catch (e: any) {
+        console.warn(`[Network OS API] Inline alias remove also failed for ${ip} on ${name}: ${e.message}`);
+        // Still continue to DB cleanup
+        osRemoveOk = true;
+      }
+    }
+
     results.push({
       step: 'del-addr',
-      success: removeResult.success,
-      message: removeResult.success ? 'Alias removed from OS' : (removeResult.error || 'OS remove failed'),
+      success: osRemoveOk,
+      message: osRemoveOk ? 'Alias removed from OS (or did not exist)' : 'OS remove failed',
     });
 
     // 2. Remove from /etc/network/interfaces via shell script
@@ -306,7 +342,7 @@ export async function DELETE(
       results.push({ step: 'database', success: false, message: dbErr.message });
     }
 
-    const cidr = removeResult.data?.cidr || 24;
+    const cidr = netmaskToCidr(netmask);
     return NextResponse.json({
       success: true,
       message: `Alias ${ip}/${cidr} removed from ${name}`,

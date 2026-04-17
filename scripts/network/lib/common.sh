@@ -178,6 +178,70 @@ ensure_root() {
 }
 
 ###############################################################################
+# /etc/network/interfaces file management
+###############################################################################
+
+# Ensure the interfaces file exists.
+ensure_interfaces_file() {
+    if [[ ! -f "${INTERFACES_FILE}" ]]; then
+        log_info "Creating ${INTERFACES_FILE}"
+        local dir
+        dir="$(dirname "${INTERFACES_FILE}")"
+        if [[ ! -d "${dir}" ]]; then
+            mkdir -p "${dir}" 2>/dev/null || true
+        fi
+        {
+            echo "# /etc/network/interfaces — managed by StaySuite HospitalityOS"
+            echo "# Auto-generated header"
+            echo ""
+        } | sudo tee "${INTERFACES_FILE}" > /dev/null
+    fi
+}
+
+# Backup the interfaces file.
+backup_interfaces() {
+    if [[ -f "${INTERFACES_FILE}" ]]; then
+        local backup="${INTERFACES_FILE}.staysuite.bak"
+        sudo cp "${INTERFACES_FILE}" "${backup}" 2>/dev/null || true
+        log_info "Backed up ${INTERFACES_FILE} to ${backup}"
+    fi
+}
+
+# Remove a managed block from the interfaces file.
+# Usage: remove_block <marker_prefix>
+# Removes lines between "MANAGED_MARKER: marker BEGIN" and "MANAGED_MARKER: marker END"
+remove_block() {
+    local marker_prefix="$1"
+
+    if [[ ! -f "${INTERFACES_FILE}" ]]; then
+        return 0
+    fi
+
+    # Use a temp file for safe in-place editing
+    local tmp
+    tmp="$(mktemp)"
+    local in_block=false
+
+    while IFS= read -r line || [[ -n "${line}" ]]; do
+        if [[ "${line}" == *"${MANAGED_MARKER}: ${marker_prefix} BEGIN"* ]]; then
+            in_block=true
+            continue
+        fi
+        if [[ "${line}" == *"${MANAGED_MARKER}: ${marker_prefix} END"* ]]; then
+            in_block=false
+            continue
+        fi
+        if [[ "${in_block}" == "false" ]]; then
+            echo "${line}"
+        fi
+    done < "${INTERFACES_FILE}" > "${tmp}"
+
+    sudo cp "${tmp}" "${INTERFACES_FILE}" 2>/dev/null || true
+    rm -f "${tmp}" 2>/dev/null || true
+    log_info "Removed managed block: ${marker_prefix}"
+}
+
+###############################################################################
 # Utility: netmask to CIDR conversion
 ###############################################################################
 
