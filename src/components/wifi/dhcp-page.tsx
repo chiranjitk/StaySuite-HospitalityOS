@@ -131,6 +131,23 @@ interface SystemInterface {
   status: string;
 }
 
+interface NetworkInterfaceOption {
+  deviceName: string;
+  name: string;
+  type: string;
+  nettype: number;
+  nettypeLabel: string;
+  state: string;
+  ipv4Address: string;
+  ipv4Cidr: number;
+  ipv4Gateway: string;
+  isPhysical: boolean;
+  isSlave: boolean;
+  vlanId?: number;
+  vlanParent?: string;
+  description?: string;
+}
+
 interface DnsmasqStatus {
   installed: boolean;
   running: boolean;
@@ -226,6 +243,67 @@ function validateMac(mac: string): boolean {
 function formatMacInput(val: string): string {
   const clean = val.replace(/[^0-9A-Fa-f]/g, '').slice(0, 12);
   return clean.match(/.{1,2}/g)?.join(':') ?? clean;
+}
+
+/**
+ * Compute network address from IP and CIDR prefix.
+ * e.g. ipToNetwork('192.168.1.50', 24) → '192.168.1.0'
+ */
+function ipToNetwork(ip: string, prefix: number): string {
+  const parts = ip.split('.').map(Number);
+  if (parts.length !== 4 || parts.some(p => isNaN(p))) return '';
+  const mask = prefix === 0 ? 0 : (~0 << (32 - prefix)) >>> 0;
+  const net = ((parts[0] << 24 | parts[1] << 16 | parts[2] << 8 | parts[3]) & mask) >>> 0;
+  return `${(net >>> 24) & 255}.${(net >>> 16) & 255}.${(net >>> 8) & 255}.${net & 255}`;
+}
+
+/**
+ * Compute broadcast address from IP and CIDR prefix.
+ * e.g. ipToBroadcast('192.168.1.50', 24) → '192.168.1.255'
+ */
+function ipToBroadcast(ip: string, prefix: number): string {
+  const parts = ip.split('.').map(Number);
+  if (parts.length !== 4 || parts.some(p => isNaN(p))) return '';
+  const mask = prefix === 0 ? 0 : (~0 << (32 - prefix)) >>> 0;
+  const bcast = ((parts[0] << 24 | parts[1] << 16 | parts[2] << 8 | parts[3]) | (~mask >>> 0)) >>> 0;
+  return `${(bcast >>> 24) & 255}.${(bcast >>> 16) & 255}.${(bcast >>> 8) & 255}.${bcast & 255}`;
+}
+
+/**
+ * Convert an integer IP to dotted-decimal string.
+ */
+function intToIp(n: number): string {
+  return `${(n >>> 24) & 255}.${(n >>> 16) & 255}.${(n >>> 8) & 255}.${n & 255}`;
+}
+
+/**
+ * Compute a sensible DHCP pool for a given subnet.
+ * For /24: poolStart = network+100, poolEnd = broadcast-1
+ * For /23: poolStart = network+100, poolEnd = broadcast-1
+ * For /25 or smaller: poolStart = network+10, poolEnd = broadcast-1
+ * For /16 or larger: poolStart = network+256, poolEnd = broadcast-1
+ */
+function computePool(networkIp: string, prefix: number, gatewayIp: string): { poolStart: string; poolEnd: string } {
+  const parts = networkIp.split('.').map(Number);
+  const mask = prefix === 0 ? 0 : (~0 << (32 - prefix)) >>> 0;
+  const netInt = ((parts[0] << 24 | parts[1] << 16 | parts[2] << 8 | parts[3]) & mask) >>> 0;
+  const bcastInt = (netInt | (~mask >>> 0)) >>> 0;
+  const gwParts = gatewayIp.split('.').map(Number);
+  const gwInt = (gwParts[0] << 24 | gwParts[1] << 16 | gwParts[2] << 8 | gwParts[3]) >>> 0;
+
+  let startOffset: number;
+  if (prefix <= 16) startOffset = 256;
+  else if (prefix <= 24) startOffset = 100;
+  else startOffset = 10;
+
+  let poolStartInt = netInt + startOffset;
+  // Ensure pool doesn't start at or below gateway
+  if (poolStartInt <= gwInt) poolStartInt = gwInt + 1;
+  // Ensure pool doesn't overlap with network address
+  if (poolStartInt <= netInt + 1) poolStartInt = netInt + 2;
+
+  const poolEndInt = bcastInt - 1;
+  return { poolStart: intToIp(poolStartInt), poolEnd: intToIp(poolEndInt) };
 }
 
 function leaseTimeToSeconds(input: string): number {
@@ -431,6 +509,10 @@ export default function DhcpPage() {
   const [loadingReservations, setLoadingReservations] = useState(false);
   const [loadingLeases, setLoadingLeases] = useState(false);
 
+  // ─── Network Interface State (for DHCP subnet form) ─────────────────────
+  const [eligibleInterfaces, setEligibleInterfaces] = useState<NetworkInterfaceOption[]>([]);
+  const [loadingInterfaces, setLoadingInterfaces] = useState(false);
+
   // ─── Lease Refresh ─────────────────────────────────────────────────────────
   const [lastRefresh, setLastRefresh] = useState(Date.now());
   const [refreshKey, setRefreshKey] = useState(0);
@@ -613,6 +695,78 @@ export default function DhcpPage() {
     dnsServers: '', domainName: '',
   });
 
+  // ─── Fetch DHCP-Eligible Network Interfaces ─────────────────────────────
+  const fetchEligibleInterfaces = useCallback(async () => {
+    setLoadingInterfaces(true);
+    try {
+      const result = await apiCall('/api/network/os?section=interfaces');
+      if (result.success && Array.isArray(result.data)) {
+        // Filter: exclude WAN (nettype=1), exclude slaves, exclude loopback, must have IP
+        const eligible = (result.data as Record<string, unknown>[]).filter((iface) => {
+          if (iface.nettype === 1) return false; // WAN
+          if (iface.isSlave) return false; // bridge/bond slave port
+          if (!iface.ipv4Address) return false; // must have IP configured
+          const type = (iface.type as string) || '';
+          if (type === 'loopback') return false;
+          // Only allow: ethernet, vlan, bridge, bond
+          return ['ethernet', 'vlan', 'bridge', 'bond'].includes(type);
+        }).map((iface) => ({
+          deviceName: (iface.deviceName as string) || (iface.name as string) || '',
+          name: (iface.name as string) || '',
+          type: (iface.type as string) || 'ethernet',
+          nettype: (iface.nettype as number) || 0,
+          nettypeLabel: (iface.nettypeLabel as string) || 'LAN',
+          state: (iface.state as string) || 'down',
+          ipv4Address: (iface.ipv4Address as string) || '',
+          ipv4Cidr: (iface.ipv4Cidr as number) || 24,
+          ipv4Gateway: (iface.ipv4Gateway as string) || '',
+          isPhysical: (iface.isPhysical as boolean) || false,
+          isSlave: (iface.isSlave as boolean) || false,
+          vlanId: (iface.vlanId as number) || undefined,
+          vlanParent: (iface.vlanParent as string) || undefined,
+          description: (iface.description as string) || undefined,
+        }));
+        // Sort: physical first, then by nettype, then by name
+        eligible.sort((a, b) => {
+          if (a.isPhysical !== b.isPhysical) return a.isPhysical ? -1 : 1;
+          if (a.nettype !== b.nettype) return a.nettype - b.nettype;
+          return a.deviceName.localeCompare(b.deviceName);
+        });
+        setEligibleInterfaces(eligible);
+      }
+    } catch (err) {
+      console.error('Error fetching eligible interfaces:', err);
+    } finally {
+      setLoadingInterfaces(false);
+    }
+  }, []);
+
+  // ─── Auto-fill subnet form from selected network interface ───────────────
+  const handleInterfaceSelect = useCallback((deviceName: string) => {
+    const iface = eligibleInterfaces.find(i => i.deviceName === deviceName);
+    if (!iface) {
+      // User typed manually or cleared - just set the interface name
+      setSubnetForm(prev => ({ ...prev, iface: deviceName }));
+      return;
+    }
+
+    const prefix = iface.ipv4Cidr || 24;
+    const networkAddr = ipToNetwork(iface.ipv4Address, prefix);
+    const gateway = iface.ipv4Gateway || `${networkAddr.replace(/\.\d+$/, '.1')}`;
+    const { poolStart, poolEnd } = computePool(networkAddr, prefix, gateway);
+
+    setSubnetForm(prev => ({
+      ...prev,
+      iface: iface.deviceName,
+      name: prev.name || `${iface.nettypeLabel} - ${iface.deviceName}`,
+      cidr: `${networkAddr}/${prefix}`,
+      gateway: gateway,
+      poolStart: poolStart,
+      poolEnd: poolEnd,
+      vlanId: iface.vlanId ? String(iface.vlanId) : prev.vlanId,
+    }));
+  }, [eligibleInterfaces]);
+
   const openAddSubnet = () => {
     setEditingSubnet(null);
     setSubnetForm({
@@ -620,6 +774,7 @@ export default function DhcpPage() {
       poolStart: '', poolEnd: '', leaseTime: '4h',
       dnsServers: '8.8.8.8, 8.8.4.4', domainName: '',
     });
+    fetchEligibleInterfaces();
     setSubnetDialogOpen(true);
   };
 
@@ -637,6 +792,7 @@ export default function DhcpPage() {
       dnsServers: (s.dnsServers || []).join(', '),
       domainName: s.domainName,
     });
+    fetchEligibleInterfaces();
     setSubnetDialogOpen(true);
   };
 
@@ -1350,17 +1506,82 @@ export default function DhcpPage() {
                 />
               </div>
 
-              {/* Interface + VLAN */}
+              {/* Interface Selector + VLAN */}
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
-                  <Label htmlFor="subnet-iface">Interface</Label>
-                  <Input
-                    id="subnet-iface"
-                    value={subnetForm.iface}
-                    onChange={e => setSubnetForm(p => ({ ...p, iface: e.target.value }))}
-                    placeholder="e.g. eth0.10"
-                    className="font-mono"
-                  />
+                  <Label htmlFor="subnet-iface-select">
+                    <span className="flex items-center gap-1.5">
+                      <Monitor className="h-3.5 w-3.5" />
+                      Interface
+                    </span>
+                  </Label>
+                  {loadingInterfaces ? (
+                    <Skeleton className="h-9 w-full" />
+                  ) : eligibleInterfaces.length > 0 ? (
+                    <Select
+                      value={subnetForm.iface}
+                      onValueChange={handleInterfaceSelect}
+                    >
+                      <SelectTrigger id="subnet-iface-select" className="font-mono">
+                        <SelectValue placeholder="Select interface..." />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {eligibleInterfaces.map((iface) => (
+                          <SelectItem key={iface.deviceName} value={iface.deviceName}>
+                            <span className="flex items-center gap-2">
+                              <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4 font-mono">
+                                {iface.type === 'vlan' ? 'VLAN' : iface.type === 'bridge' ? 'BR' : iface.type === 'bond' ? 'BOND' : 'PHY'}
+                              </Badge>
+                              <span className="font-mono font-medium">{iface.deviceName}</span>
+                              <span className="text-muted-foreground text-xs">
+                                {iface.ipv4Address}/{iface.ipv4Cidr}
+                              </span>
+                              <Badge
+                                variant="outline"
+                                className={cn(
+                                  'text-[10px] px-1.5 py-0 h-4',
+                                  iface.state === 'up'
+                                    ? 'bg-emerald-500/15 text-emerald-700 border-emerald-300'
+                                    : 'bg-gray-500/15 text-gray-600 border-gray-300'
+                                )}
+                              >
+                                {iface.nettypeLabel}
+                              </Badge>
+                              {iface.state !== 'up' && (
+                                <AlertTriangle className="h-3 w-3 text-amber-500" />
+                              )}
+                            </span>
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  ) : (
+                    <div className="relative">
+                      <Input
+                        id="subnet-iface"
+                        value={subnetForm.iface}
+                        onChange={e => setSubnetForm(p => ({ ...p, iface: e.target.value }))}
+                        placeholder="e.g. eth0.10 (manual)"
+                        className="font-mono pr-8"
+                      />
+                      <TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <div className="absolute right-2 top-1/2 -translate-y-1/2">
+                              <AlertTriangle className="h-3.5 w-3.5 text-amber-500" />
+                            </div>
+                          </TooltipTrigger>
+                          <TooltipContent>
+                            <p>No eligible interfaces found from Network Manager.</p>
+                            <p>You can type the interface name manually.</p>
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    </div>
+                  )}
+                  <p className="text-xs text-muted-foreground">
+                    Select from Network Manager (excludes WAN) or type manually
+                  </p>
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="subnet-vlan">VLAN ID</Label>
@@ -1370,9 +1591,23 @@ export default function DhcpPage() {
                     value={subnetForm.vlanId}
                     onChange={e => setSubnetForm(p => ({ ...p, vlanId: e.target.value }))}
                     placeholder="e.g. 10"
+                    disabled={!!subnetForm.iface && eligibleInterfaces.some(i => i.deviceName === subnetForm.iface && !!i.vlanId)}
                   />
+                  {subnetForm.iface && eligibleInterfaces.some(i => i.deviceName === subnetForm.iface && !!i.vlanId) && (
+                    <p className="text-xs text-muted-foreground">Auto-filled from VLAN interface</p>
+                  )}
                 </div>
               </div>
+
+              {/* Auto-fill info banner */}
+              {subnetForm.iface && eligibleInterfaces.some(i => i.deviceName === subnetForm.iface) && (
+                <div className="flex items-center gap-2 p-3 rounded-lg bg-teal-50 dark:bg-teal-950/20 border border-teal-200 dark:border-teal-900 text-sm">
+                  <CheckCircle2 className="h-4 w-4 text-teal-600 shrink-0" />
+                  <span className="text-teal-700 dark:text-teal-400">
+                    Form auto-filled from <span className="font-mono font-medium">{subnetForm.iface}</span> network config. You can edit any field manually.
+                  </span>
+                </div>
+              )}
 
               {/* CIDR + Gateway */}
               <div className="grid grid-cols-2 gap-4">
