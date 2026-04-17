@@ -895,6 +895,8 @@ export function removeRoute(name: string, destination: string, gateway: string):
   sanitizeName(name);
   withStaySuitePreserved(name, () => {
     exec(`sudo nmcli con mod ${name} -ipv4.routes "${destination} ${gateway}"`);
+    // Bring the connection up so the route removal takes effect immediately
+    try { exec(`sudo nmcli con up ${name}`); } catch {}
   });
 }
 

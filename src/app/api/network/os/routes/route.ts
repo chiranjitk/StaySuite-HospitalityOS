@@ -51,17 +51,20 @@ function persistRouteToFile(destination: string, gateway: string, interfaceName:
   }
 }
 
-/** Remove a route entry from /etc/route by destination + gateway + interfaceName */
+/** Remove a route entry from /etc/route by destination + gateway */
 function removeRouteFromFile(destination: string, gateway: string, interfaceName?: string): boolean {
   try {
-    if (!existsSync(ROUTE_FILE)) return true;
-    const content = readFileSync(ROUTE_FILE, 'utf-8');
+    // Read file via sudo since it may be root-owned
+    const readResult = execSync(`sudo cat ${ROUTE_FILE} 2>/dev/null`, { encoding: 'utf-8', timeout: 5000 });
+    if (!readResult) return true;
+    const content = readResult;
     const lines = content.split('\n');
     const newLines: string[] = [];
     let i = 0;
     while (i < lines.length) {
       const line = lines[i];
       // Check if this line matches the route pattern (with or without 'ip route add' prefix)
+      // Match: [ip route add] DEST via GW [dev IFACE] [metric N]
       const routePattern = new RegExp(`^(?:ip route add\\s+)?${escapeRegExp(destination)}\\s+via\\s+${escapeRegExp(gateway)}(\\s+dev\\s+${interfaceName ? escapeRegExp(interfaceName) + '\\b' : '\\S+'})`);
       if (routePattern.test(line.trim())) {
         // Walk backwards through newLines to remove comment header for this route
@@ -85,7 +88,9 @@ function removeRouteFromFile(destination: string, gateway: string, interfaceName
     while (newLines.length > 1 && newLines[newLines.length - 1].trim() === '' && newLines[newLines.length - 2].trim() === '') {
       newLines.pop();
     }
-    writeFileSync(ROUTE_FILE, newLines.join('\n'), { encoding: 'utf-8' });
+    // Write back via sudo since file may be root-owned
+    const newContent = newLines.join('\n');
+ execSync(`echo '${newContent.replace(/'/g, "'\\\\''")}' | sudo tee ${ROUTE_FILE} > /dev/null`, { encoding: 'utf-8', timeout: 5000 });
     return true;
   } catch (err) {
     console.warn('[Network OS API] Failed to remove route from /etc/route:', err);
@@ -384,41 +389,57 @@ export async function DELETE(request: NextRequest) {
 
     const results: { step: string; success: boolean; message: string }[] = [];
 
+    // 0. If no interfaceName provided, try to find it from DB
+    let resolvedInterfaceName = interfaceName;
+    if (!resolvedInterfaceName) {
+      try {
+        const dbDest = destination === 'default' ? '0.0.0.0/0' : destination;
+        const dbRoute = await db.staticRoute.findFirst({
+          where: { propertyId: PROPERTY_ID, destination: dbDest, gateway },
+        });
+        if (dbRoute?.interfaceName) {
+          resolvedInterfaceName = dbRoute.interfaceName;
+        }
+      } catch { /* ignore */ }
+    }
+
     // 1. Remove route at OS level via nmcli wrapper (with inline fallback)
     let delOk = false;
-    if (interfaceName) {
+    if (resolvedInterfaceName) {
       try {
-        removeRoute(interfaceName, destination, gateway);
+        removeRoute(resolvedInterfaceName, destination, gateway);
         delOk = true;
       } catch (e: any) {
         console.warn(`[Network OS API] nmcli removeRoute failed: ${e.message}, trying inline fallback`);
         // Inline fallback: nmcli directly (with staysuite preservation)
         try {
-          withStaySuitePreserved(interfaceName, () => {
-            safeExec(`sudo nmcli con mod "${interfaceName}" -ipv4.routes "${destination} ${gateway}"`);
+          withStaySuitePreserved(resolvedInterfaceName, () => {
+            safeExec(`sudo nmcli con mod "${resolvedInterfaceName}" -ipv4.routes "${destination} ${gateway}"`);
+            // Bring connection up to apply the route removal
+            safeExec(`sudo nmcli con up "${resolvedInterfaceName}"`);
           });
           delOk = true;
         } catch (fbErr: any) {
           console.warn(`[Network OS API] Inline fallback removeRoute also failed: ${fbErr.message}`);
         }
       }
+    } else {
+      console.warn(`[Network OS API] No interfaceName for route ${destination} via ${gateway} — cannot remove at OS level`);
     }
 
     results.push({
       step: 'del-route',
       success: delOk,
-      message: delOk ? 'Route removed via nmcli' : 'Failed to remove route at OS level',
+      message: delOk ? `Route removed via nmcli (interface: ${resolvedInterfaceName})` : 'Failed to remove route at OS level (no interface name)',
     });
 
-    // 2. Remove route from /etc/route persistence file
-    if (delOk) {
-      const persistOk = removeRouteFromFile(destination, gateway, interfaceName || undefined);
-      results.push({
-        step: 'persist-file',
-        success: persistOk,
-        message: persistOk ? 'Route removed from /etc/route' : 'Failed to remove route from /etc/route',
-      });
-    }
+    // 2. Always try to remove from /etc/route persistence file (even if OS removal failed)
+    const persistOk = removeRouteFromFile(destination, gateway, resolvedInterfaceName || undefined);
+    results.push({
+      step: 'persist-file',
+      success: persistOk,
+      message: persistOk ? 'Route removed from /etc/route' : 'Failed to remove route from /etc/route',
+    });
 
     // 3. Remove from DB
     try {
