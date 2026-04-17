@@ -55,7 +55,8 @@ export async function GET(request: NextRequest) {
     let isRealTimeRates = false;
 
     try {
-      const ratesResponse = await fetch(`${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/api/exchange-rates?base=${defaultCurrency}`);
+      const internalUrl = process.env.APP_URL || `http://localhost:${process.env.PORT || 3000}`;
+      const ratesResponse = await fetch(`${internalUrl}/api/exchange-rates?base=${defaultCurrency}`);
       const ratesData = await ratesResponse.json();
       
       if (ratesData.success) {
