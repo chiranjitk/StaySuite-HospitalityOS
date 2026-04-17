@@ -589,7 +589,7 @@ export default function NetworkPage() {
             mtu: iface.mtu || 1500,
             rxBytes: iface.rxBytes || 0,
             txBytes: iface.txBytes || 0,
-            description: dbDescriptions[iface.deviceName] || dbDescriptions[iface.name] || '',
+            description: iface.description || dbDescriptions[iface.deviceName] || dbDescriptions[iface.name] || '',
             allIps: [
               ...(iface.ipv4Address && iface.ipv4Address !== '—' ? [iface.ipv4Address] : []),
               ...(iface.secondaryIps || []),
@@ -1225,11 +1225,14 @@ export default function NetworkPage() {
 
   const handleDeleteVlan = async (id: string) => {
     try {
-      const res = await fetch(`/api/wifi/network/vlans/${id}`, { method: 'DELETE' });
+      // Use the OS endpoint to actually delete the nmcli connection
+      const res = await fetch(`/api/network/os/vlans?name=${encodeURIComponent(id)}`, { method: 'DELETE' });
       const result = await res.json();
       if (result.success) {
         toast({ title: 'VLAN Deleted', description: 'The VLAN has been removed.' });
         setVlans(prev => prev.filter(v => v.id !== id));
+        // Refresh interfaces to pick up the deletion
+        fetchInterfaces();
       } else {
         toast({ title: 'Error', description: result.error?.message || 'Failed to delete VLAN', variant: 'destructive' });
       }

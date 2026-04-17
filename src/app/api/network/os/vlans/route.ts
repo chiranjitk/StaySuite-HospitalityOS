@@ -1,12 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { execSync } from 'child_process';
+import * as fs from 'fs';
 import {
   scanConnections,
   createVlan,
   deleteVlan,
   NmConnectionInfo,
 } from '@/lib/network/nmcli';
-import { NET_TYPES } from '@/lib/network/nettypes';
+import { NET_TYPES, NM_CONNECTIONS_DIR } from '@/lib/network/nettypes';
 
 function safeExec(cmd: string, timeout = 10000): string {
   try { return execSync(cmd, { encoding: 'utf-8', timeout }); } catch (e: any) { return e.stderr?.trim() || e.stdout?.trim() || ''; }
@@ -183,12 +184,32 @@ export async function DELETE(request: NextRequest) {
     }
 
     // Delete via nmcli wrapper (with inline fallback)
+    let deleteError = '';
     try {
       deleteVlan(vlanName);
     } catch (e: any) {
-      console.warn(`[Network OS API] nmcli deleteVlan failed for ${vlanName}: ${e.message}, trying inline fallback`);
-      safeExec(`sudo nmcli con down "${vlanName}" 2>/dev/null || true`);
-      safeExec(`sudo nmcli con delete "${vlanName}" 2>/dev/null`);
+      deleteError = e.message;
+      console.warn(`[Network OS API] nmcli deleteVlan failed for ${vlanName}: ${deleteError}, trying inline fallback`);
+      const downResult = safeExec(`sudo nmcli con down "${vlanName}" 2>/dev/null || true`);
+      const delResult = safeExec(`sudo nmcli con delete "${vlanName}" 2>/dev/null`);
+      if (delResult && delResult.toLowerCase().includes('error')) {
+        deleteError = delResult;
+      }
+    }
+
+    // Verify the .nmconnection file was actually deleted
+    const possibleFiles = [
+      `${NM_CONNECTIONS_DIR}/${vlanName}.nmconnection`,
+    ];
+    const fileStillExists = possibleFiles.some(f => {
+      try { return fs.existsSync(f); } catch { return false; }
+    });
+
+    if (fileStillExists) {
+      return NextResponse.json(
+        { success: false, error: { code: 'DELETE_FAILED', message: `Failed to delete VLAN "${vlanName}". The config file still exists.${deleteError ? ` (${deleteError})` : ''}` } },
+        { status: 500 }
+      );
     }
 
     return NextResponse.json({

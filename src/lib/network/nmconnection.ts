@@ -225,6 +225,11 @@ export function getInterfaceName(parsed: NmConnectionFile): string {
   return getSectionValue(parsed, SECTION.CONNECTION, 'interface-name');
 }
 
+/** Get the connection description from [connection] section. */
+export function getConnectionDescription(parsed: NmConnectionFile): string {
+  return getSectionValue(parsed, SECTION.CONNECTION, 'description');
+}
+
 /** Get the connection ID. */
 export function getConnectionId(parsed: NmConnectionFile): string {
   return getSectionValue(parsed, SECTION.CONNECTION, 'id');

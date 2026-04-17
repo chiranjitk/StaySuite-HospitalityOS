@@ -40,7 +40,7 @@ function persistRouteToFile(destination: string, gateway: string, interfaceName:
   try {
     ensureRouteFile();
     const timestamp = new Date().toISOString();
-    const routeLine = `${destination} via ${gateway} dev ${interfaceName}${metric ? ` metric ${metric}` : ''}`;
+    const routeLine = `ip route add ${destination} via ${gateway} dev ${interfaceName}${metric ? ` metric ${metric}` : ''}`;
     const nameLine = name ? `# Name: ${name}\n` : '';
     const entry = `\n# StaySuite Static Route\n# Added: ${timestamp}\n${nameLine}${routeLine}\n`;
     execSync(`echo '${entry.replace(/'/g, "'\\''")}' | sudo tee -a ${ROUTE_FILE} > /dev/null`, { encoding: 'utf-8', timeout: 5000 });
@@ -61,8 +61,8 @@ function removeRouteFromFile(destination: string, gateway: string, interfaceName
     let i = 0;
     while (i < lines.length) {
       const line = lines[i];
-      // Check if this line matches the route pattern
-      const routePattern = new RegExp(`^${escapeRegExp(destination)}\\s+via\\s+${escapeRegExp(gateway)}(\\s+dev\\s+${interfaceName ? escapeRegExp(interfaceName) + '\\b' : '\\S+'})`);
+      // Check if this line matches the route pattern (with or without 'ip route add' prefix)
+      const routePattern = new RegExp(`^(?:ip route add\\s+)?${escapeRegExp(destination)}\\s+via\\s+${escapeRegExp(gateway)}(\\s+dev\\s+${interfaceName ? escapeRegExp(interfaceName) + '\\b' : '\\S+'})`);
       if (routePattern.test(line.trim())) {
         // Walk backwards through newLines to remove comment header for this route
         while (newLines.length > 0 && newLines[newLines.length - 1].trimStart().startsWith('#') && newLines[newLines.length - 1].trim() !== '') {
@@ -283,6 +283,8 @@ export async function POST(request: NextRequest) {
         const metricArg = routeMetric ? ` ${routeMetric}` : '';
         withStaySuitePreserved(interfaceName, () => {
           safeExec(`sudo nmcli con mod "${interfaceName}" +ipv4.routes "${routeDest} ${gateway}${metricArg}"`);
+          // Bring connection up to activate the route
+          safeExec(`sudo nmcli con up "${interfaceName}"`);
         });
         addOk = true;
       } catch (fbErr: any) {

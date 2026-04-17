@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { execSync } from 'child_process';
+import * as fs from 'fs';
 import { db } from '@/lib/db';
 import {
   scanConnections,
@@ -416,13 +417,41 @@ export async function DELETE(
       );
     }
 
-    // Delete via nmcli
+    // Delete via nmcli — use exec that throws on failure
+    let deleteError = '';
     try {
-      safeExec(`sudo nmcli con down ${name} 2>/dev/null || true`);
-      safeExec(`sudo nmcli con delete ${name}`);
+      execSync(`sudo nmcli con down "${name}" 2>/dev/null || true`, { encoding: 'utf-8', timeout: 10000 });
+    } catch {
+      // con down may fail if already down — that's OK
+    }
+    try {
+      const result = execSync(`sudo nmcli con delete "${name}" 2>&1`, { encoding: 'utf-8', timeout: 15000 });
+      if (result && result.toLowerCase().includes('error')) {
+        deleteError = result.trim();
+      }
     } catch (e: any) {
-      console.warn(`[Network OS API] nmcli delete failed for ${name}: ${e.message}, trying inline fallback`);
-      safeExec(`sudo nmcli con delete "${name}" 2>/dev/null`);
+      deleteError = e.stderr?.trim() || e.stdout?.trim() || e.message || 'nmcli con delete failed';
+    }
+
+    // Verify the .nmconnection file was actually deleted
+    const { NM_CONNECTIONS_DIR } = await import('@/lib/network/nettypes');
+    const possibleFiles = [
+      `${NM_CONNECTIONS_DIR}/${name}.nmconnection`,
+    ];
+    const fileStillExists = possibleFiles.some(f => {
+      try { return fs.existsSync(f); } catch { return false; }
+    });
+
+    if (deleteError && deleteError.toLowerCase().includes('error')) {
+      console.warn(`[Network OS API] nmcli delete returned error for ${name}: ${deleteError}`);
+    }
+
+    if (fileStillExists && deleteError) {
+      // File still exists and there was an error — deletion failed
+      return NextResponse.json(
+        { success: false, error: { code: 'DELETE_FAILED', message: `Failed to delete "${name}": ${deleteError}` } },
+        { status: 500 }
+      );
     }
 
     return NextResponse.json({

@@ -23,6 +23,7 @@ import {
   setPriority,
   getConnectionType,
   getInterfaceName,
+  getConnectionDescription,
   getPrimaryAddress,
   getSecondaryAddresses,
   getIpv4Gateway,
@@ -110,6 +111,7 @@ export interface NmConnectionInfo {
   isPhysical: boolean;
   isSlave: boolean;
   master?: string;
+  description?: string;
   // IPv4
   ipv4Method: string;
   ipv4Address?: string;
@@ -239,6 +241,7 @@ export function scanConnections(): NmConnectionInfo[] {
       isPhysical: physical,
       isSlave: slave,
       master: master || undefined,
+      description: getConnectionDescription(parsed) || undefined,
       ipv4Method: getIpv4Method(parsed),
       ipv4Address: primaryAddr?.ip,
       ipv4Cidr: primaryAddr?.cidr,
@@ -880,6 +883,8 @@ export function addRoute(name: string, destination: string, gateway: string, met
   const metricArg = metric !== undefined ? ` ${metric}` : '';
   withStaySuitePreserved(name, () => {
     exec(`sudo nmcli con mod ${name} +ipv4.routes "${destination} ${gateway}${metricArg}"`);
+    // Bring the connection up so the route becomes active immediately
+    try { exec(`sudo nmcli con up ${name}`); } catch {}
   });
 }
 
