@@ -67,6 +67,7 @@ import {
   CheckCircle2,
   XCircle,
   Loader2,
+  Save,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
@@ -953,9 +954,34 @@ export default function NetworkPage() {
     setBridges(prev => prev.map(b => b.id === id ? { ...b, enabled: !b.enabled } : b));
   };
 
-  // ── Role handlers ──
-  const handleRoleChange = (interfaceId: string, newRole: InterfaceRole['role']) => {
+  // ── Role handlers (persist to OS + DB) ──
+  const [roleSaving, setRoleSaving] = useState<string | null>(null);
+
+  const handleRoleChange = async (interfaceId: string, newRole: InterfaceRole['role']) => {
+    setRoleSaving(interfaceId);
+    // Optimistic update
     setRoles(prev => prev.map(r => r.interfaceId === interfaceId ? { ...r, role: newRole } : r));
+    try {
+      const currentRole = roles.find(r => r.interfaceId === interfaceId);
+      const res = await fetch(`/api/network/os/interfaces/${interfaceId}/role`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ role: newRole, priority: currentRole?.priority || 0 }),
+      });
+      const result = await res.json();
+      if (result.success) {
+        const sources = [];
+        if (result.data?.persistedToOS) sources.push('OS (/etc/network/interfaces)');
+        if (result.data?.persistedToDB) sources.push('Database');
+        toast({ title: 'Role Updated', description: `${interfaceId} → ${newRole.toUpperCase()} saved to ${sources.join(' + ')}` });
+      } else {
+        toast({ title: 'Error', description: result.error?.message || 'Failed to persist role', variant: 'destructive' });
+      }
+    } catch {
+      toast({ title: 'Error', description: 'Failed to save role', variant: 'destructive' });
+    } finally {
+      setRoleSaving(null);
+    }
   };
 
   const handleMovePriority = (interfaceId: string, direction: 'up' | 'down') => {
@@ -970,6 +996,30 @@ export default function NetworkPage() {
       }
       return prev.map(r => arr.find(a => a.interfaceId === r.interfaceId) || r);
     });
+  };
+
+  const handleSaveAllRoles = async () => {
+    try {
+      const res = await fetch('/api/network/os/interfaces/roles', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          roles: roles.map(r => ({
+            interfaceName: r.interfaceName,
+            role: r.role,
+            priority: r.priority,
+          })),
+        }),
+      });
+      const result = await res.json();
+      if (result.success) {
+        toast({ title: 'All Roles Saved', description: `${result.data.total} interface roles persisted to OS + Database` });
+      } else {
+        toast({ title: 'Error', description: 'Failed to save some roles', variant: 'destructive' });
+      }
+    } catch {
+      toast({ title: 'Error', description: 'Failed to save roles', variant: 'destructive' });
+    }
   };
 
   // ── Port Forward handlers ──
@@ -1696,6 +1746,28 @@ export default function NetworkPage() {
         {/* ═══════ TAB 4: WAN/LAN MAPPING ═══════ */}
         {activeTab === 'wan-lan' && (
           <div className="space-y-6">
+            {/* Persistence Info Banner */}
+            <Card className="border-sky-500/30 bg-gradient-to-r from-sky-50 to-cyan-50 dark:from-sky-950/20 dark:to-cyan-950/20">
+              <CardContent className="p-4">
+                <div className="flex items-start gap-3">
+                  <Shield className="h-5 w-5 text-sky-600 mt-0.5 shrink-0" />
+                  <div className="flex-1">
+                    <p className="text-sm font-semibold text-sky-800 dark:text-sky-300">Dual Persistence: OS + Database</p>
+                    <p className="text-xs text-sky-700/70 dark:text-sky-400/70 mt-1">
+                      Role assignments are persisted to <code className="bg-sky-100 dark:bg-sky-900 px-1 rounded font-mono text-[10px]">/etc/network/interfaces</code> via comment tags
+                      (<code className="bg-sky-100 dark:bg-sky-900 px-1 rounded font-mono text-[10px]"># STAYSUITE_ROLE: wan</code>) and
+                      the database. Roles survive system reboots and are read automatically at startup.
+                    </p>
+                  </div>
+                  <Button size="sm" variant="outline" className="shrink-0 border-sky-300 text-sky-700 dark:text-sky-300 hover:bg-sky-100 dark:hover:bg-sky-900"
+                    onClick={handleSaveAllRoles}>
+                    <Save className="h-3.5 w-3.5 mr-1.5" />
+                    Save All Roles
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+
             {/* WAN Failover Config */}
             <Card className="border-orange-500/30 bg-gradient-to-r from-orange-50 to-amber-50 dark:from-orange-950/20 dark:to-amber-950/20">
               <CardHeader className="pb-3">
@@ -1848,8 +1920,10 @@ export default function NetworkPage() {
                             <span>•</span>
                             <span>{iface.description}</span>
                           </div>
-                          <Select value={role.role} onValueChange={v => handleRoleChange(role.interfaceId, v as InterfaceRole['role'])}>
-                            <SelectTrigger className="w-28 h-7 text-[11px]"><SelectValue /></SelectTrigger>
+                          <Select value={role.role} onValueChange={v => handleRoleChange(role.interfaceId, v as InterfaceRole['role'])} disabled={roleSaving === role.interfaceId}>
+                            <SelectTrigger className="w-28 h-7 text-[11px]">
+                              {roleSaving === role.interfaceId ? <Loader2 className="h-3 w-3 animate-spin" /> : <SelectValue />}
+                            </SelectTrigger>
                             <SelectContent>
                               <SelectItem value="wan">WAN</SelectItem>
                               <SelectItem value="lan">LAN</SelectItem>

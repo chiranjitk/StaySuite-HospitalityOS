@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { execSync } from 'child_process';
 import * as fs from 'fs';
+import { readInterfaceRolesFromOS } from '@/lib/interface-role-persist';
 
 /**
  * GET /api/network/os - Get comprehensive OS network data
@@ -41,6 +42,8 @@ interface OsInterface {
   createdAt: string;
 }
 
+const VALID_ROLE_VALUES: string[] = ['wan', 'lan', 'dmz', 'management', 'wifi', 'guest', 'iot', 'unused'];
+
 interface OsRoute {
   destination: string;
   gateway: string;
@@ -66,6 +69,14 @@ interface OsArpEntry {
 
 function getOsInterfaces(): OsInterface[] {
   const interfaces: OsInterface[] = [];
+
+  // Read OS-persisted roles once (file I/O outside the loop)
+  let osPersistedRoles: Map<string, { role: string; priority: number }> | null = null;
+  try {
+    osPersistedRoles = readInterfaceRolesFromOS();
+  } catch {
+    osPersistedRoles = null;
+  }
 
   let ifNames: string[] = [];
   try {
@@ -142,6 +153,7 @@ function getOsInterfaces(): OsInterface[] {
       const networkManagerConn = safeExec(`nmcli -t -f GENERAL.CONNECTION,DEVICE dev show ${name} 2>/dev/null | grep ${name}`).trim();
       const dhcpEnabled = dhclientPid.length > 0 || networkManagerConn.includes('dhcp');
 
+      // Heuristic role detection (fallback when no OS-persisted tag exists)
       let role: OsInterface['role'] = 'unknown';
       if (name === 'lo') role = 'management';
       else if (isDefaultRoute) role = 'wan';
@@ -149,6 +161,14 @@ function getOsInterfaces(): OsInterface[] {
         role = isDefaultRoute ? 'wan' : 'lan';
       } else if (name.startsWith('wlan') || name.startsWith('wl')) role = 'guest';
       else if (name.startsWith('br')) role = 'lan';
+
+      // OS-persisted role tags take priority over heuristic detection
+      if (osPersistedRoles) {
+        const persisted = osPersistedRoles.get(name);
+        if (persisted && VALID_ROLE_VALUES.includes(persisted.role as OsInterface['role'])) {
+          role = persisted.role as OsInterface['role'];
+        }
+      }
 
       const vlans: string[] = [];
       if (type === 'bridge') {
