@@ -373,7 +373,7 @@ export async function DELETE(request: NextRequest) {
     const gateway = searchParams.get('gateway');
     const interfaceName = searchParams.get('interfaceName');
     const metricParam = searchParams.get('metric');
-    const resolvedMetric = metricParam ? parseInt(metricParam, 10) : undefined;
+    let resolvedMetric: number | undefined = metricParam ? parseInt(metricParam, 10) : undefined;
 
     if (!destination || !gateway) {
       return NextResponse.json(
@@ -393,7 +393,7 @@ export async function DELETE(request: NextRequest) {
 
     // 0. If no interfaceName provided, try to find it from DB or OS
     let resolvedInterfaceName = interfaceName;
-    let resolvedMetric = resolvedMetric;
+    // resolvedMetric already declared above
     if (!resolvedInterfaceName || resolvedMetric === undefined) {
       // Try DB first (search all properties, not just hardcoded one)
       try {
