@@ -48,6 +48,38 @@ const KEA_LEASES_FILE = SYSTEM_KEA
 const HELPER_PATH = path.join(__dirname, 'kea-helper.mjs');
 const LD_LIB = SYSTEM_KEA ? '' : (process.env.KEA_LD_LIB || `${PROJECT_ROOT}/kea-local/extracted/usr/lib/x86_64-linux-gnu`);
 
+// Try to dynamically resolve socket path from config files
+function resolveSocketPath(): string {
+  if (process.env.KEA_SOCKET_PATH) return process.env.KEA_SOCKET_PATH;
+  try {
+    const configPaths = ['/etc/kea/kea-ctrl-agent.conf', '/etc/kea/kea-dhcp4.conf', KEA_CONFIG_PATH];
+    for (const cfgPath of configPaths) {
+      try {
+        const content = fs.readFileSync(cfgPath, 'utf-8');
+        const match = content.match(/"socket-name"\s*:\s*"([^"]+)"/);
+        if (match && match[1]) {
+          log.info(`Resolved socket from ${cfgPath}: ${match[1]}`);
+          return match[1];
+        }
+      } catch {}
+    }
+    // Scan filesystem
+    const commonPaths = ['/run/kea/kea4-ctrl-socket', '/tmp/kea/kea4-ctrl-socket', '/run/kea-dhcp4/kea4-ctrl-socket', '/run/kea/kea-ctrl-agent-socket'];
+    for (const sp of commonPaths) {
+      try {
+        fs.accessSync(sp, fs.constants.R_OK | fs.constants.W_OK);
+        log.info(`Found socket at ${sp}`);
+        return sp;
+      } catch {}
+    }
+  } catch {}
+  return KEA_SOCKET_PATH;
+}
+
+// Resolve actual socket and leases path at startup
+const RESOLVED_SOCKET_PATH = resolveSocketPath();
+log.info('Kea configuration', { systemKea: SYSTEM_KEA, socketPath: RESOLVED_SOCKET_PATH, configPath: KEA_CONFIG_PATH, leasesFile: KEA_LEASES_FILE });
+
 // ============================================================================
 // Kea Communication via Node.js Helper
 // ============================================================================
@@ -59,7 +91,7 @@ function keaPing(): boolean {
       log.warn(`kea-helper.mjs not found at ${HELPER_PATH} — run: git pull`);
       return false;
     }
-    const result = execSync(`node ${HELPER_PATH} ping`, { encoding: 'utf-8', timeout: 8000 });
+    const result = execSync(`KEA_SOCKET_PATH="${RESOLVED_SOCKET_PATH}" KEA_LEASES_FILE="${KEA_LEASES_FILE}" node ${HELPER_PATH} ping`, { encoding: 'utf-8', timeout: 8000 });
     const parsed = JSON.parse(result.trim());
     return parsed.success && parsed.reachable === true;
   } catch {
@@ -74,7 +106,7 @@ function keaCommand(command: Record<string, any>): any[] | null {
       return null;
     }
     const cmdStr = JSON.stringify(command).replace(/'/g, "'\\''");
-    const result = execSync(`node ${HELPER_PATH} command '${cmdStr}'`, { encoding: 'utf-8', timeout: 10000 });
+    const result = execSync(`KEA_SOCKET_PATH="${RESOLVED_SOCKET_PATH}" KEA_LEASES_FILE="${KEA_LEASES_FILE}" node ${HELPER_PATH} command '${cmdStr}'`, { encoding: 'utf-8', timeout: 10000 });
     const parsed = JSON.parse(result.trim());
     return parsed.success ? parsed.data : null;
   } catch {
@@ -88,7 +120,7 @@ function keaReadLeases(): any[] {
       log.warn(`kea-helper.mjs not found at ${HELPER_PATH} — run: git pull`);
       return [];
     }
-    const result = execSync(`node ${HELPER_PATH} leases`, { encoding: 'utf-8', timeout: 5000 });
+    const result = execSync(`KEA_SOCKET_PATH="${RESOLVED_SOCKET_PATH}" KEA_LEASES_FILE="${KEA_LEASES_FILE}" node ${HELPER_PATH} leases`, { encoding: 'utf-8', timeout: 5000 });
     const parsed = JSON.parse(result.trim());
     return parsed.success ? parsed.data : [];
   } catch {
@@ -310,7 +342,7 @@ app.get('/health', (c) => {
     uptime: Math.floor((Date.now() - startTime) / 1000),
     port: PORT,
     memoryUsage: process.memoryUsage(),
-    kea: { running: cachedKeaRunning, socketPath: KEA_SOCKET_PATH, leaseFile: KEA_LEASES_FILE, subnetCount: cachedSubnetCount, leaseCount: cachedLeaseCount }
+    kea: { running: cachedKeaRunning, socketPath: RESOLVED_SOCKET_PATH, leaseFile: KEA_LEASES_FILE, subnetCount: cachedSubnetCount, leaseCount: cachedLeaseCount }
   });
 });
 
@@ -349,7 +381,7 @@ app.get('/api/status', async (c) => {
       processRunning,
       version: cachedKeaVersion,
       mode: running ? 'production' : 'stopped',
-      socketPath: KEA_SOCKET_PATH,
+      socketPath: RESOLVED_SOCKET_PATH,
       configPath: KEA_CONFIG_PATH,
       leaseFile: KEA_LEASES_FILE,
       subnetCount: cachedSubnetCount,
