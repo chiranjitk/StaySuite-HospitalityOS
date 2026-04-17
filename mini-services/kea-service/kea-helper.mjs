@@ -46,11 +46,26 @@ function resolveSocketPath() {
   for (const cfgPath of configPaths) {
     try {
       const content = fs.readFileSync(cfgPath, 'utf-8');
-      // Match: "socket-name": "/path/to/socket"
+      // Match: "socket-name": "/path/to/socket" or "socket-name": "relative-name"
       const match = content.match(/"socket-name"\s*:\s*"([^"]+)"/);
       if (match && match[1]) {
-        console.error(`[kea-helper] Found socket in ${cfgPath}: ${match[1]}`);
-        return match[1];
+        let sockPath = match[1];
+        // If relative path (no leading /), prepend common directories
+        if (!sockPath.startsWith('/')) {
+          const socketDirs = ['/run/kea', '/var/run/kea', '/tmp/kea', '/run'];
+          for (const dir of socketDirs) {
+            const candidate = `${dir}/${sockPath}`;
+            try {
+              fs.accessSync(candidate, fs.constants.R_OK);
+              console.error(`[kea-helper] Found socket in ${cfgPath}: ${sockPath} → ${candidate}`);
+              return candidate;
+            } catch {}
+          }
+          // Use /run/kea as default prefix for relative paths
+          sockPath = `/run/kea/${sockPath}`;
+        }
+        console.error(`[kea-helper] Found socket in ${cfgPath}: ${match[1]} → ${sockPath}`);
+        return sockPath;
       }
     } catch { /* file doesn't exist or not readable */ }
   }

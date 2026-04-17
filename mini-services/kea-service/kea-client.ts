@@ -12,8 +12,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 
-const __filename = typeof __filename !== 'undefined' ? __filename : fileURLToPath(import.meta.url);
-const __dirname = typeof __dirname !== 'undefined' ? __dirname : path.dirname(__filename);
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 const PROJECT_ROOT = process.env.PROJECT_ROOT || path.resolve(__dirname, '..', '..');
 
 const KEA_SOCKET_PATH = '/tmp/kea/kea4-ctrl-socket';

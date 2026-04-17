@@ -12,12 +12,11 @@ import { cors } from 'hono/cors';
 import { execSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
-import { fileURLToPath } from 'url';
 import { createLogger } from '../shared/logger';
 
-// Resolve __dirname in ESM context (Bun supports both CJS path and import.meta)
-const __filename = typeof __filename !== 'undefined' ? __filename : fileURLToPath(import.meta.url);
-const __dirname = typeof __dirname !== 'undefined' ? __dirname : path.dirname(__filename);
+// Resolve __dirname safely for Bun (both --hot and normal mode)
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = new Hono();
 const PORT = 3011;
@@ -58,8 +57,22 @@ function resolveSocketPath(): string {
         const content = fs.readFileSync(cfgPath, 'utf-8');
         const match = content.match(/"socket-name"\s*:\s*"([^"]+)"/);
         if (match && match[1]) {
-          log.info(`Resolved socket from ${cfgPath}: ${match[1]}`);
-          return match[1];
+          let sockPath = match[1];
+          // Handle relative paths (no leading /)
+          if (!sockPath.startsWith('/')) {
+            const socketDirs = ['/run/kea', '/var/run/kea', '/tmp/kea', '/run'];
+            for (const dir of socketDirs) {
+              const candidate = `${dir}/${sockPath}`;
+              try {
+                fs.accessSync(candidate, fs.constants.R_OK);
+                log.info(`Resolved socket from ${cfgPath}: ${sockPath} → ${candidate}`);
+                return candidate;
+              } catch {}
+            }
+            sockPath = `/run/kea/${sockPath}`;
+          }
+          log.info(`Resolved socket from ${cfgPath}: ${match[1]} → ${sockPath}`);
+          return sockPath;
         }
       } catch {}
     }
@@ -72,6 +85,14 @@ function resolveSocketPath(): string {
         return sp;
       } catch {}
     }
+    // Last resort: find on filesystem
+    try {
+      const found = execSync('find /run /tmp /var/run -name "*kea*ctrl*socket*" -type S 2>/dev/null | head -1', { encoding: 'utf-8' }).trim();
+      if (found) {
+        log.info(`Discovered socket via find: ${found}`);
+        return found;
+      }
+    } catch {}
   } catch {}
   return KEA_SOCKET_PATH;
 }
