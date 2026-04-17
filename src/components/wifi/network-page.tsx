@@ -987,7 +987,7 @@ export default function NetworkPage() {
         // 1. Apply MTU if changed
         if (editInterfaceData.mtu !== selectedInterface.mtu) {
           try {
-            const mtuRes = await fetch(`/api/network/os/interfaces/${selectedInterface.name}`, {
+            const mtuRes = await fetch(`/api/network/os/interfaces/${encodeURIComponent(selectedInterface.name)}`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ mtu: editInterfaceData.mtu }),
@@ -1015,7 +1015,7 @@ export default function NetworkPage() {
         // Also always apply when switching between dhcp/static
         if (ipChanged || editInterfaceData.mode !== currentMode) {
           try {
-            const ipRes = await fetch(`/api/network/os/interfaces/${selectedInterface.name}`, {
+            const ipRes = await fetch(`/api/network/os/interfaces/${encodeURIComponent(selectedInterface.name)}`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({
@@ -1044,7 +1044,7 @@ export default function NetworkPage() {
         const newNettype = nettypeMap[editInterfaceData.role] ?? 8;
         if (newNettype !== currentNettype || editInterfaceData.priority !== (selectedInterface._osData?.priority || 0)) {
           try {
-            const roleRes = await fetch(`/api/network/os/interfaces/${selectedInterface.name}/role`, {
+            const roleRes = await fetch(`/api/network/os/interfaces/${encodeURIComponent(selectedInterface.name)}/role`, {
               method: 'PUT',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ nettype: newNettype, priority: editInterfaceData.priority }),
@@ -1065,7 +1065,7 @@ export default function NetworkPage() {
         // 4. Save description to DB
         if (editInterfaceData.description !== selectedInterface.description) {
           try {
-            await fetch(`/api/network/os/interfaces/${selectedInterface.name}`, {
+            await fetch(`/api/network/os/interfaces/${encodeURIComponent(selectedInterface.name)}`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ description: editInterfaceData.description }),
@@ -1112,7 +1112,7 @@ export default function NetworkPage() {
     const newState = iface.status === 'up' ? 'down' : 'up';
     try {
       if (osDataLoaded) {
-        const res = await fetch(`/api/network/os/interfaces/${iface.name}`, {
+        const res = await fetch(`/api/network/os/interfaces/${encodeURIComponent(iface.name)}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action: newState }),
@@ -1240,7 +1240,7 @@ export default function NetworkPage() {
   const handleToggleBridge = async (bridgeName: string, currentState: boolean) => {
     try {
       if (osDataLoaded) {
-        await fetch(`/api/network/os/interfaces/${bridgeName}`, {
+        await fetch(`/api/network/os/interfaces/${encodeURIComponent(bridgeName)}`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action: currentState ? 'down' : 'up' }),
         });
@@ -1334,7 +1334,7 @@ export default function NetworkPage() {
   // ── Alias handlers ──
   const handleFetchAliases = async (ifaceName: string) => {
     try {
-      const osRes = await fetch(`/api/network/os/interfaces/${ifaceName}/aliases`);
+      const osRes = await fetch(`/api/network/os/interfaces/${encodeURIComponent(ifaceName)}/aliases`);
       const osResult = await osRes.json();
       if (osResult.success && osResult.data) {
         // New format: { data: { interfaceName, osAliases, dbAliases } }
@@ -1365,7 +1365,7 @@ export default function NetworkPage() {
   const handleAddAlias = async (ifaceName: string) => {
     if (!newAlias.ipAddress.trim()) return;
     try {
-      const res = await fetch(`/api/network/os/interfaces/${ifaceName}/aliases`, {
+      const res = await fetch(`/api/network/os/interfaces/${encodeURIComponent(ifaceName)}/aliases`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(newAlias),
       });
@@ -1384,7 +1384,7 @@ export default function NetworkPage() {
 
   const handleDeleteAlias = async (ifaceName: string, ip: string) => {
     try {
-      await fetch(`/api/network/os/interfaces/${ifaceName}/aliases?ip=${encodeURIComponent(ip)}`, { method: 'DELETE' });
+      await fetch(`/api/network/os/interfaces/${encodeURIComponent(ifaceName)}/aliases?ip=${encodeURIComponent(ip)}`, { method: 'DELETE' });
       toast({ title: 'Alias Removed', description: `${ip} removed from ${ifaceName}` });
       handleFetchAliases(ifaceName);
     } catch {
@@ -1540,7 +1540,7 @@ export default function NetworkPage() {
     setRoles(prev => prev.map(r => r.interfaceId === interfaceId ? { ...r, role: newRole } : r));
     try {
       const currentRole = roles.find(r => r.interfaceId === interfaceId);
-      const res = await fetch(`/api/network/os/interfaces/${interfaceId}/role`, {
+      const res = await fetch(`/api/network/os/interfaces/${encodeURIComponent(interfaceId)}/role`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ role: newRole, priority: currentRole?.priority || 0 }),
