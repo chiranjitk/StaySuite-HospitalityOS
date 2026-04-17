@@ -24,10 +24,26 @@ const nextConfig: NextConfig = {
     ],
   },
   reactStrictMode: false,
-  allowedDevOrigins: [
-    '*.space.z.ai',
-    '10.121.18.160',
-  ],
+  allowedDevOrigins: (() => {
+    const origins = ['*.space.z.ai', '10.121.18.160'];
+    // Allow the APP_URL / server IP dynamically so PM2 dev works on any host
+    const appUrl = process.env.NEXT_PUBLIC_APP_URL || process.env.APP_URL || '';
+    try {
+      const url = new URL(appUrl);
+      if (url.hostname && url.hostname !== 'localhost' && url.hostname !== '127.0.0.1') {
+        origins.push(url.hostname);
+      }
+    } catch {}
+    // Also allow NEXTAUTH_URL host
+    const authUrl = process.env.NEXTAUTH_URL || '';
+    try {
+      const url = new URL(authUrl);
+      if (url.hostname && url.hostname !== 'localhost' && url.hostname !== '127.0.0.1' && !origins.includes(url.hostname)) {
+        origins.push(url.hostname);
+      }
+    } catch {}
+    return origins;
+  })(),
   async headers() {
     return [
       {

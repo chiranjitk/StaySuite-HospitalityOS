@@ -55,7 +55,10 @@ export async function GET(request: NextRequest) {
     let isRealTimeRates = false;
 
     try {
-      const internalUrl = process.env.APP_URL || `http://localhost:${process.env.PORT || 3000}`;
+      // ALWAYS use localhost for internal server-side fetches — avoids ECONNREFUSED
+      // when APP_URL points to a public IP / reverse proxy without port info
+      const port = process.env.PORT || 3000;
+      const internalUrl = `http://localhost:${port}`;
       const ratesResponse = await fetch(`${internalUrl}/api/exchange-rates?base=${defaultCurrency}`);
       const ratesData = await ratesResponse.json();
       

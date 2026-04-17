@@ -47,6 +47,11 @@ const LD_LIB = SYSTEM_KEA ? '' : (process.env.KEA_LD_LIB || `${PROJECT_ROOT}/kea
 
 function keaPing(): boolean {
   try {
+    // Verify helper exists before spawning
+    if (!fs.existsSync(HELPER_PATH)) {
+      log.warn(`kea-helper.mjs not found at ${HELPER_PATH} — run: git pull`);
+      return false;
+    }
     const result = execSync(`node ${HELPER_PATH} ping`, { encoding: 'utf-8', timeout: 8000 });
     const parsed = JSON.parse(result.trim());
     return parsed.success && parsed.reachable === true;
@@ -57,6 +62,10 @@ function keaPing(): boolean {
 
 function keaCommand(command: Record<string, any>): any[] | null {
   try {
+    if (!fs.existsSync(HELPER_PATH)) {
+      log.warn(`kea-helper.mjs not found at ${HELPER_PATH} — run: git pull`);
+      return null;
+    }
     const cmdStr = JSON.stringify(command).replace(/'/g, "'\\''");
     const result = execSync(`node ${HELPER_PATH} command '${cmdStr}'`, { encoding: 'utf-8', timeout: 10000 });
     const parsed = JSON.parse(result.trim());
@@ -68,6 +77,10 @@ function keaCommand(command: Record<string, any>): any[] | null {
 
 function keaReadLeases(): any[] {
   try {
+    if (!fs.existsSync(HELPER_PATH)) {
+      log.warn(`kea-helper.mjs not found at ${HELPER_PATH} — run: git pull`);
+      return [];
+    }
     const result = execSync(`node ${HELPER_PATH} leases`, { encoding: 'utf-8', timeout: 5000 });
     const parsed = JSON.parse(result.trim());
     return parsed.success ? parsed.data : [];
