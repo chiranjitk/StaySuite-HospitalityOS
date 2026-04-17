@@ -420,7 +420,13 @@ export default function NetworkPage() {
       const osRes = await fetch('/api/network/os?section=interfaces');
       const osResult = await osRes.json();
       if (osResult.success && Array.isArray(osResult.data) && osResult.data.length > 0) {
-        const mapped: NetworkInterface[] = osResult.data.map((iface: any) => {
+        // Filter out virtual/system interfaces — only keep physical, VLAN, bridge, bond, wireless
+        const excludedPrefixes = ['lo', 'dummy', 'ifb', 'imq', 'sit', 'tun', 'tap', 'veth', 'virbr', 'nlmon', 'erspan', 'gre', 'gretap', 'ip6gre', 'ip6tnl', 'ipip', 'teql', 'bonding_masters'];
+        const filteredOS = osResult.data.filter((iface: any) => {
+          const name = iface.name as string;
+          return !excludedPrefixes.some(p => name === p || name.startsWith(p));
+        });
+        const mapped: NetworkInterface[] = filteredOS.map((iface: any) => {
           const typeMap: Record<string, NetworkInterface['type']> = {
             ethernet: 'ethernet', wifi: 'wireless', loopback: 'ethernet',
             bridge: 'bridge', bond: 'bond', vlan: 'vlan',
