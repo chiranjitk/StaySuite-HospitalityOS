@@ -235,8 +235,9 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ success: true, data: vlan }, { status: 201 });
   } catch (error) {
     console.error('Error creating VLAN:', error);
+    const msg = error instanceof Error ? error.message : String(error);
     return NextResponse.json(
-      { success: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to create VLAN' } },
+      { success: false, error: { code: 'INTERNAL_ERROR', message: `Failed to create VLAN: ${msg}` } },
       { status: 500 },
     );
   }

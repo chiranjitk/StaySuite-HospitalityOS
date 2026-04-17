@@ -1,7 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { execSync } from 'child_process';
 import { db } from '@/lib/db';
 import { addAlias, removeAlias, listAliases } from '@/lib/network/alias';
 import { persistAliasAdd, persistAliasRemove } from '@/lib/network/persist';
+
+function safeExec(cmd: string, timeout = 5000): string {
+  try { return execSync(cmd, { encoding: 'utf-8', timeout }); } catch { return ''; }
+}
 
 /**
  * POST   /api/network/os/interfaces/[name]/aliases — Add a secondary IP alias
@@ -16,6 +21,43 @@ const TENANT_ID = 'tenant-1';
 const PROPERTY_ID = 'property-1';
 
 const VALID_NAME = /^[a-zA-Z0-9._-]+$/;
+
+// Inline fallback: read aliases directly from `ip addr show`
+function getAliasesInline(ifaceName: string): { ip: string; cidr: number; netmask: string }[] {
+  const aliases: { ip: string; cidr: number; netmask: string }[] = [];
+  const output = safeExec(`ip -o -4 addr show dev ${ifaceName} 2>/dev/null`);
+  const lines = output.trim().split('\n').filter(Boolean);
+
+  // Skip the first address (primary), return the rest as aliases
+  let isFirst = true;
+  for (const line of lines) {
+    const match = line.match(/inet\s+([\d.]+)\/(\d+)/);
+    if (match) {
+      if (isFirst) {
+        isFirst = false;
+        continue; // Skip primary IP
+      }
+      const ip = match[1];
+      const cidr = parseInt(match[2], 10);
+      aliases.push({ ip, cidr, netmask: cidrToNetmask(cidr) });
+    }
+  }
+  return aliases;
+}
+
+function cidrToNetmask(cidr: number): string {
+  const masks = [
+    '0.0.0.0', '128.0.0.0', '192.0.0.0', '224.0.0.0', '240.0.0.0', '248.0.0.0',
+    '252.0.0.0', '254.0.0.0', '255.0.0.0', '255.128.0.0', '255.192.0.0',
+    '255.224.0.0', '255.240.0.0', '255.248.0.0', '255.252.0.0', '255.254.0.0',
+    '255.255.0.0', '255.255.128.0', '255.255.192.0', '255.255.224.0',
+    '255.255.240.0', '255.255.248.0', '255.255.252.0', '255.255.254.0',
+    '255.255.255.0', '255.255.255.128', '255.255.255.192', '255.255.255.224',
+    '255.255.255.240', '255.255.255.248', '255.255.255.252', '255.255.255.254',
+    '255.255.255.255',
+  ];
+  return masks[cidr] || '255.255.255.0';
+}
 
 // ────────────────────────────────────────────────────────────
 // GET /api/network/os/interfaces/[name]/aliases — List aliases
@@ -34,16 +76,23 @@ export async function GET(
       );
     }
 
-    // 1. List aliases from OS via shell script
-    const osResult = listAliases(name);
-
-    const osAliases = osResult.success && osResult.data
-      ? osResult.data.aliases.map(a => ({
+    // 1. List aliases from OS — try shell script first, fallback to inline
+    let osAliases: { ip: string; cidr: number; netmask: string }[] = [];
+    try {
+      const osResult = listAliases(name);
+      if (osResult.success && osResult.data && Array.isArray(osResult.data.aliases)) {
+        osAliases = osResult.data.aliases.map(a => ({
           ip: a.ipAddress,
           cidr: a.cidr,
           netmask: a.netmask,
-        }))
-      : [];
+        }));
+      } else {
+        // Inline fallback: parse ip addr show
+        osAliases = getAliasesInline(name);
+      }
+    } catch {
+      osAliases = getAliasesInline(name);
+    }
 
     // 2. Fetch from DB
     let dbAliases: any[] = [];
