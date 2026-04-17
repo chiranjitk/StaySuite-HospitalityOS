@@ -399,6 +399,9 @@ function keaSocketPing(): boolean {
 let useHttpApi = CTRL_AGENT.available;
 
 async function keaPing(): Promise<boolean> {
+  // If the process is definitely not running, no point trying to ping
+  if (!isKeaProcessRunning()) return false;
+
   // Try the currently preferred method
   if (useHttpApi) {
     const reachable = await keaHttpPing();
@@ -406,7 +409,24 @@ async function keaPing(): Promise<boolean> {
     log.info('Ctrl-agent HTTP unavailable, switching to unix socket fallback');
     useHttpApi = false;
   }
-  return keaSocketPing();
+  const socketOk = keaSocketPing();
+  if (socketOk) return true;
+
+  // Process is running but neither HTTP nor socket responded — likely still starting up
+  // Give it one more shot after a brief delay
+  if (isKeaProcessRunning()) {
+    log.info('kea-dhcp4 process running but ping failed — likely still initializing');
+    await new Promise(r => setTimeout(r, 1500));
+    // Try HTTP again (ctrl-agent may have bound in the meantime)
+    if (useHttpApi || CTRL_AGENT.available) {
+      const retry = await keaHttpPing();
+      if (retry) { useHttpApi = true; return true; }
+    }
+    const retrySocket = keaSocketPing();
+    if (retrySocket) return true;
+  }
+
+  return false;
 }
 
 async function keaCommand(command: Record<string, any>): Promise<any[] | null> {
@@ -518,7 +538,11 @@ let cachedLeaseCount = 0;
 
 async function updateCache() {
   try {
-    cachedKeaRunning = await keaPing();
+    const processAlive = isKeaProcessRunning();
+    const pingOk = await keaPing();
+    // If process is running, consider it running even if ping temporarily fails
+    // (ctrl-agent may still be binding after auto-start)
+    cachedKeaRunning = pingOk || processAlive;
     if (cachedKeaRunning) {
       try {
         const resp = await keaCommand({ command: 'version-get' });
@@ -847,27 +871,34 @@ app.get('/api/status', async (c) => {
 app.post('/api/service/start', async (c) => {
   // Start ctrl-agent first
   let ctrlAgentResult = { success: false, message: '' };
-  if (CTRL_AGENT.available) {
+  if (CTRL_AGENT.available && !isCtrlAgentRunning()) {
     ctrlAgentResult = startCtrlAgent();
   }
   const result = startKeaServer();
+  // If the process is running (or was already), always report running status
+  const actuallyRunning = isKeaProcessRunning();
   await updateCache();
   return c.json({
     success: result.success,
     message: result.message,
     pid: result.pid,
     ctrlAgent: ctrlAgentResult.success ? 'started' : ctrlAgentResult.message,
-    status: cachedKeaRunning ? 'running' : 'stopped'
+    status: actuallyRunning || cachedKeaRunning ? 'running' : 'stopped'
   });
 });
 
 app.post('/api/service/stop', async (c) => {
   stopKeaServer();
+  // Also stop ctrl-agent
+  if (CTRL_AGENT.available) {
+    stopCtrlAgent();
+  }
   await updateCache();
+  const stillRunning = isKeaProcessRunning();
   return c.json({
     success: true,
-    message: 'Kea DHCP4 stopped',
-    status: cachedKeaRunning ? 'running' : 'stopped'
+    message: stillRunning ? 'Kea DHCP4 may still be stopping' : 'Kea DHCP4 stopped',
+    status: stillRunning ? 'running' : 'stopped'
   });
 });
 

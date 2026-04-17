@@ -432,8 +432,8 @@ export default function DhcpPage() {
           setKeaConnected(false);
           setKeaStatus(prev => prev ? { ...prev, running: false } : prev);
         }
-        // Then do a full refresh after 2s
-        setTimeout(fetchKeaStatus, 2000);
+        // Full refresh after a short delay to get full data (subnets, leases, etc.)
+        setTimeout(fetchKeaStatus, 3000);
       } else {
         toast({ title: 'Error', description: result.message || `Failed to ${action} Kea`, variant: 'destructive' });
       }
