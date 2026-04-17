@@ -414,7 +414,7 @@ export default function NetworkPage() {
   const [interfaces, setInterfaces] = useState<NetworkInterface[]>([]);
   const [vlans, setVlans] = useState<VLANEntry[]>([]);
   const [bridges, setBridges] = useState<BridgeEntry[]>([]);
-  const [bonds, setBonds] = useState<BondEntry[]>(mockBonds);
+  const [bonds, setBonds] = useState<BondEntry[]>([]);
   const [roles, setRoles] = useState<InterfaceRole[]>(mockRoles);
   const [portForwards, setPortForwards] = useState<PortForwardRule[]>(mockPortForwards);
   const [filterCategories, setFilterCategories] = useState<FilterCategory[]>([]);
@@ -2297,20 +2297,16 @@ export default function NetworkPage() {
                     <Input type="number" value={newVlan.mtu} onChange={e => setNewVlan(p => ({ ...p, mtu: parseInt(e.target.value) || 1500 }))} />
                   </div>
                   <Separator />
-                  <p className="text-xs font-semibold text-muted-foreground">IP Configuration (Optional)</p>
+                  <p className="text-xs font-semibold text-muted-foreground">VLAN Gateway IP Configuration</p>
                   <div className="grid grid-cols-2 gap-4">
                     <div className="space-y-2">
                       <Label>IP Address</Label>
                       <Input className="font-mono" placeholder="192.168.10.1" value={newVlan.ipAddress} onChange={e => setNewVlan(p => ({ ...p, ipAddress: e.target.value }))} />
                     </div>
                     <div className="space-y-2">
-                      <Label>Netmask</Label>
+                      <Label>Subnet Mask</Label>
                       <Input className="font-mono" placeholder="255.255.255.0" value={newVlan.netmask} onChange={e => setNewVlan(p => ({ ...p, netmask: e.target.value }))} />
                     </div>
-                  </div>
-                  <div className="space-y-2">
-                    <Label>DHCP Subnet</Label>
-                    <Input className="font-mono" placeholder="192.168.10.0/24" value={newVlan.subnet} onChange={e => setNewVlan(p => ({ ...p, subnet: e.target.value }))} />
                   </div>
                 </div>
                 <DialogFooter>
@@ -2817,7 +2813,36 @@ export default function NetworkPage() {
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
-                    <Switch checked={multiWanConfig?.enabled ?? false} onCheckedChange={v => setMultiWanConfig(prev => prev ? { ...prev, enabled: v } : prev)} />
+                    <Switch checked={multiWanConfig?.enabled ?? false} onCheckedChange={v => {
+                      if (!multiWanConfig) {
+                        setMultiWanConfig({
+                          id: 'new',
+                          enabled: v,
+                          mode: 'weighted',
+                          healthCheckUrl: 'https://1.1.1.1',
+                          healthCheckInterval: 10,
+                          healthCheckTimeout: 3,
+                          failoverThreshold: 3,
+                          autoSwitchback: true,
+                          switchbackDelay: 300,
+                          flushConnectionsOnFailover: true,
+                          wanMembers: interfaces.filter(i => {
+                            const role = roles.find(r => r.interfaceId === i.name);
+                            return role?.role === 'wan';
+                          }).map(i => ({
+                            id: `m-${i.name}`,
+                            interfaceName: i.name,
+                            weight: 1,
+                            gateway: '',
+                            healthStatus: 'unknown' as const,
+                            enabled: true,
+                            isPrimary: false,
+                          })),
+                        });
+                      } else {
+                        setMultiWanConfig(prev => prev ? { ...prev, enabled: v } : prev);
+                      }
+                    }} />
                   </div>
                 </div>
               </CardContent>
@@ -3056,15 +3081,29 @@ export default function NetworkPage() {
               </div>
               <div className="space-y-2">
                 <Label>Member Interfaces</Label>
-                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                  {interfaces.filter(i => i.type === 'ethernet' && !bonds.some(b => b.members.includes(i.name))).map(i => (
-                    <label key={i.id} className="flex items-center gap-2 p-2 rounded-md border hover:bg-muted/50 cursor-pointer">
-                      <input type="checkbox" checked={newBond.members.includes(i.name)}
-                        onChange={e => setNewBond(p => ({ ...p, members: e.target.checked ? [...p.members, i.name] : p.members.filter(m => m !== i.name) }))} className="accent-teal-600" />
-                      <span className="text-sm font-mono">{i.name}</span>
-                    </label>
-                  ))}
-                </div>
+                {(() => {
+                  const bridgeMemberNames = bridges.flatMap(b => b.members);
+                  const usedInBond = bonds.flatMap(b => b.members);
+                  const available = interfaces.filter(i =>
+                    (i.type === 'ethernet') &&
+                    !usedInBond.includes(i.name) &&
+                    !bridgeMemberNames.includes(i.name)
+                  );
+                  return available.length === 0 ? (
+                    <p className="text-sm text-muted-foreground py-3">No available ethernet interfaces. All may be in use by bridges or existing bonds.</p>
+                  ) : (
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                      {available.map(i => (
+                        <label key={i.id} className="flex items-center gap-2 p-2 rounded-md border hover:bg-muted/50 cursor-pointer">
+                          <input type="checkbox" checked={newBond.members.includes(i.name)}
+                            onChange={e => setNewBond(p => ({ ...p, members: e.target.checked ? [...p.members, i.name] : p.members.filter(m => m !== i.name) }))} className="accent-teal-600" />
+                          <span className="text-sm font-mono">{i.name}</span>
+                          <span className="text-[10px] text-muted-foreground truncate">{i.description}</span>
+                        </label>
+                      ))}
+                    </div>
+                  );
+                })()}
               </div>
               <div className="grid grid-cols-3 gap-4">
                 <div className="space-y-2">
