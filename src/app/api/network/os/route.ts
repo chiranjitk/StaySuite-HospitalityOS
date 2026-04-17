@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { execSync } from 'child_process';
+import * as fs from 'fs';
 import * as os from 'os';
 import { scanConnections, getDeviceStatus } from '@/lib/network/nmcli';
 import { NET_TYPES, NET_TYPE_LABELS, netTypeToLabel } from '@/lib/network/nettypes';
+import type { NmConnectionInfo } from '@/lib/network/nmcli';
 
 /**
  * GET /api/network/os — Scan .nmconnection files and return all network interfaces
@@ -16,6 +18,62 @@ import { NET_TYPES, NET_TYPE_LABELS, netTypeToLabel } from '@/lib/network/nettyp
  *   ?section=device-status → Only device runtime status
  *   ?section=all           → Everything (default)
  */
+
+/**
+ * Augment an interface with live system data from /sys/class/net/{name}/.
+ * Reads MAC address, link speed, and traffic counters.
+ */
+function augmentWithSysData(iface: NmConnectionInfo): NmConnectionInfo {
+  const ifName = iface.deviceName || iface.name;
+  const sysPath = `/sys/class/net/${ifName}`;
+  if (!fs.existsSync(sysPath)) return iface;
+
+  try {
+    // MAC address
+    const macPath = `${sysPath}/address`;
+    if (fs.existsSync(macPath)) {
+      const mac = fs.readFileSync(macPath, 'utf-8').trim();
+      if (mac && mac !== '00:00:00:00:00:00') {
+        iface.mac = mac;
+      }
+    }
+  } catch { /* ignore */ }
+
+  try {
+    // Link speed (Mbps)
+    const speedPath = `${sysPath}/speed`;
+    if (fs.existsSync(speedPath)) {
+      const speedVal = parseInt(fs.readFileSync(speedPath, 'utf-8').trim(), 10);
+      if (!isNaN(speedVal) && speedVal > 0) {
+        iface.speed = speedVal;
+      }
+    }
+  } catch { /* ignore */ }
+
+  try {
+    // RX bytes
+    const rxPath = `${sysPath}/statistics/rx_bytes`;
+    if (fs.existsSync(rxPath)) {
+      const rxVal = parseInt(fs.readFileSync(rxPath, 'utf-8').trim(), 10);
+      if (!isNaN(rxVal)) {
+        iface.rxBytes = rxVal;
+      }
+    }
+  } catch { /* ignore */ }
+
+  try {
+    // TX bytes
+    const txPath = `${sysPath}/statistics/tx_bytes`;
+    if (fs.existsSync(txPath)) {
+      const txVal = parseInt(fs.readFileSync(txPath, 'utf-8').trim(), 10);
+      if (!isNaN(txVal)) {
+        iface.txBytes = txVal;
+      }
+    }
+  } catch { /* ignore */ }
+
+  return iface;
+}
 
 export async function GET(request: NextRequest) {
   try {
@@ -32,6 +90,11 @@ export async function GET(request: NextRequest) {
 
     // Scan .nmconnection files
     const interfaces = scanConnections();
+
+    // Augment each interface with live system data (MAC, speed, traffic)
+    for (let i = 0; i < interfaces.length; i++) {
+      interfaces[i] = augmentWithSysData(interfaces[i]);
+    }
 
     // Group by nettype
     const byNetType: Record<string, typeof interfaces> = {};

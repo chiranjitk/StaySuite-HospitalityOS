@@ -130,6 +130,11 @@ export interface NmConnectionInfo {
   bondLacpRate?: string;
   // Runtime
   filePath: string;
+  // Live system data (augmented from /sys/class/net/)
+  mac?: string;
+  speed?: number;
+  rxBytes?: number;
+  txBytes?: number;
 }
 
 // ─── Scan / List ────────────────────────────────────────────────────────
@@ -271,9 +276,14 @@ export function setStaticIP(name: string, ip: string, netmask: string, gateway?:
     'con', 'mod', name,
     'ipv4.method', 'manual',
     'ipv4.addresses', `${ip}/${cidr}`,
-    'ipv4.gateway', gateway || '',
-    'ipv4.never-default', gateway ? 'no' : 'yes',
   ];
+  if (gateway) {
+    validateIPv4(gateway);
+    args.push('ipv4.gateway', gateway);
+    args.push('ipv4.never-default', 'no');
+  } else {
+    args.push('ipv4.never-default', 'yes');
+  }
   if (dns && dns.length > 0) {
     args.push('ipv4.dns', dns.join(','));
   }
