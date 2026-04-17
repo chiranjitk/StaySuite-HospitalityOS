@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { execSync } from 'child_process';
+import * as os from 'os';
 import { scanConnections, getDeviceStatus } from '@/lib/network/nmcli';
 import { NET_TYPES, NET_TYPE_LABELS, netTypeToLabel } from '@/lib/network/nettypes';
 
@@ -22,6 +24,10 @@ export async function GET(request: NextRequest) {
 
     if (section === 'device-status') {
       return NextResponse.json({ success: true, data: getDeviceStatus() });
+    }
+
+    if (section === 'system-info') {
+      return NextResponse.json({ success: true, data: getSystemInfo() });
     }
 
     // Scan .nmconnection files
@@ -68,5 +74,64 @@ export async function GET(request: NextRequest) {
       { success: false, error: { code: 'SCAN_ERROR', message: 'Failed to scan network connections' } },
       { status: 500 }
     );
+  }
+}
+
+/**
+ * Get system info: hostname, kernel, memory, CPU, uptime, load average.
+ * Works in sandbox (Node.js os module) and on Rocky 10 (real OS commands).
+ */
+function getSystemInfo() {
+  try {
+    const totalMem = os.totalmem();
+    const freeMem = os.freemem();
+    const usedMem = totalMem - freeMem;
+    const usagePercent = totalMem > 0 ? Math.round((usedMem / totalMem) * 100) : 0;
+
+    let hostname = os.hostname();
+    let kernel = '';
+    let osRelease = '';
+    let uptimeFormatted = '';
+    let loadAverage = '';
+
+    // Try reading from /proc on Linux (Rocky 10)
+    try {
+      kernel = execSync('uname -r', { encoding: 'utf-8' }).trim();
+    } catch { /* fallback: leave empty */ }
+
+    try {
+      osRelease = execSync('cat /etc/os-release 2>/dev/null | grep PRETTY_NAME | cut -d\"\" -f2', { encoding: 'utf-8' }).trim();
+    } catch {
+      osRelease = `Node.js ${process.version}`;
+    }
+
+    try {
+      const uptimeSec = os.uptime();
+      const days = Math.floor(uptimeSec / 86400);
+      const hours = Math.floor((uptimeSec % 86400) / 3600);
+      const mins = Math.floor((uptimeSec % 3600) / 60);
+      uptimeFormatted = days > 0 ? `${days}d ${hours}h ${mins}m` : `${hours}h ${mins}m`;
+    } catch { uptimeFormatted = 'unknown'; }
+
+    try {
+      loadAverage = os.loadavg().map(l => l.toFixed(2)).join(', ');
+    } catch { loadAverage = '0, 0, 0'; }
+
+    return {
+      hostname,
+      kernel,
+      osRelease,
+      uptimeFormatted,
+      loadAverage,
+      memory: {
+        total: totalMem,
+        used: usedMem,
+        usagePercent,
+      },
+      cpuCount: os.cpus().length,
+    };
+  } catch (error) {
+    console.error('[Network OS API] System info error:', error);
+    return null;
   }
 }

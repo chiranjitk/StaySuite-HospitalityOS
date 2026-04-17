@@ -1820,10 +1820,10 @@ export default function NetworkPage() {
               <div className="space-y-1">
                 <p className="text-[10px] text-muted-foreground font-medium uppercase tracking-wider">Memory</p>
                 <div className="flex items-center gap-2">
-                  <Progress value={osSystemInfo.memory.usagePercent} className="h-2 flex-1" />
-                  <span className="text-xs font-medium">{osSystemInfo.memory.usagePercent}%</span>
+                  <Progress value={osSystemInfo.memory?.usagePercent ?? 0} className="h-2 flex-1" />
+                  <span className="text-xs font-medium">{osSystemInfo.memory?.usagePercent ?? 0}%</span>
                 </div>
-                <p className="text-[10px] text-muted-foreground">{(osSystemInfo.memory.used / 1073741824).toFixed(1)} / {(osSystemInfo.memory.total / 1073741824).toFixed(1)} GB</p>
+                <p className="text-[10px] text-muted-foreground">{((osSystemInfo.memory?.used ?? 0) / 1073741824).toFixed(1)} / {((osSystemInfo.memory?.total ?? 0) / 1073741824).toFixed(1)} GB</p>
               </div>
               <div className="space-y-1">
                 <p className="text-[10px] text-muted-foreground font-medium uppercase tracking-wider">CPU</p>
