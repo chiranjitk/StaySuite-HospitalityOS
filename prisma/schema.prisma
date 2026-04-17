@@ -149,6 +149,9 @@ model Tenant {
   bandwidthPools      BandwidthPool[]
   networkBackups      NetworkConfigBackup[]
   systemHealth        SystemNetworkHealth[]
+  interfaceAliases    InterfaceAlias[]
+  staticRoutes        StaticRoute[]
+  multiWanConfigs     MultiWanConfig[]
 }
 
 /// SecuritySettings - Per-tenant security configuration
@@ -402,6 +405,9 @@ model Property {
   bandwidthPools        BandwidthPool[]
   networkBackups        NetworkConfigBackup[]
   systemHealth          SystemNetworkHealth?
+  interfaceAliases      InterfaceAlias[]
+  staticRoutes          StaticRoute[]
+  multiWanConfig        MultiWanConfig?
 
   @@unique([tenantId, slug])
   @@index([tenantId])
@@ -4395,6 +4401,7 @@ model NetworkInterface {
   roles           InterfaceRole[]
   vlans           VlanConfig[]
   bondMembers     BondMember[]
+  aliases         InterfaceAlias[]
 
   @@unique([propertyId, name])
   @@index([tenantId])
@@ -5236,4 +5243,107 @@ model SystemNetworkHealth {
   tenant          Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@index([tenantId])
+}
+
+// ============================================================
+// INTERFACE ALIASES - Secondary/multiple IPs per interface
+// ============================================================
+
+/// InterfaceAlias - Secondary IP addresses on an interface
+model InterfaceAlias {
+  id              String    @id @default(cuid())
+  tenantId        String
+  propertyId      String
+  interfaceId     String
+  interfaceName   String    // OS interface name (eth0, br0, etc.)
+  ipAddress       String    // 192.168.2.1
+  netmask         String    // 255.255.255.0 or CIDR prefix
+  description     String?
+  enabled         Boolean   @default(true)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  networkInterface NetworkInterface @relation(fields: [interfaceId], references: [id], onDelete: Cascade)
+  property        Property  @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  tenant          Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([propertyId, interfaceId, ipAddress])
+  @@index([tenantId])
+  @@index([propertyId])
+  @@index([interfaceId])
+}
+
+// ============================================================
+// STATIC ROUTES - Default and custom routing
+// ============================================================
+
+/// StaticRoute - Persistent static routes (default + custom)
+model StaticRoute {
+  id              String    @id @default(cuid())
+  tenantId        String
+  propertyId      String
+  name            String
+  destination     String    // 0.0.0.0/0 for default, or 10.0.0.0/24 etc
+  gateway         String    // 192.168.1.1
+  metric          Int       @default(100)
+  interfaceName   String?   // eth0, bond0, etc.
+  protocol        String    @default("static") // static, dhcp, kernel
+  isDefault       Boolean   @default(false)
+  enabled         Boolean   @default(true)
+  description     String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  property        Property  @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  tenant          Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([propertyId])
+  @@index([enabled])
+  @@index([isDefault])
+}
+
+// ============================================================
+// MULTI-WAN LOAD BALANCING
+// ============================================================
+
+/// MultiWanConfig - Multi-WAN load balancing configuration
+model MultiWanConfig {
+  id              String    @id @default(cuid())
+  tenantId        String
+  propertyId      String    @unique
+  enabled         Boolean   @default(false)
+  mode            String    @default("weighted") // weighted, failover, round-robin, ECMP
+  healthCheckUrl  String    @default("https://1.1.1.1")
+  healthCheckInterval Int   @default(10) // seconds
+  healthCheckTimeout  Int   @default(3) // seconds
+  failoverThreshold Int   @default(3) // consecutive failures
+  autoSwitchback  Boolean   @default(true)
+  switchbackDelay Int       @default(300) // seconds
+  flushConnectionsOnFailover Boolean @default(true)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  property        Property  @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  tenant          Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  wanMembers      MultiWanMember[]
+
+  @@index([tenantId])
+}
+
+/// MultiWanMember - Individual WAN interface in multi-WAN config
+model MultiWanMember {
+  id              String    @id @default(cuid())
+  multiWanConfigId String
+  interfaceName   String    // eth0, eth1, bond0
+  interfaceId     String?   // FK to NetworkInterface
+  weight          Int       @default(1) // For weighted load balancing (1-100)
+  gateway         String?   // Gateway IP
+  healthStatus    String    @default("unknown") // online, offline, checking, unknown
+  lastHealthCheck DateTime?
+  enabled         Boolean   @default(true)
+  isPrimary       Boolean   @default(false)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  multiWanConfig  MultiWanConfig @relation(fields: [multiWanConfigId], references: [id], onDelete: Cascade)
+
+  @@unique([multiWanConfigId, interfaceName])
+  @@index([multiWanConfigId])
 }

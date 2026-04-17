@@ -70,6 +70,11 @@ import {
   Save,
   LayoutGrid,
   List,
+  Route,
+  Workflow,
+  MapPin,
+  RefreshCw,
+  Zap,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
@@ -230,6 +235,43 @@ interface BackupSnapshot {
   size: string;
 }
 
+interface RouteEntry {
+  id: string;
+  name: string;
+  destination: string;
+  gateway: string;
+  metric: number;
+  interfaceName: string;
+  protocol: string;
+  isDefault: boolean;
+  enabled: boolean;
+  description: string;
+}
+
+interface MultiWanMemberEntry {
+  id: string;
+  interfaceName: string;
+  weight: number;
+  gateway: string;
+  healthStatus: 'online' | 'offline' | 'checking' | 'unknown';
+  enabled: boolean;
+  isPrimary: boolean;
+}
+
+interface MultiWanConfigEntry {
+  id: string;
+  enabled: boolean;
+  mode: 'weighted' | 'failover' | 'round-robin' | 'ECMP';
+  healthCheckUrl: string;
+  healthCheckInterval: number;
+  healthCheckTimeout: number;
+  failoverThreshold: number;
+  autoSwitchback: boolean;
+  switchbackDelay: number;
+  flushConnectionsOnFailover: boolean;
+  wanMembers: MultiWanMemberEntry[];
+}
+
 const fallbackBackups: BackupSnapshot[] = [
   { id: 'bk-1', name: 'Pre-Update Backup', date: '2025-01-14 08:30', version: '3.2.1', type: 'auto', size: '2.4 MB' },
   { id: 'bk-2', name: 'Weekly Auto Backup', date: '2025-01-13 00:00', version: '3.2.1', type: 'auto', size: '2.4 MB' },
@@ -320,13 +362,15 @@ function TrafficGraph({ rx, tx }: { rx: number; tx: number }) {
 
 // ─── TAB CONFIG ──────────────────────────────────────────────────────────────
 
-type TabId = 'interfaces' | 'vlans' | 'bridges-bonds' | 'wan-lan' | 'port-forwarding' | 'content-filtering' | 'schedules' | 'backup';
+type TabId = 'interfaces' | 'vlans' | 'bridges-bonds' | 'wan-lan' | 'routes' | 'multiwan' | 'port-forwarding' | 'content-filtering' | 'schedules' | 'backup';
 
 const tabs: { id: TabId; label: string; icon: React.ReactNode }[] = [
   { id: 'interfaces', label: 'Interfaces', icon: <Network className="h-4 w-4" /> },
   { id: 'vlans', label: 'VLANs', icon: <Server className="h-4 w-4" /> },
   { id: 'bridges-bonds', label: 'Bridges & Bonds', icon: <ArrowRightLeft className="h-4 w-4" /> },
   { id: 'wan-lan', label: 'WAN/LAN Mapping', icon: <Globe className="h-4 w-4" /> },
+  { id: 'routes', label: 'Routes', icon: <Route className="h-4 w-4" /> },
+  { id: 'multiwan', label: 'Multi-WAN', icon: <Workflow className="h-4 w-4" /> },
   { id: 'port-forwarding', label: 'Port Forwarding', icon: <Wifi className="h-4 w-4" /> },
   { id: 'content-filtering', label: 'Content Filtering', icon: <Shield className="h-4 w-4" /> },
   { id: 'schedules', label: 'Schedules', icon: <Clock className="h-4 w-4" /> },
@@ -401,10 +445,30 @@ export default function NetworkPage() {
     priority: 0
   });
 
-  const [newVlan, setNewVlan] = useState({ vlanId: '', parentInterface: 'eth1', description: '', mtu: 1500 });
+  const [newVlan, setNewVlan] = useState({ vlanId: '', parentInterface: 'eth1', description: '', mtu: 1500, subnet: '', ipAddress: '', netmask: '' });
+
+  const [addBridgeOpen, setAddBridgeOpen] = useState(false);
+  const [newBridge, setNewBridge] = useState({ name: '', members: [] as string[], stp: false, forwardDelay: 15, ipAddress: '', netmask: '' });
+
+  const [addBondOpen, setAddBondOpen] = useState(false);
+  const [newBond, setNewBond] = useState({ name: '', mode: 'active-backup', members: [] as string[], miimon: 100, lacpRate: 'slow', primary: '', ipAddress: '', netmask: '' });
+
+  const [interfaceAliases, setInterfaceAliases] = useState<{ipAddress: string; netmask: string; description: string}[]>([]);
+  const [newAlias, setNewAlias] = useState({ ipAddress: '', netmask: '255.255.255.0', description: '' });
+
+  const [routes, setRoutes] = useState<RouteEntry[]>([]);
+  const [loadingRoutes, setLoadingRoutes] = useState(false);
+  const [addRouteOpen, setAddRouteOpen] = useState(false);
+  const [newRoute, setNewRoute] = useState({ name: '', destination: '0.0.0.0/0', gateway: '', metric: 100, interfaceName: '', isDefault: false, description: '' });
+
+  const [multiWanConfig, setMultiWanConfig] = useState<MultiWanConfigEntry | null>(null);
+  const [loadingMultiWan, setLoadingMultiWan] = useState(false);
 
   const [newPortForward, setNewPortForward] = useState({ name: '', protocol: 'TCP', extPort: '', internalIp: '', internalPort: '', iface: 'eth0' });
   const [editPortForwardData, setEditPortForwardData] = useState({ name: '', protocol: 'TCP', extPort: '', internalIp: '', internalPort: '', iface: '' });
+
+  const [loadingBridges, setLoadingBridges] = useState(false);
+  const [loadingBonds, setLoadingBonds] = useState(false);
 
   const [editFilterDomains, setEditFilterDomains] = useState('');
 
@@ -750,6 +814,69 @@ export default function NetworkPage() {
     return () => clearInterval(interval);
   }, []);
 
+  // Fetch routes
+  const fetchRoutes = useCallback(async () => {
+    setLoadingRoutes(true);
+    try {
+      const osRes = await fetch('/api/network/os?section=routes');
+      const osResult = await osRes.json();
+      const dbRes = await fetch(`/api/wifi/network/routes?${propertyId ? 'propertyId=' + propertyId : ''}`);
+      const dbResult = await dbRes.json();
+      const dbRoutes: RouteEntry[] = (dbResult.success && Array.isArray(dbResult.data) ? dbResult.data : []).map((r: any) => ({
+        id: r.id, name: r.name, destination: r.destination, gateway: r.gateway,
+        metric: r.metric, interfaceName: r.interfaceName || '', protocol: r.protocol || 'static',
+        isDefault: r.isDefault, enabled: r.enabled, description: r.description || '',
+      }));
+      if (osResult.success && Array.isArray(osResult.data)) {
+        const osRoutes: RouteEntry[] = osResult.data.map((r: any, i: number) => ({
+          id: `os-${i}`, name: r.isDefault ? 'Default (OS)' : `Route ${i}`, destination: r.destination,
+          gateway: r.gateway, metric: r.metric || 0, interfaceName: r.interface || '',
+          protocol: r.protocol || 'kernel', isDefault: r.isDefault, enabled: true,
+          description: r.isDefault ? 'Default route from OS' : '',
+        }));
+        // Merge: DB routes override OS for same dest+gw
+        const merged = [...osRoutes];
+        for (const db of dbRoutes) {
+          const exists = merged.find(m => m.destination === db.destination && m.gateway === db.gateway);
+          if (!exists) merged.push(db);
+        }
+        setRoutes(merged);
+      } else {
+        setRoutes(dbRoutes.length > 0 ? dbRoutes : []);
+      }
+    } catch { setRoutes([]); } finally { setLoadingRoutes(false); }
+  }, [propertyId]);
+
+  // Fetch multi-WAN config
+  const fetchMultiWan = useCallback(async () => {
+    setLoadingMultiWan(true);
+    try {
+      const res = await fetch(`/api/wifi/network/multiwan?${propertyId ? 'propertyId=' + propertyId : ''}`);
+      const result = await res.json();
+      if (result.success && result.data) {
+        setMultiWanConfig({
+          id: result.data.id, enabled: result.data.enabled,
+          mode: result.data.mode || 'weighted',
+          healthCheckUrl: result.data.healthCheckUrl || 'https://1.1.1.1',
+          healthCheckInterval: result.data.healthCheckInterval || 10,
+          healthCheckTimeout: result.data.healthCheckTimeout || 3,
+          failoverThreshold: result.data.failoverThreshold || 3,
+          autoSwitchback: result.data.autoSwitchback ?? true,
+          switchbackDelay: result.data.switchbackDelay || 300,
+          flushConnectionsOnFailover: result.data.flushConnectionsOnFailover ?? true,
+          wanMembers: (result.data.wanMembers || []).map((m: any) => ({
+            id: m.id, interfaceName: m.interfaceName, weight: m.weight || 1,
+            gateway: m.gateway || '', healthStatus: m.healthStatus || 'unknown',
+            enabled: m.enabled ?? true, isPrimary: m.isPrimary ?? false,
+          })),
+        });
+      }
+    } catch {} finally { setLoadingMultiWan(false); }
+  }, [propertyId]);
+
+  useEffect(() => { fetchRoutes(); }, [fetchRoutes]);
+  useEffect(() => { fetchMultiWan(); }, [fetchMultiWan]);
+
   // ── Interface handlers ──
   const handleAddInterface = async () => {
     if (!newInterface.name.trim()) return;
@@ -782,8 +909,9 @@ export default function NetworkPage() {
 
   const handleOpenEditInterface = (iface: NetworkInterface) => {
     setSelectedInterface(iface);
+    setInterfaceAliases([]);
     const matchedRole = roles.find(r => r.interfaceName === iface.name);
-    setEditInterfaceData({ 
+    setEditInterfaceData({
       name: iface.name, mtu: iface.mtu, description: iface.description,
       mode: iface.ipAddress === '—' ? 'dhcp' : 'static',
       ipAddress: iface.ipAddress === '—' ? '' : iface.ipAddress,
@@ -792,6 +920,7 @@ export default function NetworkPage() {
       role: matchedRole?.role || 'unused',
       priority: matchedRole?.priority || 0
     });
+    handleFetchAliases(iface.name);
     setEditInterfaceOpen(true);
   };
 
@@ -952,6 +1081,7 @@ export default function NetworkPage() {
         }
       }
       // Also save to DB
+      const subIfaceName = `${newVlan.parentInterface}.${newVlan.vlanId}`;
       const parentIface = interfaces.find(i => i.name === newVlan.parentInterface);
       const res = await fetch('/api/wifi/network/vlans', {
         method: 'POST',
@@ -960,7 +1090,7 @@ export default function NetworkPage() {
           propertyId,
           parentInterfaceId: parentIface?.id || '',
           vlanId: parseInt(newVlan.vlanId),
-          subInterface: `${newVlan.parentInterface}.${newVlan.vlanId}`,
+          subInterface: subIfaceName,
           description: newVlan.description,
           mtu: newVlan.mtu,
           enabled: true,
@@ -968,9 +1098,16 @@ export default function NetworkPage() {
       });
       const result = await res.json();
       if (result.success) {
-        toast({ title: 'VLAN Created', description: `VLAN ${newVlan.vlanId} has been added.` });
+        // Apply IP address if provided
+        if (newVlan.ipAddress && newVlan.netmask) {
+          await fetch(`/api/network/os/interfaces/${subIfaceName}`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode: 'static', ipAddress: newVlan.ipAddress, netmask: newVlan.netmask }),
+          });
+        }
+        toast({ title: 'VLAN Created', description: `VLAN ${newVlan.vlanId} has been added.${newVlan.ipAddress ? ` IP ${newVlan.ipAddress} assigned.` : ''}` });
         setAddVlanOpen(false);
-        setNewVlan({ vlanId: '', parentInterface: 'eth1', description: '', mtu: 1500 });
+        setNewVlan({ vlanId: '', parentInterface: 'eth1', description: '', mtu: 1500, subnet: '', ipAddress: '', netmask: '' });
         fetchVlans();
       } else {
         toast({ title: 'Error', description: result.error?.message || 'Failed to create VLAN', variant: 'destructive' });
@@ -993,6 +1130,251 @@ export default function NetworkPage() {
     } catch {
       toast({ title: 'Error', description: 'Failed to delete VLAN', variant: 'destructive' });
     }
+  };
+
+  // ── Bridge/Bond handlers ──
+  const handleToggleBridge = async (bridgeName: string, currentState: boolean) => {
+    try {
+      if (osDataLoaded) {
+        await fetch(`/api/network/os/interfaces/${bridgeName}`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: currentState ? 'down' : 'up' }),
+        });
+      }
+      setBridges(prev => prev.map(b => b.name === bridgeName ? { ...b, enabled: !currentState } : b));
+    } catch {
+      toast({ title: 'Error', description: 'Failed to toggle bridge state', variant: 'destructive' });
+    }
+  };
+
+  const handleCreateBridge = async () => {
+    if (!newBridge.name.trim() || newBridge.members.length === 0) {
+      toast({ title: 'Error', description: 'Bridge name and at least one member are required', variant: 'destructive' });
+      return;
+    }
+    try {
+      const res = await fetch('/api/network/os/bridges', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newBridge),
+      });
+      const result = await res.json();
+      if (result.success) {
+        toast({ title: 'Bridge Created', description: `${newBridge.name} has been created with ${newBridge.members.length} member(s).` });
+        setAddBridgeOpen(false);
+        setNewBridge({ name: '', members: [], stp: false, forwardDelay: 15, ipAddress: '', netmask: '' });
+        fetchInterfaces();
+      } else {
+        toast({ title: 'Error', description: result.error?.message || 'Failed to create bridge', variant: 'destructive' });
+      }
+    } catch {
+      toast({ title: 'Error', description: 'Failed to create bridge', variant: 'destructive' });
+    }
+  };
+
+  const handleDeleteBridge = async (name: string) => {
+    try {
+      const res = await fetch(`/api/network/os/bridges?name=${encodeURIComponent(name)}`, { method: 'DELETE' });
+      const result = await res.json();
+      if (result.success) {
+        toast({ title: 'Bridge Deleted', description: `${name} has been removed.` });
+        setBridges(prev => prev.filter(b => b.name !== name));
+        fetchInterfaces();
+      } else {
+        toast({ title: 'Error', description: result.error?.message || 'Failed to delete bridge', variant: 'destructive' });
+      }
+    } catch {
+      toast({ title: 'Error', description: 'Failed to delete bridge', variant: 'destructive' });
+    }
+  };
+
+  const handleCreateBond = async () => {
+    if (!newBond.name.trim() || newBond.members.length === 0) {
+      toast({ title: 'Error', description: 'Bond name and at least one member are required', variant: 'destructive' });
+      return;
+    }
+    try {
+      const res = await fetch('/api/network/os/bonds', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newBond),
+      });
+      const result = await res.json();
+      if (result.success) {
+        toast({ title: 'Bond Created', description: `${newBond.name} created in ${newBond.mode} mode.` });
+        setAddBondOpen(false);
+        setNewBond({ name: '', mode: 'active-backup', members: [], miimon: 100, lacpRate: 'slow', primary: '', ipAddress: '', netmask: '' });
+        fetchInterfaces();
+      } else {
+        toast({ title: 'Error', description: result.error?.message || 'Failed to create bond', variant: 'destructive' });
+      }
+    } catch {
+      toast({ title: 'Error', description: 'Failed to create bond', variant: 'destructive' });
+    }
+  };
+
+  const handleDeleteBond = async (name: string) => {
+    try {
+      const res = await fetch(`/api/network/os/bonds?name=${encodeURIComponent(name)}`, { method: 'DELETE' });
+      const result = await res.json();
+      if (result.success) {
+        toast({ title: 'Bond Deleted', description: `${name} has been removed.` });
+        setBonds(prev => prev.filter(b => b.name !== name));
+        fetchInterfaces();
+      } else {
+        toast({ title: 'Error', description: result.error?.message || 'Failed to delete bond', variant: 'destructive' });
+      }
+    } catch {
+      toast({ title: 'Error', description: 'Failed to delete bond', variant: 'destructive' });
+    }
+  };
+
+  // ── Alias handlers ──
+  const handleFetchAliases = async (ifaceName: string) => {
+    try {
+      const osRes = await fetch(`/api/network/os/interfaces/${ifaceName}/aliases`);
+      const osResult = await osRes.json();
+      if (osResult.success && Array.isArray(osResult.data)) {
+        setInterfaceAliases(osResult.data.map((a: any) => ({ ipAddress: a.ipAddress, netmask: a.netmask, description: a.description || '' })));
+      } else {
+        // Derive from _osData if available
+        const iface = interfaces.find(i => i.name === ifaceName);
+        if (iface?._osData?.ipv4Addresses?.length > 1) {
+          const extra = iface._osData.ipv4Addresses.slice(1).map((addr: string) => {
+            const [ip, cidr] = addr.split('/');
+            const prefix = parseInt(cidr || '24', 10);
+            const mask = prefix === 0 ? 0 : (~0 << (32 - prefix)) >>> 0;
+            return { ipAddress: ip, netmask: `${(mask >>> 24) & 255}.${(mask >>> 16) & 255}.${(mask >>> 8) & 255}.${mask & 255}`, description: '' };
+          });
+          setInterfaceAliases(extra);
+        } else {
+          setInterfaceAliases([]);
+        }
+      }
+    } catch { setInterfaceAliases([]); }
+  };
+
+  const handleAddAlias = async (ifaceName: string) => {
+    if (!newAlias.ipAddress.trim()) return;
+    try {
+      const res = await fetch(`/api/network/os/interfaces/${ifaceName}/aliases`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newAlias),
+      });
+      const result = await res.json();
+      if (result.success) {
+        toast({ title: 'Alias Added', description: `${newAlias.ipAddress} added to ${ifaceName}` });
+        setNewAlias({ ipAddress: '', netmask: '255.255.255.0', description: '' });
+        handleFetchAliases(ifaceName);
+      } else {
+        toast({ title: 'Error', description: result.error?.message || 'Failed to add alias', variant: 'destructive' });
+      }
+    } catch {
+      toast({ title: 'Error', description: 'Failed to add alias', variant: 'destructive' });
+    }
+  };
+
+  const handleDeleteAlias = async (ifaceName: string, ip: string) => {
+    try {
+      await fetch(`/api/network/os/interfaces/${ifaceName}/aliases?ip=${encodeURIComponent(ip)}`, { method: 'DELETE' });
+      toast({ title: 'Alias Removed', description: `${ip} removed from ${ifaceName}` });
+      handleFetchAliases(ifaceName);
+    } catch {
+      toast({ title: 'Error', description: 'Failed to remove alias', variant: 'destructive' });
+    }
+  };
+
+  // ── Route handlers ──
+  const handleAddRoute = async () => {
+    if (!newRoute.gateway.trim() || !newRoute.interfaceName) {
+      toast({ title: 'Error', description: 'Gateway and interface are required', variant: 'destructive' });
+      return;
+    }
+    try {
+      const res = await fetch('/api/network/os/routes', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newRoute),
+      });
+      const result = await res.json();
+      if (result.success) {
+        toast({ title: 'Route Added', description: `Route via ${newRoute.gateway} has been added.` });
+        setAddRouteOpen(false);
+        setNewRoute({ name: '', destination: '0.0.0.0/0', gateway: '', metric: 100, interfaceName: '', isDefault: false, description: '' });
+        fetchRoutes();
+      } else {
+        toast({ title: 'Error', description: result.error?.message || 'Failed to add route', variant: 'destructive' });
+      }
+    } catch {
+      toast({ title: 'Error', description: 'Failed to add route', variant: 'destructive' });
+    }
+  };
+
+  const handleDeleteRoute = async (destination: string, gateway: string) => {
+    try {
+      await fetch(`/api/network/os/routes?destination=${encodeURIComponent(destination)}&gateway=${encodeURIComponent(gateway)}`, { method: 'DELETE' });
+      toast({ title: 'Route Removed', description: 'Route has been deleted.' });
+      fetchRoutes();
+    } catch {
+      toast({ title: 'Error', description: 'Failed to remove route', variant: 'destructive' });
+    }
+  };
+
+  // ── Multi-WAN handlers ──
+  const handleApplyMultiWan = async () => {
+    if (!multiWanConfig) return;
+    try {
+      const res = await fetch('/api/network/os/multiwan', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(multiWanConfig),
+      });
+      const result = await res.json();
+      if (result.success) {
+        toast({ title: 'Multi-WAN Applied', description: result.message || 'Load balancing configuration applied.' });
+        fetchMultiWan();
+      } else {
+        toast({ title: 'Error', description: result.error?.message || 'Failed to apply multi-WAN', variant: 'destructive' });
+      }
+    } catch {
+      toast({ title: 'Error', description: 'Failed to apply multi-WAN configuration', variant: 'destructive' });
+    }
+  };
+
+  const handleResetMultiWan = async () => {
+    try {
+      await fetch('/api/network/os/multiwan', { method: 'DELETE' });
+      toast({ title: 'Multi-WAN Reset', description: 'All multi-WAN rules and tables have been removed.' });
+      fetchMultiWan();
+      fetchRoutes();
+    } catch {
+      toast({ title: 'Error', description: 'Failed to reset multi-WAN', variant: 'destructive' });
+    }
+  };
+
+  const handleAddWanMember = () => {
+    if (!multiWanConfig) return;
+    const wanIfaces = interfaces.filter(i => {
+      const r = roles.find(rl => rl.interfaceName === i.name);
+      return r?.role === 'wan' && !multiWanConfig.wanMembers.some(m => m.interfaceName === i.name);
+    });
+    if (wanIfaces.length === 0) {
+      toast({ title: 'Info', description: 'No additional WAN interfaces available. Assign WAN role to interfaces first.' });
+      return;
+    }
+    const iface = wanIfaces[0];
+    setMultiWanConfig(prev => prev ? {
+      ...prev,
+      wanMembers: [...prev.wanMembers, {
+        id: `new-${Date.now()}`, interfaceName: iface.name, weight: 1,
+        gateway: iface.ipAddress !== '—' ? iface.ipAddress : '', healthStatus: 'unknown',
+        enabled: true, isPrimary: prev.wanMembers.length === 0,
+      }],
+    } : prev);
+  };
+
+  const handleRemoveWanMember = (interfaceName: string) => {
+    if (!multiWanConfig) return;
+    setMultiWanConfig(prev => prev ? {
+      ...prev,
+      wanMembers: prev.wanMembers.filter(m => m.interfaceName !== interfaceName),
+    } : prev);
   };
 
   // ── Backup handlers ──
@@ -1752,6 +2134,45 @@ export default function NetworkPage() {
                     </div>
                   </div>
 
+                  {/* IP Aliases Section */}
+                  <Separator />
+                  <div className="space-y-3">
+                    <h4 className="text-sm font-semibold flex items-center gap-2">
+                      <Plus className="h-3.5 w-3.5" />
+                      IP Aliases (Secondary IPs)
+                    </h4>
+                    {interfaceAliases.length > 0 && (
+                      <div className="space-y-2">
+                        {interfaceAliases.map((alias, idx) => (
+                          <div key={idx} className="flex items-center gap-2 bg-muted/50 rounded-md p-2">
+                            <div className="flex-1 grid grid-cols-3 gap-2 text-xs">
+                              <span className="font-mono font-medium">{alias.ipAddress}</span>
+                              <span className="font-mono text-muted-foreground">{alias.netmask}</span>
+                              <span className="text-muted-foreground truncate">{alias.description}</span>
+                            </div>
+                            <Button variant="ghost" size="sm" className="h-7 w-7 p-0 text-red-500 hover:text-red-600 shrink-0"
+                              onClick={() => selectedInterface && handleDeleteAlias(selectedInterface.name, alias.ipAddress)}>
+                              <Trash2 className="h-3 w-3" />
+                            </Button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    <div className="grid grid-cols-3 gap-2">
+                      <Input className="font-mono text-xs h-8" placeholder="IP Address" value={newAlias.ipAddress}
+                        onChange={e => setNewAlias(p => ({ ...p, ipAddress: e.target.value }))} />
+                      <Input className="font-mono text-xs h-8" placeholder="Netmask" value={newAlias.netmask}
+                        onChange={e => setNewAlias(p => ({ ...p, netmask: e.target.value }))} />
+                      <div className="flex gap-1">
+                        <Input className="text-xs h-8" placeholder="Desc" value={newAlias.description}
+                          onChange={e => setNewAlias(p => ({ ...p, description: e.target.value }))} />
+                        <Button variant="outline" size="sm" className="h-8 px-2 shrink-0" onClick={() => selectedInterface && handleAddAlias(selectedInterface.name)}>
+                          <Plus className="h-3 w-3" />
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+
                   {/* Read-only info */}
                   {selectedInterface && (
                     <div className="grid grid-cols-2 gap-4 text-sm bg-muted/50 rounded-lg p-3">
@@ -1880,6 +2301,22 @@ export default function NetworkPage() {
                     <Label>MTU</Label>
                     <Input type="number" value={newVlan.mtu} onChange={e => setNewVlan(p => ({ ...p, mtu: parseInt(e.target.value) || 1500 }))} />
                   </div>
+                  <Separator />
+                  <p className="text-xs font-semibold text-muted-foreground">IP Configuration (Optional)</p>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <Label>IP Address</Label>
+                      <Input className="font-mono" placeholder="192.168.10.1" value={newVlan.ipAddress} onChange={e => setNewVlan(p => ({ ...p, ipAddress: e.target.value }))} />
+                    </div>
+                    <div className="space-y-2">
+                      <Label>Netmask</Label>
+                      <Input className="font-mono" placeholder="255.255.255.0" value={newVlan.netmask} onChange={e => setNewVlan(p => ({ ...p, netmask: e.target.value }))} />
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>DHCP Subnet</Label>
+                    <Input className="font-mono" placeholder="192.168.10.0/24" value={newVlan.subnet} onChange={e => setNewVlan(p => ({ ...p, subnet: e.target.value }))} />
+                  </div>
                 </div>
                 <DialogFooter>
                   <Button variant="outline" onClick={() => setAddVlanOpen(false)}>Cancel</Button>
@@ -1920,8 +2357,15 @@ export default function NetworkPage() {
             {bridgeBondSubTab === 'bridges' && (
               <Card>
                 <CardHeader className="pb-3">
-                  <CardTitle className="text-base">Network Bridges</CardTitle>
-                  <CardDescription>Group interfaces into a single logical bridge</CardDescription>
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <CardTitle className="text-base">Network Bridges</CardTitle>
+                      <CardDescription>Group interfaces into a single logical bridge</CardDescription>
+                    </div>
+                    <Button size="sm" className="bg-teal-600 hover:bg-teal-700" onClick={() => setAddBridgeOpen(true)}>
+                      <Plus className="h-3.5 w-3.5 mr-1.5" /> Create Bridge
+                    </Button>
+                  </div>
                 </CardHeader>
                 <CardContent className="p-0">
                   <Table>
@@ -1932,6 +2376,7 @@ export default function NetworkPage() {
                         <TableHead className="font-semibold">STP</TableHead>
                         <TableHead className="font-semibold">Forward Delay</TableHead>
                         <TableHead className="font-semibold">Enabled</TableHead>
+                        <TableHead className="text-right font-semibold">Actions</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -1956,7 +2401,12 @@ export default function NetworkPage() {
                           </TableCell>
                           <TableCell className="font-mono">{bridge.forwardDelay}s</TableCell>
                           <TableCell>
-                            <Switch checked={bridge.enabled} onCheckedChange={() => handleToggleBridge(bridge.id)} />
+                            <Switch checked={bridge.enabled} onCheckedChange={() => handleToggleBridge(bridge.name, bridge.enabled)} />
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <Button variant="ghost" size="sm" className="h-8 w-8 p-0 text-red-500 hover:text-red-600" onClick={() => handleDeleteBridge(bridge.name)}>
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </Button>
                           </TableCell>
                         </TableRow>
                       ))}
@@ -1969,8 +2419,15 @@ export default function NetworkPage() {
             {bridgeBondSubTab === 'bonds' && (
               <Card>
                 <CardHeader className="pb-3">
-                  <CardTitle className="text-base">Network Bonds</CardTitle>
-                  <CardDescription>Aggregate multiple interfaces for redundancy or throughput</CardDescription>
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <CardTitle className="text-base">Network Bonds</CardTitle>
+                      <CardDescription>Aggregate multiple interfaces for redundancy or throughput</CardDescription>
+                    </div>
+                    <Button size="sm" className="bg-teal-600 hover:bg-teal-700" onClick={() => setAddBondOpen(true)}>
+                      <Plus className="h-3.5 w-3.5 mr-1.5" /> Create Bond
+                    </Button>
+                  </div>
                 </CardHeader>
                 <CardContent className="p-0">
                   <Table>
@@ -1982,6 +2439,7 @@ export default function NetworkPage() {
                         <TableHead className="font-semibold">MIIMon</TableHead>
                         <TableHead className="font-semibold">LACP Rate</TableHead>
                         <TableHead className="font-semibold">Primary</TableHead>
+                        <TableHead className="text-right font-semibold">Actions</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -2013,6 +2471,11 @@ export default function NetworkPage() {
                             <Badge variant="outline" className="capitalize text-xs">{bond.lacpRate}</Badge>
                           </TableCell>
                           <TableCell className="font-mono">{bond.primary}</TableCell>
+                          <TableCell className="text-right">
+                            <Button variant="ghost" size="sm" className="h-8 w-8 p-0 text-red-500 hover:text-red-600" onClick={() => handleDeleteBond(bond.name)}>
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </Button>
+                          </TableCell>
                         </TableRow>
                       ))}
                     </TableBody>
@@ -2222,6 +2685,434 @@ export default function NetworkPage() {
             </div>
           </div>
         )}
+
+        {/* ═══════ TAB 5: ROUTES ═══════ */}
+        {activeTab === 'routes' && (
+          <div className="space-y-6">
+            <div className="flex justify-between items-center">
+              <p className="text-sm text-muted-foreground">{routes.length} routes configured</p>
+              <Button onClick={() => setAddRouteOpen(true)} className="bg-teal-600 hover:bg-teal-700">
+                <Plus className="h-4 w-4 mr-2" /> Add Route
+              </Button>
+            </div>
+            {loadingRoutes ? (
+              <div className="flex items-center justify-center py-20"><Loader2 className="h-8 w-8 animate-spin text-teal-500" /></div>
+            ) : routes.length === 0 ? (
+              <Card className="border-dashed"><CardContent className="p-12 text-center"><Route className="h-10 w-10 mx-auto mb-3 text-muted-foreground" /><p className="text-sm text-muted-foreground">No routes configured. Add a default route or custom static routes.</p></CardContent></Card>
+            ) : (
+            <Card>
+              <CardContent className="p-0">
+                <Table>
+                  <TableHeader>
+                    <TableRow className="bg-muted/30">
+                      <TableHead className="font-semibold">Type</TableHead>
+                      <TableHead className="font-semibold">Destination</TableHead>
+                      <TableHead className="font-semibold">Gateway</TableHead>
+                      <TableHead className="font-semibold">Interface</TableHead>
+                      <TableHead className="font-semibold">Metric</TableHead>
+                      <TableHead className="font-semibold">Protocol</TableHead>
+                      <TableHead className="font-semibold">Description</TableHead>
+                      <TableHead className="text-right font-semibold">Actions</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {routes.map((route) => (
+                      <TableRow key={route.id}>
+                        <TableCell>
+                          <Badge className={route.isDefault ? 'bg-orange-500/15 text-orange-700 dark:text-orange-400 text-[10px]' : 'bg-teal-500/15 text-teal-700 dark:text-teal-400 text-[10px]'}>
+                            {route.isDefault ? 'Default' : 'Custom'}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="font-mono text-sm">{route.destination}</TableCell>
+                        <TableCell className="font-mono text-sm font-medium">{route.gateway || '—'}</TableCell>
+                        <TableCell className="font-mono text-sm">{route.interfaceName || '—'}</TableCell>
+                        <TableCell className="text-sm">{route.metric}</TableCell>
+                        <TableCell className="text-xs text-muted-foreground">{route.protocol}</TableCell>
+                        <TableCell className="text-xs text-muted-foreground">{route.description || '—'}</TableCell>
+                        <TableCell className="text-right">
+                          <Button variant="ghost" size="sm" className="h-8 w-8 p-0 text-red-500 hover:text-red-600"
+                            onClick={() => handleDeleteRoute(route.destination, route.gateway)}>
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </CardContent>
+            </Card>
+            )}
+
+            <Dialog open={addRouteOpen} onOpenChange={setAddRouteOpen}>
+              <DialogContent>
+                <DialogHeader>
+                  <DialogTitle>Add Route</DialogTitle>
+                  <DialogDescription>Add a static route (default gateway or custom network route)</DialogDescription>
+                </DialogHeader>
+                <div className="grid gap-4 py-2">
+                  <div className="space-y-2">
+                    <Label>Route Name</Label>
+                    <Input placeholder="e.g., Default Gateway" value={newRoute.name} onChange={e => setNewRoute(p => ({ ...p, name: e.target.value }))} />
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <Switch checked={newRoute.isDefault} onCheckedChange={v => setNewRoute(p => ({ ...p, isDefault: v, destination: v ? '0.0.0.0/0' : p.destination }))} />
+                    <Label>Default Route (0.0.0.0/0)</Label>
+                  </div>
+                  {!newRoute.isDefault && (
+                    <div className="space-y-2">
+                      <Label>Destination Network</Label>
+                      <Input className="font-mono" placeholder="e.g., 10.0.0.0/24" value={newRoute.destination} onChange={e => setNewRoute(p => ({ ...p, destination: e.target.value }))} />
+                    </div>
+                  )}
+                  <div className="space-y-2">
+                    <Label>Gateway</Label>
+                    <Input className="font-mono" placeholder="e.g., 192.168.1.254" value={newRoute.gateway} onChange={e => setNewRoute(p => ({ ...p, gateway: e.target.value }))} />
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <Label>Interface</Label>
+                      <Select value={newRoute.interfaceName} onValueChange={v => setNewRoute(p => ({ ...p, interfaceName: v }))}>
+                        <SelectTrigger className="w-full"><SelectValue placeholder="Select interface" /></SelectTrigger>
+                        <SelectContent>
+                          {interfaces.map(i => (<SelectItem key={i.id} value={i.name}>{i.name}</SelectItem>))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-2">
+                      <Label>Metric</Label>
+                      <Input type="number" value={newRoute.metric} onChange={e => setNewRoute(p => ({ ...p, metric: parseInt(e.target.value) || 100 }))} />
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Description</Label>
+                    <Input placeholder="Optional description" value={newRoute.description} onChange={e => setNewRoute(p => ({ ...p, description: e.target.value }))} />
+                  </div>
+                </div>
+                <DialogFooter>
+                  <Button variant="outline" onClick={() => setAddRouteOpen(false)}>Cancel</Button>
+                  <Button className="bg-teal-600 hover:bg-teal-700" onClick={handleAddRoute}>Add Route</Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+          </div>
+        )}
+
+        {/* ═══════ TAB 6: MULTI-WAN ═══════ */}
+        {activeTab === 'multiwan' && (
+          <div className="space-y-6">
+            {loadingMultiWan ? (
+              <div className="flex items-center justify-center py-20"><Loader2 className="h-8 w-8 animate-spin text-teal-500" /></div>
+            ) : (
+            <>
+            {/* Status Banner */}
+            <Card className={multiWanConfig?.enabled ? 'border-emerald-500/30 bg-gradient-to-r from-emerald-50 to-teal-50 dark:from-emerald-950/20 dark:to-teal-950/20' : 'border-muted'}>
+              <CardContent className="p-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className={cn('p-2.5 rounded-xl', multiWanConfig?.enabled ? 'bg-gradient-to-br from-emerald-500 to-teal-600 text-white' : 'bg-muted text-muted-foreground')}>
+                      <Workflow className="h-5 w-5" />
+                    </div>
+                    <div>
+                      <p className="text-sm font-semibold">{multiWanConfig?.enabled ? 'Multi-WAN Load Balancing Active' : 'Multi-WAN Not Configured'}</p>
+                      <p className="text-xs text-muted-foreground">
+                        {multiWanConfig?.enabled
+                          ? `Mode: ${(multiWanConfig?.mode || 'weighted').toUpperCase()} · ${multiWanConfig?.wanMembers.filter(m => m.enabled).length} WAN link(s)`
+                          : 'Configure multiple WAN interfaces for load balancing or failover'}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Switch checked={multiWanConfig?.enabled ?? false} onCheckedChange={v => setMultiWanConfig(prev => prev ? { ...prev, enabled: v } : prev)} />
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Configuration Card */}
+            {multiWanConfig && (
+              <>
+              <Card>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-base flex items-center gap-2"><Zap className="h-4 w-4 text-amber-500" /> Load Balancing Configuration</CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                    <div className="space-y-2">
+                      <Label className="text-xs">Mode</Label>
+                      <Select value={multiWanConfig.mode} onValueChange={v => setMultiWanConfig(p => p ? { ...p, mode: v as any } : p)}>
+                        <SelectTrigger className="h-9"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="weighted">Weighted (ECMP)</SelectItem>
+                          <SelectItem value="failover">Failover</SelectItem>
+                          <SelectItem value="round-robin">Round Robin</SelectItem>
+                          <SelectItem value="ECMP">ECMP</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-2">
+                      <Label className="text-xs">Health Check URL</Label>
+                      <Input className="h-9 text-sm" value={multiWanConfig.healthCheckUrl} onChange={e => setMultiWanConfig(p => p ? { ...p, healthCheckUrl: e.target.value } : p)} />
+                    </div>
+                    <div className="space-y-2">
+                      <Label className="text-xs">Check Interval (s)</Label>
+                      <Input type="number" className="h-9" value={multiWanConfig.healthCheckInterval} onChange={e => setMultiWanConfig(p => p ? { ...p, healthCheckInterval: parseInt(e.target.value) || 10 } : p)} />
+                    </div>
+                    <div className="space-y-2">
+                      <Label className="text-xs">Failover Threshold</Label>
+                      <Input type="number" className="h-9" value={multiWanConfig.failoverThreshold} onChange={e => setMultiWanConfig(p => p ? { ...p, failoverThreshold: parseInt(e.target.value) || 3 } : p)} />
+                    </div>
+                    <div className="space-y-2">
+                      <Label className="text-xs">Timeout (s)</Label>
+                      <Input type="number" className="h-9" value={multiWanConfig.healthCheckTimeout} onChange={e => setMultiWanConfig(p => p ? { ...p, healthCheckTimeout: parseInt(e.target.value) || 3 } : p)} />
+                    </div>
+                    <div className="space-y-2 flex items-end gap-3">
+                      <div className="flex items-center gap-2">
+                        <Switch checked={multiWanConfig.autoSwitchback} onCheckedChange={v => setMultiWanConfig(p => p ? { ...p, autoSwitchback: v } : p)} />
+                        <Label className="text-xs">Auto Switchback</Label>
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <Label className="text-xs">Switchback Delay (s)</Label>
+                      <Input type="number" className="h-9" value={multiWanConfig.switchbackDelay} onChange={e => setMultiWanConfig(p => p ? { ...p, switchbackDelay: parseInt(e.target.value) || 300 } : p)} />
+                    </div>
+                    <div className="space-y-2 flex items-end gap-3">
+                      <div className="flex items-center gap-2">
+                        <Switch checked={multiWanConfig.flushConnectionsOnFailover} onCheckedChange={v => setMultiWanConfig(p => p ? { ...p, flushConnectionsOnFailover: v } : p)} />
+                        <Label className="text-xs">Flush Conn.</Label>
+                      </div>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+
+              {/* WAN Members */}
+              <Card>
+                <CardHeader className="pb-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <CardTitle className="text-base flex items-center gap-2"><Globe className="h-4 w-4 text-orange-500" /> WAN Interfaces</CardTitle>
+                      <CardDescription>Manage WAN links for load balancing</CardDescription>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button size="sm" variant="outline" onClick={handleAddWanMember}><Plus className="h-3.5 w-3.5 mr-1.5" /> Add WAN Link</Button>
+                    </div>
+                  </div>
+                </CardHeader>
+                <CardContent className="p-0">
+                  {multiWanConfig.wanMembers.length === 0 ? (
+                    <div className="p-8 text-center text-sm text-muted-foreground">
+                      <Globe className="h-8 w-8 mx-auto mb-2 text-muted-foreground/50" />
+                      No WAN members added. Click "Add WAN Link" or assign WAN role to interfaces in the WAN/LAN Mapping tab.
+                    </div>
+                  ) : (
+                  <Table>
+                    <TableHeader>
+                      <TableRow className="bg-muted/30">
+                        <TableHead className="font-semibold">Interface</TableHead>
+                        <TableHead className="font-semibold">Gateway</TableHead>
+                        <TableHead className="font-semibold">Weight</TableHead>
+                        <TableHead className="font-semibold">Primary</TableHead>
+                        <TableHead className="font-semibold">Health</TableHead>
+                        <TableHead className="font-semibold">Enabled</TableHead>
+                        <TableHead className="text-right font-semibold">Actions</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {multiWanConfig.wanMembers.map((member) => (
+                        <TableRow key={member.id}>
+                          <TableCell className="font-mono font-semibold">{member.interfaceName}</TableCell>
+                          <TableCell className="font-mono text-sm">{member.gateway || '—'}</TableCell>
+                          <TableCell>
+                            <Input type="number" className="w-20 h-8 text-sm font-mono" value={member.weight}
+                              onChange={e => setMultiWanConfig(p => p ? { ...p, wanMembers: p.wanMembers.map(m => m.interfaceName === member.interfaceName ? { ...m, weight: parseInt(e.target.value) || 1 } : m) } : p)} />
+                          </TableCell>
+                          <TableCell>
+                            <input type="radio" name="primary" checked={member.isPrimary}
+                              onChange={() => setMultiWanConfig(p => p ? { ...p, wanMembers: p.wanMembers.map(m => ({ ...m, isPrimary: m.interfaceName === member.interfaceName })) } : p)}
+                              className="h-4 w-4 accent-teal-600" />
+                          </TableCell>
+                          <TableCell>
+                            <div className="flex items-center gap-1.5">
+                              <div className={cn('h-2.5 w-2.5 rounded-full', member.healthStatus === 'online' ? 'bg-emerald-500' : member.healthStatus === 'offline' ? 'bg-red-500' : 'bg-amber-500 animate-pulse')} />
+                              <span className="text-xs capitalize">{member.healthStatus}</span>
+                            </div>
+                          </TableCell>
+                          <TableCell><Switch checked={member.enabled} onCheckedChange={v => setMultiWanConfig(p => p ? { ...p, wanMembers: p.wanMembers.map(m => m.interfaceName === member.interfaceName ? { ...m, enabled: v } : m) } : p)} /></TableCell>
+                          <TableCell className="text-right">
+                            <Button variant="ghost" size="sm" className="h-8 w-8 p-0 text-red-500" onClick={() => handleRemoveWanMember(member.interfaceName)}>
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </Button>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                  )}
+                </CardContent>
+              </Card>
+
+              {/* Flow Diagram */}
+              <div className="flex items-center justify-center gap-4 py-2">
+                <div className="flex items-center gap-2"><Globe className="h-5 w-5 text-orange-500" /><span className="text-xs font-semibold text-orange-700">INTERNET</span></div>
+                <div className="h-0.5 w-8 bg-gradient-to-r from-orange-500 to-teal-500 rounded-full" />
+                <div className="flex items-center gap-1">
+                  {multiWanConfig.wanMembers.filter(m => m.enabled).map((m, i) => (
+                    <React.Fragment key={m.interfaceName}>
+                      <div className={cn('px-3 py-1.5 rounded-lg text-xs font-semibold border', m.healthStatus === 'online' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-red-50 text-red-700 border-red-200')}>
+                        {m.interfaceName}
+                      </div>
+                      {i < multiWanConfig.wanMembers.filter(m => m.enabled).length - 1 && <ArrowRightLeft className="h-3 w-3 text-muted-foreground mx-1" />}
+                    </React.Fragment>
+                  ))}
+                </div>
+                <div className="h-0.5 w-8 bg-gradient-to-r from-teal-500 to-emerald-500 rounded-full" />
+                <div className="flex items-center gap-2"><Server className="h-5 w-5 text-teal-600" /><span className="text-xs font-semibold text-teal-700">GATEWAY</span></div>
+                <div className="h-0.5 w-8 bg-emerald-500 rounded-full" />
+                <div className="flex items-center gap-2"><Monitor className="h-5 w-5 text-emerald-500" /><span className="text-xs font-semibold text-emerald-700">LAN</span></div>
+              </div>
+
+              {/* Action Buttons */}
+              <div className="flex gap-3">
+                <Button className="bg-teal-600 hover:bg-teal-700" onClick={handleApplyMultiWan} disabled={!multiWanConfig.enabled || multiWanConfig.wanMembers.filter(m => m.enabled).length === 0}>
+                  <Zap className="h-4 w-4 mr-2" /> Apply Configuration
+                </Button>
+                <Button variant="outline" onClick={handleResetMultiWan}>
+                  <RefreshCw className="h-4 w-4 mr-2" /> Reset Multi-WAN
+                </Button>
+              </div>
+              </>
+            )}
+            </>
+            )}
+          </div>
+        )}
+
+        {/* Bridge Create Dialog */}
+        <Dialog open={addBridgeOpen} onOpenChange={setAddBridgeOpen}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Create Network Bridge</DialogTitle>
+              <DialogDescription>Create a new bridge interface to group physical interfaces</DialogDescription>
+            </DialogHeader>
+            <div className="grid gap-4 py-2">
+              <div className="space-y-2">
+                <Label>Bridge Name</Label>
+                <Input placeholder="e.g., br-guest" value={newBridge.name} onChange={e => setNewBridge(p => ({ ...p, name: e.target.value }))} />
+              </div>
+              <div className="space-y-2">
+                <Label>Member Interfaces</Label>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                  {interfaces.filter(i => i.type === 'ethernet' && !bridges.some(b => b.members.includes(i.name))).map(i => (
+                    <label key={i.id} className="flex items-center gap-2 p-2 rounded-md border hover:bg-muted/50 cursor-pointer">
+                      <input type="checkbox" checked={newBridge.members.includes(i.name)}
+                        onChange={e => setNewBridge(p => ({ ...p, members: e.target.checked ? [...p.members, i.name] : p.members.filter(m => m !== i.name) }))} className="accent-teal-600" />
+                      <span className="text-sm font-mono">{i.name}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+              <div className="flex items-center gap-3">
+                <Switch checked={newBridge.stp} onCheckedChange={v => setNewBridge(p => ({ ...p, stp: v }))} />
+                <Label>Enable STP (Spanning Tree Protocol)</Label>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label>IP Address (Optional)</Label>
+                  <Input className="font-mono" placeholder="192.168.1.1" value={newBridge.ipAddress} onChange={e => setNewBridge(p => ({ ...p, ipAddress: e.target.value }))} />
+                </div>
+                <div className="space-y-2">
+                  <Label>Netmask (Optional)</Label>
+                  <Input className="font-mono" placeholder="255.255.255.0" value={newBridge.netmask} onChange={e => setNewBridge(p => ({ ...p, netmask: e.target.value }))} />
+                </div>
+              </div>
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setAddBridgeOpen(false)}>Cancel</Button>
+              <Button className="bg-teal-600 hover:bg-teal-700" onClick={handleCreateBridge}>Create Bridge</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* Bond Create Dialog */}
+        <Dialog open={addBondOpen} onOpenChange={setAddBondOpen}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Create Network Bond</DialogTitle>
+              <DialogDescription>Create a bonded interface for link aggregation or redundancy</DialogDescription>
+            </DialogHeader>
+            <div className="grid gap-4 py-2">
+              <div className="space-y-2">
+                <Label>Bond Name</Label>
+                <Input placeholder="e.g., bond0, bond1" value={newBond.name} onChange={e => setNewBond(p => ({ ...p, name: e.target.value }))} />
+              </div>
+              <div className="space-y-2">
+                <Label>Mode</Label>
+                <Select value={newBond.mode} onValueChange={v => setNewBond(p => ({ ...p, mode: v }))}>
+                  <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="active-backup">Active-Backup</SelectItem>
+                    <SelectItem value="balance-rr">Balance-RR</SelectItem>
+                    <SelectItem value="balance-xor">Balance-XOR</SelectItem>
+                    <SelectItem value="802.3ad">802.3ad (LACP)</SelectItem>
+                    <SelectItem value="balance-tlb">Balance-TLB</SelectItem>
+                    <SelectItem value="balance-alb">Balance-ALB</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <Label>Member Interfaces</Label>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                  {interfaces.filter(i => i.type === 'ethernet' && !bonds.some(b => b.members.includes(i.name))).map(i => (
+                    <label key={i.id} className="flex items-center gap-2 p-2 rounded-md border hover:bg-muted/50 cursor-pointer">
+                      <input type="checkbox" checked={newBond.members.includes(i.name)}
+                        onChange={e => setNewBond(p => ({ ...p, members: e.target.checked ? [...p.members, i.name] : p.members.filter(m => m !== i.name) }))} className="accent-teal-600" />
+                      <span className="text-sm font-mono">{i.name}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+              <div className="grid grid-cols-3 gap-4">
+                <div className="space-y-2">
+                  <Label>MIIMon (ms)</Label>
+                  <Input type="number" value={newBond.miimon} onChange={e => setNewBond(p => ({ ...p, miimon: parseInt(e.target.value) || 100 }))} />
+                </div>
+                <div className="space-y-2">
+                  <Label>LACP Rate</Label>
+                  <Select value={newBond.lacpRate} onValueChange={v => setNewBond(p => ({ ...p, lacpRate: v }))}>
+                    <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="slow">Slow</SelectItem>
+                      <SelectItem value="fast">Fast</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-2">
+                  <Label>Primary</Label>
+                  <Select value={newBond.primary} onValueChange={v => setNewBond(p => ({ ...p, primary: v }))}>
+                    <SelectTrigger className="w-full"><SelectValue placeholder="Select" /></SelectTrigger>
+                    <SelectContent>
+                      {newBond.members.map(m => (<SelectItem key={m} value={m}>{m}</SelectItem>))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label>IP Address (Optional)</Label>
+                  <Input className="font-mono" placeholder="10.0.2.1" value={newBond.ipAddress} onChange={e => setNewBond(p => ({ ...p, ipAddress: e.target.value }))} />
+                </div>
+                <div className="space-y-2">
+                  <Label>Netmask (Optional)</Label>
+                  <Input className="font-mono" placeholder="255.255.255.0" value={newBond.netmask} onChange={e => setNewBond(p => ({ ...p, netmask: e.target.value }))} />
+                </div>
+              </div>
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setAddBondOpen(false)}>Cancel</Button>
+              <Button className="bg-teal-600 hover:bg-teal-700" onClick={handleCreateBond}>Create Bond</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
 
         {/* ═══════ TAB 5: PORT FORWARDING ═══════ */}
         {activeTab === 'port-forwarding' && (
