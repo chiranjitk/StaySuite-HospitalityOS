@@ -68,6 +68,8 @@ import {
   XCircle,
   Loader2,
   Save,
+  LayoutGrid,
+  List,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
@@ -390,7 +392,14 @@ export default function NetworkPage() {
 
   // Form states
   const [newInterface, setNewInterface] = useState({ name: '', type: 'ethernet', mtu: 1500, description: '' });
-  const [editInterfaceData, setEditInterfaceData] = useState({ name: '', mtu: 1500, description: '' });
+  const [interfaceView, setInterfaceView] = useState<'grid' | 'list'>('grid');
+  const [editInterfaceData, setEditInterfaceData] = useState({ 
+    name: '', mtu: 1500, description: '',
+    mode: 'dhcp' as 'dhcp' | 'static',
+    ipAddress: '', netmask: '', gateway: '',
+    role: 'unused' as string,
+    priority: 0
+  });
 
   const [newVlan, setNewVlan] = useState({ vlanId: '', parentInterface: 'eth1', description: '', mtu: 1500 });
 
@@ -752,13 +761,24 @@ export default function NetworkPage() {
 
   const handleOpenEditInterface = (iface: NetworkInterface) => {
     setSelectedInterface(iface);
-    setEditInterfaceData({ name: iface.name, mtu: iface.mtu, description: iface.description });
+    const matchedRole = roles.find(r => r.interfaceName === iface.name);
+    setEditInterfaceData({ 
+      name: iface.name, mtu: iface.mtu, description: iface.description,
+      mode: iface.ipAddress === '—' ? 'dhcp' : 'static',
+      ipAddress: iface.ipAddress === '—' ? '' : iface.ipAddress,
+      netmask: iface.subnet === '—' ? '' : iface.subnet,
+      gateway: '',
+      role: matchedRole?.role || 'unused',
+      priority: matchedRole?.priority || 0
+    });
     setEditInterfaceOpen(true);
   };
 
   const handleSaveEditInterface = async () => {
     if (!selectedInterface) return;
     try {
+      const matchedRole = roles.find(r => r.interfaceName === selectedInterface.name);
+      
       // If using OS data, apply MTU via OS API
       if (osDataLoaded && editInterfaceData.mtu !== selectedInterface.mtu) {
         const mtuRes = await fetch(`/api/network/os/interfaces/${selectedInterface.name}`, {
@@ -771,6 +791,32 @@ export default function NetworkPage() {
           toast({ title: 'MTU Updated', description: `MTU for ${selectedInterface.name} set to ${editInterfaceData.mtu}` });
         }
       }
+
+      // If IP config changed, call IP config API
+      if (osDataLoaded && (editInterfaceData.mode !== (selectedInterface.ipAddress === '—' ? 'dhcp' : 'static') ||
+          editInterfaceData.ipAddress !== selectedInterface.ipAddress ||
+          editInterfaceData.netmask !== selectedInterface.subnet)) {
+        await fetch(`/api/network/os/interfaces/${selectedInterface.name}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            mode: editInterfaceData.mode, 
+            ipAddress: editInterfaceData.ipAddress, 
+            netmask: editInterfaceData.netmask,
+            gateway: editInterfaceData.gateway 
+          }),
+        });
+      }
+
+      // If role changed, call role API
+      if (matchedRole && editInterfaceData.role !== matchedRole.role) {
+        await fetch(`/api/network/os/interfaces/${selectedInterface.name}/role`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ role: editInterfaceData.role, priority: editInterfaceData.priority }),
+        });
+      }
+
       // Also save to DB for metadata
       const res = await fetch(`/api/wifi/network/interfaces/${selectedInterface.id}`, {
         method: 'PUT',
@@ -1324,7 +1370,27 @@ export default function NetworkPage() {
         {activeTab === 'interfaces' && (
           <div className="space-y-6">
             <div className="flex justify-between items-center">
-              <p className="text-sm text-muted-foreground">{interfaces.length} interfaces configured</p>
+              <div className="flex items-center gap-3">
+                <p className="text-sm text-muted-foreground">{interfaces.length} interfaces configured</p>
+                <div className="flex items-center border rounded-md p-0.5">
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className={cn('h-7 w-7', interfaceView === 'grid' ? 'bg-muted' : '')}
+                    onClick={() => setInterfaceView('grid')}
+                  >
+                    <LayoutGrid className="h-3.5 w-3.5" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className={cn('h-7 w-7', interfaceView === 'list' ? 'bg-muted' : '')}
+                    onClick={() => setInterfaceView('list')}
+                  >
+                    <List className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+              </div>
               <Button onClick={() => setAddInterfaceOpen(true)} className="bg-teal-600 hover:bg-teal-700">
                 <Plus className="h-4 w-4 mr-2" />
                 Add Interface
@@ -1336,9 +1402,11 @@ export default function NetworkPage() {
                 <Loader2 className="h-8 w-8 animate-spin text-teal-500" />
                 <span className="ml-3 text-sm text-muted-foreground">Loading interfaces…</span>
               </div>
-            ) : (
+            ) : interfaceView === 'grid' ? (
             <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-              {interfaces.map((iface) => (
+              {interfaces.map((iface) => {
+                const matchedRole = roles.find(r => r.interfaceName === iface.name);
+                return (
                 <Card
                   key={iface.id}
                   className="cursor-pointer transition-all duration-200 hover:scale-[1.01] hover:shadow-md border-border/50 hover:border-teal-500/30"
@@ -1368,6 +1436,11 @@ export default function NetworkPage() {
                         <Badge variant="outline" className={cn('text-[10px] border', typeBadgeColor[iface.type])}>
                           {iface.type}
                         </Badge>
+                        {matchedRole && (
+                          <Badge variant="outline" className={cn('text-[10px] border', roleBadgeColor[matchedRole.role])}>
+                            {matchedRole.role.toUpperCase()}
+                          </Badge>
+                        )}
                         <div className={cn(
                           'h-2.5 w-2.5 rounded-full',
                           iface.status === 'up' ? 'bg-emerald-500 shadow-sm shadow-emerald-500/50' : 'bg-gray-400'
@@ -1380,6 +1453,10 @@ export default function NetworkPage() {
                       <div className="space-y-0.5">
                         <span className="text-muted-foreground">IP Address</span>
                         <p className="font-mono font-medium">{iface.ipAddress}</p>
+                      </div>
+                      <div className="space-y-0.5">
+                        <span className="text-muted-foreground">Subnet</span>
+                        <p className="font-mono font-medium">{iface.subnet}</p>
                       </div>
                       <div className="space-y-0.5">
                         <span className="text-muted-foreground">MAC</span>
@@ -1408,8 +1485,102 @@ export default function NetworkPage() {
                     <TrafficGraph rx={iface.rxBytes} tx={iface.txBytes} />
                   </CardContent>
                 </Card>
-              ))}
+                );
+              })}
             </div>
+            ) : (
+            <Card>
+              <CardContent className="p-0">
+                <Table>
+                  <TableHeader>
+                    <TableRow className="bg-muted/30">
+                      <TableHead className="font-semibold">Interface</TableHead>
+                      <TableHead className="font-semibold">IP Address</TableHead>
+                      <TableHead className="font-semibold">Subnet</TableHead>
+                      <TableHead className="font-semibold">MAC</TableHead>
+                      <TableHead className="font-semibold">Speed</TableHead>
+                      <TableHead className="font-semibold">MTU</TableHead>
+                      <TableHead className="font-semibold">Status</TableHead>
+                      <TableHead className="font-semibold">Role</TableHead>
+                      <TableHead className="font-semibold">Traffic</TableHead>
+                      <TableHead className="text-right font-semibold">Actions</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {interfaces.map((iface) => {
+                      const matchedRole = roles.find(r => r.interfaceName === iface.name);
+                      return (
+                        <TableRow key={iface.id}>
+                          <TableCell>
+                            <div className="flex items-center gap-2">
+                              <div className={cn(
+                                'p-1.5 rounded-md',
+                                iface.type === 'wireless' ? 'bg-rose-500/10' :
+                                iface.type === 'bridge' ? 'bg-emerald-500/10' :
+                                iface.type === 'bond' ? 'bg-violet-500/10' :
+                                iface.type === 'vlan' ? 'bg-amber-500/10' : 'bg-teal-500/10'
+                              )}>
+                                {iface.type === 'wireless' ? <Wifi className="h-3.5 w-3.5 text-rose-500" /> :
+                                 iface.type === 'bridge' ? <ArrowRightLeft className="h-3.5 w-3.5 text-emerald-500" /> :
+                                 iface.type === 'bond' ? <Server className="h-3.5 w-3.5 text-violet-500" /> :
+                                 <Network className="h-3.5 w-3.5 text-teal-500" />}
+                              </div>
+                              <div>
+                                <p className="font-medium text-sm">{iface.name}</p>
+                                <div className="flex items-center gap-1 mt-0.5">
+                                  <Badge variant="outline" className={cn('text-[9px] border px-1 py-0', typeBadgeColor[iface.type])}>
+                                    {iface.type}
+                                  </Badge>
+                                  {matchedRole && (
+                                    <Badge variant="outline" className={cn('text-[9px] border px-1 py-0', roleBadgeColor[matchedRole.role])}>
+                                      {matchedRole.role.toUpperCase()}
+                                    </Badge>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                          </TableCell>
+                          <TableCell className="font-mono text-sm">{iface.ipAddress}</TableCell>
+                          <TableCell className="font-mono text-sm">{iface.subnet}</TableCell>
+                          <TableCell className="font-mono text-sm">{iface.mac}</TableCell>
+                          <TableCell className="text-sm">{iface.speed}</TableCell>
+                          <TableCell className="text-sm">{iface.mtu}</TableCell>
+                          <TableCell>
+                            <Badge variant={iface.status === 'up' ? 'default' : 'secondary'} className={cn(
+                              'text-[10px]',
+                              iface.status === 'up' ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400' : 'bg-gray-500/15 text-gray-600'
+                            )}>
+                              {iface.status === 'up' ? <CheckCircle2 className="h-3 w-3 mr-1" /> : <XCircle className="h-3 w-3 mr-1" />}
+                              {iface.status.toUpperCase()}
+                            </Badge>
+                          </TableCell>
+                          <TableCell>
+                            {matchedRole ? (
+                              <Badge variant="outline" className={cn('text-[10px] border', roleBadgeColor[matchedRole.role])}>
+                                {matchedRole.role.toUpperCase()}
+                              </Badge>
+                            ) : (
+                              <span className="text-xs text-muted-foreground">—</span>
+                            )}
+                          </TableCell>
+                          <TableCell>
+                            <div className="text-xs space-y-0.5">
+                              <div className="text-muted-foreground">RX: <span className="font-mono text-foreground">{formatBytes(iface.rxBytes)}</span></div>
+                              <div className="text-muted-foreground">TX: <span className="font-mono text-foreground">{formatBytes(iface.txBytes)}</span></div>
+                            </div>
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <Button variant="ghost" size="icon" className="h-7 w-7" onClick={(e) => { e.stopPropagation(); handleOpenEditInterface(iface); }}>
+                              <Edit2 className="h-3.5 w-3.5" />
+                            </Button>
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
+              </CardContent>
+            </Card>
             )}
 
             {/* Add Interface Dialog */}
@@ -1455,12 +1626,13 @@ export default function NetworkPage() {
 
             {/* Edit Interface Dialog */}
             <Dialog open={editInterfaceOpen} onOpenChange={setEditInterfaceOpen}>
-              <DialogContent>
+              <DialogContent className="max-w-lg">
                 <DialogHeader>
                   <DialogTitle>Edit Interface — {selectedInterface?.name}</DialogTitle>
                   <DialogDescription>Modify interface configuration</DialogDescription>
                 </DialogHeader>
-                <div className="grid gap-4 py-2">
+                <div className="grid gap-4 py-2 max-h-[70vh] overflow-y-auto pr-2">
+                  {/* Basic Settings */}
                   <div className="space-y-2">
                     <Label>Interface Name</Label>
                     <Input value={editInterfaceData.name} onChange={e => setEditInterfaceData(p => ({ ...p, name: e.target.value }))} />
@@ -1473,6 +1645,70 @@ export default function NetworkPage() {
                     <Label>Description</Label>
                     <Input value={editInterfaceData.description} onChange={e => setEditInterfaceData(p => ({ ...p, description: e.target.value }))} />
                   </div>
+
+                  <Separator />
+
+                  {/* IP Configuration Section */}
+                  <div className="space-y-3">
+                    <h4 className="text-sm font-semibold">IP Configuration</h4>
+                    <div className="space-y-2">
+                      <Label>Mode</Label>
+                      <Select value={editInterfaceData.mode} onValueChange={v => setEditInterfaceData(p => ({ ...p, mode: v as 'dhcp' | 'static' }))}>
+                        <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="dhcp">DHCP</SelectItem>
+                          <SelectItem value="static">Static</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    {editInterfaceData.mode === 'static' ? (
+                      <div className="grid gap-3">
+                        <div className="space-y-2">
+                          <Label>IP Address</Label>
+                          <Input className="font-mono" placeholder="e.g., 192.168.1.1" value={editInterfaceData.ipAddress} onChange={e => setEditInterfaceData(p => ({ ...p, ipAddress: e.target.value }))} />
+                        </div>
+                        <div className="space-y-2">
+                          <Label>Subnet / Netmask</Label>
+                          <Input className="font-mono" placeholder="e.g., 255.255.255.0" value={editInterfaceData.netmask} onChange={e => setEditInterfaceData(p => ({ ...p, netmask: e.target.value }))} />
+                        </div>
+                        <div className="space-y-2">
+                          <Label>Gateway</Label>
+                          <Input className="font-mono" placeholder="e.g., 192.168.1.254" value={editInterfaceData.gateway} onChange={e => setEditInterfaceData(p => ({ ...p, gateway: e.target.value }))} />
+                        </div>
+                      </div>
+                    ) : (
+                      <p className="text-xs text-muted-foreground bg-muted/50 rounded-md p-3">IP address will be assigned by DHCP server</p>
+                    )}
+                  </div>
+
+                  <Separator />
+
+                  {/* Role Assignment Section */}
+                  <div className="space-y-3">
+                    <h4 className="text-sm font-semibold">Role Assignment</h4>
+                    <div className="space-y-2">
+                      <Label>Role</Label>
+                      <Select value={editInterfaceData.role} onValueChange={v => setEditInterfaceData(p => ({ ...p, role: v }))}>
+                        <SelectTrigger className="w-full"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="wan">WAN</SelectItem>
+                          <SelectItem value="lan">LAN</SelectItem>
+                          <SelectItem value="dmz">DMZ</SelectItem>
+                          <SelectItem value="management">Management</SelectItem>
+                          <SelectItem value="wifi">WiFi</SelectItem>
+                          <SelectItem value="guest">Guest</SelectItem>
+                          <SelectItem value="iot">IoT</SelectItem>
+                          <SelectItem value="unused">Unused</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div className="space-y-2">
+                      <Label>Priority</Label>
+                      <Input type="number" value={editInterfaceData.priority} onChange={e => setEditInterfaceData(p => ({ ...p, priority: parseInt(e.target.value) || 0 }))} />
+                    </div>
+                  </div>
+
+                  {/* Read-only info */}
                   {selectedInterface && (
                     <div className="grid grid-cols-2 gap-4 text-sm bg-muted/50 rounded-lg p-3">
                       <div><span className="text-muted-foreground">MAC:</span> <span className="font-mono">{selectedInterface.mac}</span></div>
