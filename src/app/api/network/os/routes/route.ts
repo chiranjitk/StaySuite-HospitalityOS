@@ -372,6 +372,8 @@ export async function DELETE(request: NextRequest) {
     const destination = searchParams.get('destination');
     const gateway = searchParams.get('gateway');
     const interfaceName = searchParams.get('interfaceName');
+    const metricParam = searchParams.get('metric');
+    const resolvedMetric = metricParam ? parseInt(metricParam, 10) : undefined;
 
     if (!destination || !gateway) {
       return NextResponse.json(
@@ -389,32 +391,100 @@ export async function DELETE(request: NextRequest) {
 
     const results: { step: string; success: boolean; message: string }[] = [];
 
-    // 0. If no interfaceName provided, try to find it from DB
+    // 0. If no interfaceName provided, try to find it from DB or OS
     let resolvedInterfaceName = interfaceName;
-    if (!resolvedInterfaceName) {
+    let resolvedMetric = resolvedMetric;
+    if (!resolvedInterfaceName || resolvedMetric === undefined) {
+      // Try DB first (search all properties, not just hardcoded one)
       try {
         const dbDest = destination === 'default' ? '0.0.0.0/0' : destination;
         const dbRoute = await db.staticRoute.findFirst({
-          where: { propertyId: PROPERTY_ID, destination: dbDest, gateway },
+          where: { destination: dbDest, gateway },
         });
-        if (dbRoute?.interfaceName) {
-          resolvedInterfaceName = dbRoute.interfaceName;
+        if (dbRoute) {
+          if (!resolvedInterfaceName && dbRoute.interfaceName) {
+            resolvedInterfaceName = dbRoute.interfaceName;
+          }
+          if (resolvedMetric === undefined && dbRoute.metric) {
+            resolvedMetric = dbRoute.metric;
+          }
         }
       } catch { /* ignore */ }
+
+      // Fallback: resolve from OS routing table (ip route show)
+      if (!resolvedInterfaceName) {
+        try {
+          const routeOutput = safeExec('ip -4 route show 2>/dev/null');
+          const destClean = destination.replace(/\/\d+$/, '');
+          for (const line of routeOutput.trim().split('\n').filter(Boolean)) {
+            // Match: 100.10.10.0/24 via 10.20.30.40 dev ens160 metric 100
+            const match = line.match(new RegExp(
+              `^${escapeRegExp(destination)}\\s+via\\s+${escapeRegExp(gateway)}\\s+dev\\s+(\\S+)(?:\\s+metric\\s+(\\d+))?`
+            ));
+            if (match) {
+              resolvedInterfaceName = match[1];
+              if (resolvedMetric === undefined && match[2]) {
+                resolvedMetric = parseInt(match[2], 10);
+              }
+              break;
+            }
+            // Also try without CIDR if destination has it
+            if (destination.includes('/')) {
+              const matchNoCidr = line.match(new RegExp(
+                `^${escapeRegExp(destClean)}/\\d+\\s+via\\s+${escapeRegExp(gateway)}\\s+dev\\s+(\\S+)(?:\\s+metric\\s+(\\d+))?`
+              ));
+              if (matchNoCidr) {
+                resolvedInterfaceName = matchNoCidr[1];
+                if (resolvedMetric === undefined && matchNoCidr[2]) {
+                  resolvedMetric = parseInt(matchNoCidr[2], 10);
+                }
+                break;
+              }
+            }
+          }
+        } catch { /* ignore */ }
+      }
+
+      // Last fallback: try nmcli
+      if (!resolvedInterfaceName) {
+        try {
+          const nmcliOutput = safeExec('nmcli -j route show 2>/dev/null');
+          if (nmcliOutput) {
+            const parsed = JSON.parse(nmcliOutput);
+            if (Array.isArray(parsed)) {
+              for (const route of parsed) {
+                if ((route.dst === destination || route.dst === destination.replace(/\/\d+$/, '')) && route.gw === gateway && route.dev) {
+                  resolvedInterfaceName = route.dev;
+                  if (resolvedMetric === undefined && route.metric) {
+                    resolvedMetric = parseInt(route.metric, 10);
+                  }
+                  break;
+                }
+              }
+            }
+          }
+        } catch { /* ignore */ }
+      }
     }
 
     // 1. Remove route at OS level via nmcli wrapper (with inline fallback)
     let delOk = false;
     if (resolvedInterfaceName) {
       try {
-        removeRoute(resolvedInterfaceName, destination, gateway);
+        removeRoute(resolvedInterfaceName, destination, gateway, resolvedMetric);
         delOk = true;
       } catch (e: any) {
         console.warn(`[Network OS API] nmcli removeRoute failed: ${e.message}, trying inline fallback`);
         // Inline fallback: nmcli directly (with staysuite preservation)
         try {
+          const inlineMetric = resolvedMetric !== undefined && resolvedMetric > 0 ? ` ${resolvedMetric}` : '';
           withStaySuitePreserved(resolvedInterfaceName, () => {
-            safeExec(`sudo nmcli con mod "${resolvedInterfaceName}" -ipv4.routes "${destination} ${gateway}"`);
+            // Try exact match with metric first, then without
+            try {
+              safeExec(`sudo nmcli con mod "${resolvedInterfaceName}" -ipv4.routes "${destination} ${gateway}${inlineMetric}"`);
+            } catch {
+              safeExec(`sudo nmcli con mod "${resolvedInterfaceName}" -ipv4.routes "${destination} ${gateway}"`);
+            }
             // Bring connection up to apply the route removal
             safeExec(`sudo nmcli con up "${resolvedInterfaceName}"`);
           });

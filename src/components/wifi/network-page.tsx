@@ -1422,9 +1422,12 @@ export default function NetworkPage() {
     }
   };
 
-  const handleDeleteRoute = async (destination: string, gateway: string) => {
+  const handleDeleteRoute = async (destination: string, gateway: string, interfaceName?: string | null, metric?: number) => {
     try {
-      await fetch(`/api/network/os/routes?destination=${encodeURIComponent(destination)}&gateway=${encodeURIComponent(gateway)}`, { method: 'DELETE' });
+      const params = new URLSearchParams({ destination, gateway });
+      if (interfaceName) params.set('interfaceName', interfaceName);
+      if (metric !== undefined && metric > 0) params.set('metric', String(metric));
+      await fetch(`/api/network/os/routes?${params.toString()}`, { method: 'DELETE' });
       toast({ title: 'Route Removed', description: 'Route has been deleted.' });
       fetchRoutes();
     } catch {
@@ -2940,7 +2943,7 @@ export default function NetworkPage() {
                         <TableCell className="text-xs text-muted-foreground">{route.description || '—'}</TableCell>
                         <TableCell className="text-right">
                           <Button variant="ghost" size="sm" className="h-8 w-8 p-0 text-red-500 hover:text-red-600"
-                            onClick={() => handleDeleteRoute(route.destination, route.gateway)}>
+                            onClick={() => handleDeleteRoute(route.destination, route.gateway, route.interfaceName, route.metric)}>
                             <Trash2 className="h-3.5 w-3.5" />
                           </Button>
                         </TableCell>

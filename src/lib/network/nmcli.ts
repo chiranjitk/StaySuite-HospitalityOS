@@ -891,10 +891,18 @@ export function addRoute(name: string, destination: string, gateway: string, met
 /**
  * Remove a static route from an interface.
  */
-export function removeRoute(name: string, destination: string, gateway: string): void {
+export function removeRoute(name: string, destination: string, gateway: string, metric?: number): void {
   sanitizeName(name);
+  const metricArg = metric !== undefined && metric > 0 ? ` ${metric}` : '';
   withStaySuitePreserved(name, () => {
-    exec(`sudo nmcli con mod ${name} -ipv4.routes "${destination} ${gateway}"`);
+    // nmcli -ipv4.routes requires EXACT string match (including metric) to remove
+    // Try with metric first, then without as fallback
+    try {
+      exec(`sudo nmcli con mod ${name} -ipv4.routes "${destination} ${gateway}${metricArg}"`);
+    } catch {
+      // Fallback: try without metric in case route was added differently
+      exec(`sudo nmcli con mod ${name} -ipv4.routes "${destination} ${gateway}"`);
+    }
     // Bring the connection up so the route removal takes effect immediately
     try { exec(`sudo nmcli con up ${name}`); } catch {}
   });
