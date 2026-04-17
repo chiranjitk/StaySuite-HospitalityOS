@@ -16,6 +16,8 @@ export const NET_TYPES = {
   GUEST: 6,
   IOT: 7,
   UNUSED: 8,
+  DMZ: 9,
+  WIFI: 10,
 } as const;
 
 export type NetType = (typeof NET_TYPES)[keyof typeof NET_TYPES];
@@ -30,6 +32,8 @@ export const NET_TYPE_LABELS: Record<NetType, string> = {
   [NET_TYPES.GUEST]: 'Guest',
   [NET_TYPES.IOT]: 'IoT',
   [NET_TYPES.UNUSED]: 'Unused',
+  [NET_TYPES.DMZ]: 'DMZ',
+  [NET_TYPES.WIFI]: 'WiFi',
 };
 
 export const NET_TYPE_COLORS: Record<NetType, string> = {
@@ -42,6 +46,8 @@ export const NET_TYPE_COLORS: Record<NetType, string> = {
   [NET_TYPES.GUEST]: 'bg-amber-500',
   [NET_TYPES.IOT]: 'bg-teal-500',
   [NET_TYPES.UNUSED]: 'bg-gray-400',
+  [NET_TYPES.DMZ]: 'bg-red-500',
+  [NET_TYPES.WIFI]: 'bg-blue-500',
 };
 
 /** Reverse lookup: label → nettype number */

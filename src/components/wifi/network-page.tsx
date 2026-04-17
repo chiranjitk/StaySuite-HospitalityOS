@@ -360,6 +360,8 @@ const nettypeBadgeColor: Record<string, string> = {
   'Management': 'bg-gradient-to-r from-slate-500/20 to-gray-500/20 text-slate-700 dark:text-slate-400 border-slate-500/30',
   'Guest': 'bg-gradient-to-r from-amber-500/20 to-yellow-500/20 text-amber-700 dark:text-amber-400 border-amber-500/30',
   'IoT': 'bg-gradient-to-r from-teal-500/20 to-cyan-500/20 text-teal-700 dark:text-teal-400 border-teal-500/30',
+  'DMZ': 'bg-gradient-to-r from-red-500/20 to-rose-500/20 text-red-700 dark:text-red-400 border-red-500/30',
+  'WiFi': 'bg-gradient-to-r from-blue-500/20 to-indigo-500/20 text-blue-700 dark:text-blue-400 border-blue-500/30',
   'Unused': 'bg-muted text-muted-foreground border-muted-foreground/20',
   'Unknown': 'bg-muted text-muted-foreground border-muted-foreground/20',
 };
@@ -631,7 +633,7 @@ export default function NetworkPage() {
         }
 
         // Derive roles from nettype
-        const nettypeToRoleMap: Record<number, string> = { 1: 'wan', 0: 'lan', 5: 'management', 6: 'wifi', 3: 'lan', 7: 'lan' };
+        const nettypeToRoleMap: Record<number, string> = { 1: 'wan', 0: 'lan', 5: 'management', 6: 'guest', 3: 'bridge', 4: 'bond', 7: 'iot', 2: 'vlan', 9: 'dmz', 10: 'wifi', 8: 'unused' };
         const osRoles: InterfaceRole[] = osResult.data.interfaces
           .filter((i: any) => i.nettype && i.nettype !== 8)
           .map((i: any) => ({
@@ -962,7 +964,7 @@ export default function NetworkPage() {
     setSelectedInterface(iface);
     setInterfaceAliases([]);
     // Map nettype directly from OS data — no dependency on roles state
-    const nettypeToRole: Record<number, string> = { 1: 'wan', 0: 'lan', 2: 'vlan', 3: 'bridge', 4: 'bond', 5: 'management', 6: 'guest', 7: 'iot', 8: 'unused' };
+    const nettypeToRole: Record<number, string> = { 1: 'wan', 0: 'lan', 2: 'vlan', 3: 'bridge', 4: 'bond', 5: 'management', 6: 'guest', 7: 'iot', 8: 'unused', 9: 'dmz', 10: 'wifi' };
     const roleFromNettype = iface.nettype !== undefined && iface.nettype >= 0 ? nettypeToRole[iface.nettype] || 'unused' : 'unused';
     setEditInterfaceData({
       name: iface.name, mtu: iface.mtu, description: iface.description,
@@ -1039,7 +1041,7 @@ export default function NetworkPage() {
         }
 
         // 3. Apply role/nettype change (Rocky 10: uses nettype in .nmconnection)
-        const nettypeMap: Record<string, number> = { wan: 1, lan: 0, dmz: 7, management: 5, wifi: 6, guest: 6, iot: 7, unused: 8 };
+        const nettypeMap: Record<string, number> = { wan: 1, lan: 0, dmz: 9, management: 5, wifi: 10, guest: 6, iot: 7, unused: 8 };
         const currentNettype = selectedInterface.nettype ?? 8;
         const newNettype = nettypeMap[editInterfaceData.role] ?? 8;
         if (newNettype !== currentNettype || editInterfaceData.priority !== (selectedInterface._osData?.priority || 0)) {
