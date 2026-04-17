@@ -27,6 +27,22 @@ const startTime = Date.now();
 // Resolve PROJECT_ROOT from env or walk up from this file's directory
 const PROJECT_ROOT = process.env.PROJECT_ROOT || path.resolve(__dirname, '..', '..');
 
+// Kill any existing process on our port before starting (handles stale bun --hot restarts)
+try {
+  const pidResult = execSync(`lsof -ti :${3011} 2>/dev/null || ss -tlnp 2>/dev/null | grep ':3011' | grep -oP 'pid=\K\d+'`, { encoding: 'utf-8' }).trim();
+  if (pidResult) {
+    const pids = pidResult.split('\n').filter(Boolean);
+    for (const pid of pids) {
+      try {
+        process.kill(parseInt(pid), 'SIGKILL');
+        log.info(`Killed stale process ${pid} on port 3011`);
+      } catch {}
+    }
+    execSync('sleep 0.5');
+  }
+} catch {}
+
+
 // Detect if Kea is system-installed or local
 const SYSTEM_KEA = (() => {
   try {
@@ -230,6 +246,21 @@ async function keaHttpCommand(command: Record<string, any>): Promise<any[] | nul
 }
 
 async function keaHttpPing(): Promise<boolean> {
+  // First check if ctrl-agent process is running
+  try {
+    const ctrlAgentRunning = execSync('ps aux | grep -E "[k]ea-ctrl-agent"', { encoding: 'utf-8' }).trim().length > 0;
+    if (!ctrlAgentRunning) {
+      log.warn('kea-ctrl-agent process is not running — attempting to start it');
+      try {
+        execSync('kea-ctrl-agent -c /etc/kea/kea-ctrl-agent.conf &', { encoding: 'utf-8', timeout: 3000 });
+        execSync('sleep 2');
+        log.info('kea-ctrl-agent start attempted');
+      } catch (e) {
+        log.warn(`Failed to start kea-ctrl-agent: ${e}`);
+      }
+    }
+  } catch {}
+
   const resp = await keaHttpCommand({ command: 'status-get' });
   return resp !== null && resp[0]?.result === 0;
 }
@@ -281,7 +312,7 @@ async function keaPing(): Promise<boolean> {
   if (useHttpApi) {
     const reachable = await keaHttpPing();
     if (reachable) return true;
-    log.warn('Ctrl-agent HTTP ping failed, falling back to unix socket');
+    log.warn('Ctrl-agent HTTP ping failed — kea-ctrl-agent may not be running. Try: systemctl start kea-ctrl-agent or kea-ctrl-agent -c /etc/kea/kea-ctrl-agent.conf');
     useHttpApi = false;
   }
   return keaSocketPing();
