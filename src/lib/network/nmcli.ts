@@ -260,6 +260,54 @@ export function scanConnections(): NmConnectionInfo[] {
   return connections;
 }
 
+// ─── StaySuite Section Preservation ────────────────────────────────────
+
+/**
+ * Backup and restore the [staysuite] section around any nmcli con mod operation.
+ *
+ * NetworkManager rewrites .nmconnection files on `nmcli con mod`, dropping
+ * custom sections like [staysuite]. This wrapper ensures the section survives.
+ *
+ * Usage:
+ *   withStaySuitePreserved('ens192', () => {
+ *     exec('sudo nmcli con mod ens192 ipv4.method manual ...');
+ *     exec('sudo nmcli con up ens192');
+ *   });
+ */
+export function withStaySuitePreserved(name: string, fn: () => void): void {
+  // 1. Backup: read current staysuite data BEFORE nmcli modifies the file
+  const filePath = findConnectionFile(name);
+  let savedNettype = -1;
+  let savedPriority = 0;
+
+  if (filePath) {
+    try {
+      const parsed = parseNmConnectionFile(filePath);
+      savedNettype = getNetType(parsed);
+      savedPriority = getPriority(parsed);
+    } catch (e: any) {
+      console.warn(`[nmcli] Failed to read staysuite before mod: ${e.message}`);
+    }
+  }
+
+  // 2. Execute the nmcli modification (may rewrite and drop [staysuite])
+  fn();
+
+  // 3. Restore: if staysuite data existed, re-write it after nmcli is done
+  if (savedNettype >= 0 && filePath) {
+    try {
+      const restored = parseNmConnectionFile(filePath);
+      setNetType(restored, savedNettype);
+      setPriority(restored, savedPriority);
+      writeNmConnectionFile(filePath, restored);
+      // Reload so NM picks up the restored staysuite section
+      exec('sudo nmcli con reload', 10000);
+    } catch (e: any) {
+      console.error(`[nmcli] Failed to restore staysuite after mod: ${e.message}`);
+    }
+  }
+}
+
 // ─── Physical Interface: Read + Update Only ─────────────────────────────
 
 /**
@@ -271,24 +319,26 @@ export function setStaticIP(name: string, ip: string, netmask: string, gateway?:
   validateNetmask(netmask);
   if (gateway) validateIPv4(gateway);
 
-  const cidr = netmaskToCidr(netmask);
-  const args = [
-    'con', 'mod', name,
-    'ipv4.method', 'manual',
-    'ipv4.addresses', `${ip}/${cidr}`,
-  ];
-  if (gateway) {
-    validateIPv4(gateway);
-    args.push('ipv4.gateway', gateway);
-    args.push('ipv4.never-default', 'no');
-  } else {
-    args.push('ipv4.never-default', 'yes');
-  }
-  if (dns && dns.length > 0) {
-    args.push('ipv4.dns', dns.join(','));
-  }
-  exec(`sudo nmcli ${args.join(' ')}`);
-  exec(`sudo nmcli con up ${name}`);
+  withStaySuitePreserved(name, () => {
+    const cidr = netmaskToCidr(netmask);
+    const args = [
+      'con', 'mod', name,
+      'ipv4.method', 'manual',
+      'ipv4.addresses', `${ip}/${cidr}`,
+    ];
+    if (gateway) {
+      validateIPv4(gateway);
+      args.push('ipv4.gateway', gateway);
+      args.push('ipv4.never-default', 'no');
+    } else {
+      args.push('ipv4.never-default', 'yes');
+    }
+    if (dns && dns.length > 0) {
+      args.push('ipv4.dns', dns.join(','));
+    }
+    exec(`sudo nmcli ${args.join(' ')}`);
+    exec(`sudo nmcli con up ${name}`);
+  });
 }
 
 /**
@@ -296,8 +346,10 @@ export function setStaticIP(name: string, ip: string, netmask: string, gateway?:
  */
 export function setDHCP(name: string): void {
   sanitizeName(name);
-  exec(`sudo nmcli con mod ${name} ipv4.method auto`);
-  exec(`sudo nmcli con up ${name}`);
+  withStaySuitePreserved(name, () => {
+    exec(`sudo nmcli con mod ${name} ipv4.method auto`);
+    exec(`sudo nmcli con up ${name}`);
+  });
 }
 
 /**
@@ -305,8 +357,10 @@ export function setDHCP(name: string): void {
  */
 export function disableInterface(name: string): void {
   sanitizeName(name);
-  exec(`sudo nmcli con mod ${name} ipv4.method disabled`);
-  exec(`sudo nmcli con down ${name}`);
+  withStaySuitePreserved(name, () => {
+    exec(`sudo nmcli con mod ${name} ipv4.method disabled`);
+    exec(`sudo nmcli con down ${name}`);
+  });
 }
 
 /**
@@ -315,8 +369,10 @@ export function disableInterface(name: string): void {
 export function setMtu(name: string, mtu: number): void {
   sanitizeName(name);
   validateMtu(mtu);
-  exec(`sudo nmcli con mod ${name} ethernet.mtu ${mtu}`);
-  exec(`sudo nmcli con up ${name}`);
+  withStaySuitePreserved(name, () => {
+    exec(`sudo nmcli con mod ${name} ethernet.mtu ${mtu}`);
+    exec(`sudo nmcli con up ${name}`);
+  });
 }
 
 /**
@@ -401,8 +457,10 @@ function findConnectionFile(name: string): string | null {
 export function addSecondaryIP(name: string, ip: string, cidr: number): void {
   sanitizeName(name);
   validateIPv4(ip);
-  exec(`sudo nmcli con mod ${name} +ipv4.addresses ${ip}/${cidr}`);
-  exec(`sudo nmcli con up ${name}`);
+  withStaySuitePreserved(name, () => {
+    exec(`sudo nmcli con mod ${name} +ipv4.addresses ${ip}/${cidr}`);
+    exec(`sudo nmcli con up ${name}`);
+  });
 }
 
 /**
@@ -411,7 +469,9 @@ export function addSecondaryIP(name: string, ip: string, cidr: number): void {
 export function removeSecondaryIP(name: string, ip: string, cidr: number): void {
   sanitizeName(name);
   validateIPv4(ip);
-  exec(`sudo nmcli con mod ${name} -ipv4.addresses ${ip}/${cidr}`);
+  withStaySuitePreserved(name, () => {
+    exec(`sudo nmcli con mod ${name} -ipv4.addresses ${ip}/${cidr}`);
+  });
 }
 
 // ─── VLAN: Full CRUD ────────────────────────────────────────────────────
@@ -492,19 +552,21 @@ export function createVlan(params: VlanCreateParams): { name: string; success: b
  */
 export function updateVlan(name: string, params: Partial<VlanCreateParams>): void {
   sanitizeName(name);
-  if (params.ipAddress) {
-    validateIPv4(params.ipAddress);
-    const cidr = params.netmask ? netmaskToCidr(params.netmask) : 24;
-    exec(`sudo nmcli con mod ${name} ipv4.method manual ipv4.addresses ${params.ipAddress}/${cidr}`);
-    if (params.gateway) {
-      validateIPv4(params.gateway);
-      exec(`sudo nmcli con mod ${name} ipv4.gateway ${params.gateway}`);
+  withStaySuitePreserved(name, () => {
+    if (params.ipAddress) {
+      validateIPv4(params.ipAddress);
+      const cidr = params.netmask ? netmaskToCidr(params.netmask) : 24;
+      exec(`sudo nmcli con mod ${name} ipv4.method manual ipv4.addresses ${params.ipAddress}/${cidr}`);
+      if (params.gateway) {
+        validateIPv4(params.gateway);
+        exec(`sudo nmcli con mod ${name} ipv4.gateway ${params.gateway}`);
+      }
     }
-  }
-  if (params.mtu) {
-    validateMtu(params.mtu);
-    exec(`sudo nmcli con mod ${name} vlan.mtu ${params.mtu}`);
-  }
+    if (params.mtu) {
+      validateMtu(params.mtu);
+      exec(`sudo nmcli con mod ${name} vlan.mtu ${params.mtu}`);
+    }
+  });
   if (params.nettype !== undefined && isValidNetType(params.nettype)) {
     setNetTypeOnInterface(name, params.nettype);
   }
@@ -597,18 +659,20 @@ export function createBridge(params: BridgeCreateParams): { name: string; succes
  */
 export function updateBridge(name: string, params: Partial<BridgeCreateParams>): void {
   sanitizeName(name);
-  if (params.ipAddress) {
-    validateIPv4(params.ipAddress);
-    const cidr = params.netmask ? netmaskToCidr(params.netmask) : 24;
-    exec(`sudo nmcli con mod ${name} ipv4.method manual ipv4.addresses ${params.ipAddress}/${cidr}`);
-    if (params.gateway) {
-      validateIPv4(params.gateway);
-      exec(`sudo nmcli con mod ${name} ipv4.gateway ${params.gateway}`);
+  withStaySuitePreserved(name, () => {
+    if (params.ipAddress) {
+      validateIPv4(params.ipAddress);
+      const cidr = params.netmask ? netmaskToCidr(params.netmask) : 24;
+      exec(`sudo nmcli con mod ${name} ipv4.method manual ipv4.addresses ${params.ipAddress}/${cidr}`);
+      if (params.gateway) {
+        validateIPv4(params.gateway);
+        exec(`sudo nmcli con mod ${name} ipv4.gateway ${params.gateway}`);
+      }
     }
-  }
-  if (params.stp !== undefined) {
-    exec(`sudo nmcli con mod ${name} bridge.stp ${params.stp ? 'yes' : 'no'}`);
-  }
+    if (params.stp !== undefined) {
+      exec(`sudo nmcli con mod ${name} bridge.stp ${params.stp ? 'yes' : 'no'}`);
+    }
+  });
   if (params.nettype !== undefined && isValidNetType(params.nettype)) {
     setNetTypeOnInterface(name, params.nettype);
   }
@@ -745,19 +809,21 @@ export function createBond(params: BondCreateParams): { name: string; success: b
  */
 export function updateBond(name: string, params: Partial<BondCreateParams>): void {
   sanitizeName(name);
-  if (params.ipAddress) {
-    validateIPv4(params.ipAddress);
-    const cidr = params.netmask ? netmaskToCidr(params.netmask) : 24;
-    exec(`sudo nmcli con mod ${name} ipv4.method manual ipv4.addresses ${params.ipAddress}/${cidr}`);
-    if (params.gateway) {
-      validateIPv4(params.gateway);
-      exec(`sudo nmcli con mod ${name} ipv4.gateway ${params.gateway}`);
+  withStaySuitePreserved(name, () => {
+    if (params.ipAddress) {
+      validateIPv4(params.ipAddress);
+      const cidr = params.netmask ? netmaskToCidr(params.netmask) : 24;
+      exec(`sudo nmcli con mod ${name} ipv4.method manual ipv4.addresses ${params.ipAddress}/${cidr}`);
+      if (params.gateway) {
+        validateIPv4(params.gateway);
+        exec(`sudo nmcli con mod ${name} ipv4.gateway ${params.gateway}`);
+      }
     }
-  }
-  if (params.mode) {
-    validateBondMode(params.mode);
-    exec(`sudo nmcli con mod ${name} bond.mode ${params.mode}`);
-  }
+    if (params.mode) {
+      validateBondMode(params.mode);
+      exec(`sudo nmcli con mod ${name} bond.mode ${params.mode}`);
+    }
+  });
   if (params.nettype !== undefined && isValidNetType(params.nettype)) {
     setNetTypeOnInterface(name, params.nettype);
   }
@@ -812,7 +878,9 @@ export function deleteBond(name: string): void {
 export function addRoute(name: string, destination: string, gateway: string, metric?: number): void {
   sanitizeName(name);
   const metricArg = metric !== undefined ? ` ${metric}` : '';
-  exec(`sudo nmcli con mod ${name} +ipv4.routes "${destination} ${gateway}${metricArg}"`);
+  withStaySuitePreserved(name, () => {
+    exec(`sudo nmcli con mod ${name} +ipv4.routes "${destination} ${gateway}${metricArg}"`);
+  });
 }
 
 /**
@@ -820,7 +888,9 @@ export function addRoute(name: string, destination: string, gateway: string, met
  */
 export function removeRoute(name: string, destination: string, gateway: string): void {
   sanitizeName(name);
-  exec(`sudo nmcli con mod ${name} -ipv4.routes "${destination} ${gateway}"`);
+  withStaySuitePreserved(name, () => {
+    exec(`sudo nmcli con mod ${name} -ipv4.routes "${destination} ${gateway}"`);
+  });
 }
 
 // ─── Multi-WAN ──────────────────────────────────────────────────────────
@@ -830,7 +900,9 @@ export function removeRoute(name: string, destination: string, gateway: string):
  */
 export function setRouteMetric(name: string, metric: number): void {
   sanitizeName(name);
-  exec(`sudo nmcli con mod ${name} ipv4.route-metric ${metric}`);
+  withStaySuitePreserved(name, () => {
+    exec(`sudo nmcli con mod ${name} ipv4.route-metric ${metric}`);
+  });
 }
 
 // ─── Device Status ──────────────────────────────────────────────────────

@@ -9,6 +9,7 @@ import {
   setMtu,
   interfaceUp,
   interfaceDown,
+  withStaySuitePreserved,
   NmConnectionInfo,
 } from '@/lib/network/nmcli';
 
@@ -18,6 +19,14 @@ function safeExec(cmd: string, timeout = 10000): string {
   } catch (e: any) {
     return e.stderr?.trim() || e.stdout?.trim() || '';
   }
+}
+
+/**
+ * Inline fallback that preserves [staysuite] around nmcli con mod commands.
+ * Used when the main nmcli.ts functions fail.
+ */
+function inlineNmcliModWithPreserve(name: string, fn: () => void): void {
+  withStaySuitePreserved(name, fn);
 }
 
 const TENANT_ID = 'tenant-1';
@@ -110,8 +119,10 @@ export async function POST(
       const result = tryNmcli(
         () => setMtu(name, mtu),
         () => {
-          safeExec(`sudo nmcli con mod ${name} 802-3-ethernet.mtu ${mtu}`);
-          safeExec(`sudo nmcli con up ${name}`);
+          inlineNmcliModWithPreserve(name, () => {
+            safeExec(`sudo nmcli con mod ${name} 802-3-ethernet.mtu ${mtu}`);
+            safeExec(`sudo nmcli con up ${name}`);
+          });
           return { success: true, data: { interface: name, state: 'mtu-updated' } };
         }
       );
@@ -243,8 +254,10 @@ export async function POST(
             let cmd = `sudo nmcli con mod ${name} ipv4.method manual ipv4.addresses ${body.ipAddress}/${cidr}`;
             if (body.gateway) cmd += ` ipv4.gateway ${body.gateway}`;
             if (dns.length > 0) cmd += ` ipv4.dns ${dns.join(',')}`;
-            safeExec(cmd);
-            safeExec(`sudo nmcli con up ${name}`);
+            inlineNmcliModWithPreserve(name, () => {
+              safeExec(cmd);
+              safeExec(`sudo nmcli con up ${name}`);
+            });
             return { success: true, data: { interface: name, mode: 'static', ipAddress: body.ipAddress, cidr } };
           }
         );
@@ -260,8 +273,10 @@ export async function POST(
         const osResult = tryNmcli(
           () => setDHCP(name),
           () => {
-            safeExec(`sudo nmcli con mod ${name} ipv4.method auto`);
-            safeExec(`sudo nmcli con up ${name}`);
+            inlineNmcliModWithPreserve(name, () => {
+              safeExec(`sudo nmcli con mod ${name} ipv4.method auto`);
+              safeExec(`sudo nmcli con up ${name}`);
+            });
             return { success: true, data: { interface: name, mode: 'dhcp' } };
           }
         );
@@ -277,8 +292,10 @@ export async function POST(
         const osResult = tryNmcli(
           () => disableInterface(name),
           () => {
-            safeExec(`sudo nmcli con mod ${name} ipv4.method disabled`);
-            safeExec(`sudo nmcli con down ${name}`);
+            inlineNmcliModWithPreserve(name, () => {
+              safeExec(`sudo nmcli con mod ${name} ipv4.method disabled`);
+              safeExec(`sudo nmcli con down ${name}`);
+            });
             return { success: true, data: { interface: name, mode: 'disabled' } };
           }
         );

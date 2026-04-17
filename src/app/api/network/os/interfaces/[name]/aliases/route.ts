@@ -5,6 +5,7 @@ import {
   scanConnections,
   addSecondaryIP,
   removeSecondaryIP,
+  withStaySuitePreserved,
 } from '@/lib/network/nmcli';
 import { netmaskToCidr } from '@/lib/network/executor';
 import { NM_CONNECTIONS_DIR } from '@/lib/network/nettypes';
@@ -179,10 +180,12 @@ export async function POST(
       }
       console.warn(`[Network OS API] nmcli addSecondaryIP failed for ${ipAddress} on ${name}: ${errMsg}, trying inline fallback`);
 
-      // Inline fallback: nmcli directly
+      // Inline fallback: nmcli directly (with staysuite preservation)
       try {
-        safeExec(`sudo nmcli con mod "${name}" +ipv4.addresses ${ipAddress}/${cidr}`);
-        safeExec(`sudo nmcli con up "${name}"`);
+        withStaySuitePreserved(name, () => {
+          safeExec(`sudo nmcli con mod "${name}" +ipv4.addresses ${ipAddress}/${cidr}`);
+          safeExec(`sudo nmcli con up "${name}"`);
+        });
         addOk = true;
       } catch (fbErr: any) {
         console.warn(`[Network OS API] Inline fallback alias add also failed for ${ipAddress} on ${name}: ${fbErr.message}`);
@@ -284,10 +287,12 @@ export async function DELETE(
     } catch (e: any) {
       console.warn(`[Network OS API] nmcli removeSecondaryIP failed for ${ip} on ${name}: ${e.message}, trying inline fallback`);
 
-      // Inline fallback: nmcli directly
+      // Inline fallback: nmcli directly (with staysuite preservation)
       try {
-        safeExec(`sudo nmcli con mod "${name}" -ipv4.addresses ${ip}/${cidr}`);
-        safeExec(`sudo nmcli con up "${name}"`);
+        withStaySuitePreserved(name, () => {
+          safeExec(`sudo nmcli con mod "${name}" -ipv4.addresses ${ip}/${cidr}`);
+          safeExec(`sudo nmcli con up "${name}"`);
+        });
         osRemoveOk = true;
       } catch (fbErr: any) {
         console.warn(`[Network OS API] Inline fallback alias remove also failed for ${ip} on ${name}: ${fbErr.message}`);

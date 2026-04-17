@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { execSync } from 'child_process';
 import { db } from '@/lib/db';
-import { addRoute, removeRoute } from '@/lib/network/nmcli';
+import { addRoute, removeRoute, withStaySuitePreserved } from '@/lib/network/nmcli';
 
 function safeExec(cmd: string, timeout = 10000): string {
   try { return execSync(cmd, { encoding: 'utf-8', timeout }); } catch (e: any) { return e.stderr?.trim() || e.stdout?.trim() || ''; }
@@ -188,10 +188,12 @@ export async function POST(request: NextRequest) {
       addOk = true;
     } catch (e: any) {
       console.warn(`[Network OS API] nmcli addRoute failed: ${e.message}, trying inline fallback`);
-      // Inline fallback: nmcli directly
+      // Inline fallback: nmcli directly (with staysuite preservation)
       try {
         const metricArg = routeMetric ? ` ${routeMetric}` : '';
-        safeExec(`sudo nmcli con mod "${interfaceName}" +ipv4.routes "${routeDest} ${gateway}${metricArg}"`);
+        withStaySuitePreserved(interfaceName, () => {
+          safeExec(`sudo nmcli con mod "${interfaceName}" +ipv4.routes "${routeDest} ${gateway}${metricArg}"`);
+        });
         addOk = true;
       } catch (fbErr: any) {
         console.warn(`[Network OS API] Inline fallback addRoute also failed: ${fbErr.message}`);
@@ -288,9 +290,11 @@ export async function DELETE(request: NextRequest) {
         delOk = true;
       } catch (e: any) {
         console.warn(`[Network OS API] nmcli removeRoute failed: ${e.message}, trying inline fallback`);
-        // Inline fallback: nmcli directly
+        // Inline fallback: nmcli directly (with staysuite preservation)
         try {
-          safeExec(`sudo nmcli con mod "${interfaceName}" -ipv4.routes "${destination} ${gateway}"`);
+          withStaySuitePreserved(interfaceName, () => {
+            safeExec(`sudo nmcli con mod "${interfaceName}" -ipv4.routes "${destination} ${gateway}"`);
+          });
           delOk = true;
         } catch (fbErr: any) {
           console.warn(`[Network OS API] Inline fallback removeRoute also failed: ${fbErr.message}`);
