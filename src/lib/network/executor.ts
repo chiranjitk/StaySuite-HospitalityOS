@@ -12,9 +12,53 @@
 
 import { execSync, ExecSyncOptions } from 'child_process';
 import path from 'path';
+import * as fs from 'fs';
 
-// Path to scripts directory (relative to project root)
-const SCRIPTS_DIR = path.resolve(process.cwd(), 'scripts/network');
+/**
+ * Resolve the scripts/network directory.
+ * Tries multiple strategies since process.cwd() may not be the project root
+ * (e.g., PM2 running from a different directory).
+ */
+function resolveScriptsDir(): string {
+  const candidates = [
+    // 1. Relative to process.cwd() (works in dev)
+    path.resolve(process.cwd(), 'scripts/network'),
+    // 2. Relative to this source file (works in production builds)
+    path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/\/src\/lib\/network\/.*/, '')), 'scripts/network'),
+    // 3. Relative to __dirname in CommonJS context
+    ...(typeof __dirname !== 'undefined' ? [
+      path.resolve(path.dirname(__dirname), '../../scripts/network'),
+    ] : []),
+    // 4. Common deployment paths
+    '/opt/staysuite/scripts/network',
+    '/opt/staysuite-HospitalityOS/scripts/network',
+    '/home/z/my-project/scripts/network',
+  ];
+
+  for (const dir of candidates) {
+    try {
+      if (fs.existsSync(dir) && fs.statSync(dir).isDirectory()) {
+        return dir;
+      }
+    } catch {
+      // Skip invalid paths
+    }
+  }
+
+  // Fall back to CWD-based path (will fail with clear error in executeScript)
+  return candidates[0];
+}
+
+// Path to scripts directory
+const SCRIPTS_DIR = resolveScriptsDir();
+
+// Log the resolved scripts directory on first load (helpful for debugging on Debian)
+if (typeof process !== 'undefined' && process.env.NODE_ENV !== 'production') {
+  try {
+    const exists = fs.existsSync(SCRIPTS_DIR);
+    console.log(`[Network Scripts] Resolved SCRIPTS_DIR: ${SCRIPTS_DIR} (exists: ${exists})`);
+  } catch {}
+}
 
 /** Default timeout for script execution (10 seconds) */
 const DEFAULT_TIMEOUT = 10000;
@@ -182,6 +226,17 @@ export function executeScript<T = Record<string, unknown>>(
   } = options;
 
   const scriptPath = path.join(SCRIPTS_DIR, scriptName);
+
+  // Check if script exists before trying to execute
+  if (!fs.existsSync(scriptPath)) {
+    const result: ScriptResult<T> = {
+      success: false,
+      error: `Script not found: ${scriptPath} (SCRIPTS_DIR=${SCRIPTS_DIR}, cwd=${process.cwd()})`,
+      timestamp: new Date().toISOString(),
+    };
+    if (throwOnError) throw new Error(result.error);
+    return result;
+  }
 
   // Build the command with proper argument quoting
   const quotedArgs = args.map(arg => {
