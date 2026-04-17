@@ -152,23 +152,26 @@ export async function PUT(
     }
 
     const body = await request.json();
-    const { role, priority, isPrimary } = body;
+    const { role, priority, isPrimary, nettype: bodyNettype } = body;
 
-    if (!role || typeof role !== 'string') {
+    // Support both `role` (string label like "wan") and `nettype` (number like 1)
+    let nettype: number;
+    if (typeof bodyNettype === 'number' && isValidNetType(bodyNettype)) {
+      nettype = bodyNettype;
+    } else if (role && typeof role === 'string') {
+      nettype = NET_TYPES.UNUSED;
+      const lowerRole = role.toLowerCase();
+      for (const [key, value] of Object.entries(NET_TYPES)) {
+        if (key.toLowerCase() === lowerRole) {
+          nettype = value;
+          break;
+        }
+      }
+    } else {
       return NextResponse.json(
-        { success: false, error: { code: 'MISSING_ROLE', message: '"role" is required' } },
+        { success: false, error: { code: 'MISSING_ROLE', message: '"role" (string) or "nettype" (number) is required' } },
         { status: 400 }
       );
-    }
-
-    // Convert role label to nettype number
-    let nettype = NET_TYPES.UNUSED;
-    const lowerRole = role.toLowerCase();
-    for (const [key, value] of Object.entries(NET_TYPES)) {
-      if (key.toLowerCase() === lowerRole) {
-        nettype = value;
-        break;
-      }
     }
 
     if (!isValidNetType(nettype)) {
@@ -177,12 +180,15 @@ export async function PUT(
           success: false,
           error: {
             code: 'INVALID_ROLE',
-            message: `Invalid role "${role}". Must be one of: ${Object.keys(NET_TYPES).join(', ')}`,
+            message: `Invalid role/nettype. Must be one of: ${Object.entries(NET_TYPES).map(([k, v]) => `${k}(${v})`).join(', ')}`,
           },
         },
         { status: 400 }
       );
     }
+
+    // Derive role label from nettype for DB storage
+    const roleLabel = netTypeToLabel(nettype).toLowerCase();
 
     const safePriority = typeof priority === 'number' && priority >= 0 ? priority : 0;
     const safeIsPrimary = typeof isPrimary === 'boolean' ? isPrimary : false;
@@ -235,13 +241,13 @@ export async function PUT(
           tenantId: TENANT_ID,
           propertyId: PROPERTY_ID,
           interfaceId: dbIface.id,
-          role,
+          role: roleLabel,
           priority: safePriority,
           isPrimary: safeIsPrimary,
           enabled: true,
         },
         update: {
-          role,
+          role: roleLabel,
           priority: safePriority,
           isPrimary: safeIsPrimary,
           enabled: true,
@@ -254,7 +260,7 @@ export async function PUT(
         warning: 'Role persisted to OS but database update failed.',
         data: {
           interfaceName: name,
-          role,
+          role: roleLabel,
           priority: safePriority,
           isPrimary: safeIsPrimary,
           persistedToOS: osSuccess,
@@ -267,7 +273,7 @@ export async function PUT(
       success: true,
       data: {
         interfaceName: name,
-        role,
+        role: roleLabel,
         priority: safePriority,
         isPrimary: safeIsPrimary,
         persistedToOS: osSuccess,
