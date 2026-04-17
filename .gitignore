@@ -189,11 +189,6 @@ postgresql-migration-notes.md
 # Sandbox upload artifacts
 /upload/
 
-# Duplicate scripts dir
-/scripts/
-
-# Sandbox websocket example (use examples/ instead)
-/websocket/
 skills/
 .env
 .env.local
