@@ -11,14 +11,21 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { execSync } from 'child_process';
 import * as fs from 'fs';
+import * as path from 'path';
+import { fileURLToPath } from 'url';
 import { createLogger } from '../shared/logger';
+
+// Resolve __dirname in ESM context (Bun supports both CJS path and import.meta)
+const __filename = typeof __filename !== 'undefined' ? __filename : fileURLToPath(import.meta.url);
+const __dirname = typeof __dirname !== 'undefined' ? __dirname : path.dirname(__filename);
 
 const app = new Hono();
 const PORT = 3011;
 const log = createLogger('kea-service');
 const startTime = Date.now();
 
-const PROJECT_ROOT = process.env.PROJECT_ROOT || '/home/z/my-project';
+// Resolve PROJECT_ROOT from env or walk up from this file's directory
+const PROJECT_ROOT = process.env.PROJECT_ROOT || path.resolve(__dirname, '..', '..');
 
 // Detect if Kea is system-installed or local
 const SYSTEM_KEA = (() => {
@@ -38,7 +45,7 @@ const KEA_BINARY_PATH = SYSTEM_KEA
 const KEA_LEASES_FILE = SYSTEM_KEA
   ? (process.env.KEA_LEASES_FILE || '/var/lib/kea/kea-leases4.csv')
   : (process.env.KEA_LEASES_FILE || '/tmp/lib/kea/kea-leases4.csv');
-const HELPER_PATH = `${PROJECT_ROOT}/mini-services/kea-service/kea-helper.mjs`;
+const HELPER_PATH = path.join(__dirname, 'kea-helper.mjs');
 const LD_LIB = SYSTEM_KEA ? '' : (process.env.KEA_LD_LIB || `${PROJECT_ROOT}/kea-local/extracted/usr/lib/x86_64-linux-gnu`);
 
 // ============================================================================

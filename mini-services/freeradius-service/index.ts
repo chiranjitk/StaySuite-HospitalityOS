@@ -44,7 +44,8 @@ const DB_PATH = process.env.FREERADIUS_DB_PATH || '/var/lib/freeradius/radius.db
 // SQLite Persistence
 // ============================================================================
 
-const SQLITE_DB_PATH = process.env.FREERADIUS_SERVICE_DB_PATH || '/home/z/my-project/db/freeradius-service.db';
+const PROJECT_ROOT = process.env.PROJECT_ROOT || path.resolve(__dirname, '..', '..');
+const SQLITE_DB_PATH = process.env.FREERADIUS_SERVICE_DB_PATH || path.join(PROJECT_ROOT, 'db', 'freeradius-service.db');
 
 // Ensure the db directory exists (sync to avoid top-level await issues with PM2)
 const dbDir = path.dirname(SQLITE_DB_PATH);

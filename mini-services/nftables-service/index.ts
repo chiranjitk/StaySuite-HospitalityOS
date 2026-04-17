@@ -27,7 +27,7 @@ const SERVICE_VERSION = '1.0.0';
 const log = createLogger('nftables-service');
 const startTime = Date.now();
 
-const PROJECT_ROOT = process.env.PROJECT_ROOT || '/home/z/my-project';
+const PROJECT_ROOT = process.env.PROJECT_ROOT || path.resolve(__dirname, '..', '..');
 const NFTABLES_CONFIG_DIR = '/etc/nftables.d';
 const NFTABLES_CONFIG = path.join(NFTABLES_CONFIG_DIR, 'staysuite.conf');
 const TABLE_NAME = 'staysuite';

@@ -6,7 +6,10 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { execSync } from 'child_process';
 
-const PROJECT_ROOT = process.env.PROJECT_ROOT || '/home/z/my-project';
+import { fileURLToPath } from 'url';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const PROJECT_ROOT = process.env.PROJECT_ROOT || path.resolve(__dirname, '..', '..');
 
 // Detect if Kea is system-installed
 const SYSTEM_KEA = (() => {

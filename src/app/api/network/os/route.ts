@@ -100,7 +100,7 @@ function getSystemInfo() {
     } catch { /* fallback: leave empty */ }
 
     try {
-      osRelease = execSync('cat /etc/os-release 2>/dev/null | grep PRETTY_NAME | cut -d\"\" -f2', { encoding: 'utf-8' }).trim();
+      osRelease = execSync("cat /etc/os-release 2>/dev/null | grep PRETTY_NAME | cut -d'\"' -f2", { encoding: 'utf-8' }).trim();
     } catch {
       osRelease = `Node.js ${process.version}`;
     }

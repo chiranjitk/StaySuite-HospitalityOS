@@ -26,7 +26,7 @@ const SERVICE_VERSION = '1.0.0';
 const log = createLogger('dns-service');
 const startTime = Date.now();
 
-const PROJECT_ROOT = process.env.PROJECT_ROOT || '/home/z/my-project';
+const PROJECT_ROOT = process.env.PROJECT_ROOT || path.resolve(__dirname, '..', '..');
 
 // DNS service uses its own separate database for operational data
 const DB_PATH = process.env.DATABASE_PATH || path.join(PROJECT_ROOT, 'db', 'dns-service.db');

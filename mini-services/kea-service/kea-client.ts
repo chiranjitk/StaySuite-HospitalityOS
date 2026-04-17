@@ -9,9 +9,16 @@
 import * as net from 'net';
 import * as fs from 'fs';
 
+import * as path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = typeof __filename !== 'undefined' ? __filename : fileURLToPath(import.meta.url);
+const __dirname = typeof __dirname !== 'undefined' ? __dirname : path.dirname(__filename);
+const PROJECT_ROOT = process.env.PROJECT_ROOT || path.resolve(__dirname, '..', '..');
+
 const KEA_SOCKET_PATH = '/tmp/kea/kea4-ctrl-socket';
-const KEA_CONFIG_PATH = '/home/z/my-project/kea-local/kea-dhcp4.conf';
-const KEA_BINARY_PATH = '/home/z/my-project/kea-local/extracted/usr/sbin/kea-dhcp4';
+const KEA_CONFIG_PATH = path.join(PROJECT_ROOT, 'kea-local', 'kea-dhcp4.conf');
+const KEA_BINARY_PATH = path.join(PROJECT_ROOT, 'kea-local', 'extracted', 'usr', 'sbin', 'kea-dhcp4');
 const KEA_LEASES_FILE = '/tmp/lib/kea/kea-leases4.csv';
 const COMMAND_TIMEOUT = 5000;
 
