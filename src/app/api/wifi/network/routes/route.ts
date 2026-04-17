@@ -7,6 +7,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { requirePermission } from '@/lib/auth/tenant-context';
+import { addRoute, addDefaultRoute, deleteRoute, persistRouteAdd, persistRouteRemove } from '@/lib/network';
 
 // GET /api/wifi/network/routes - List all static routes
 export async function GET(request: NextRequest) {
@@ -69,6 +70,49 @@ export async function POST(request: NextRequest) {
         { success: false, error: { code: 'VALIDATION_ERROR', message: 'Missing required fields: propertyId, name, destination, gateway' } },
         { status: 400 },
       );
+    }
+
+    // Execute OS-level route creation via shell script
+    try {
+      let osResult;
+      if (isDefault) {
+        osResult = addDefaultRoute(gateway, interfaceName || undefined);
+      } else {
+        osResult = addRoute({
+          destination,
+          gateway,
+          metric: parseInt(String(metric), 10),
+          interface: interfaceName || undefined,
+        });
+      }
+      if (!osResult.success) {
+        return NextResponse.json(
+          { success: false, error: { code: 'OS_ERROR', message: `Failed to add route at OS level: ${osResult.error}` } },
+          { status: 500 },
+        );
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return NextResponse.json(
+        { success: false, error: { code: 'OS_ERROR', message: `Failed to add route at OS level: ${msg}` } },
+        { status: 500 },
+      );
+    }
+
+    // Persist route to /etc/network/interfaces
+    if (interfaceName) {
+      try {
+        const persistResult = persistRouteAdd({
+          interface: interfaceName,
+          destination: isDefault ? 'default' : destination,
+          gateway,
+        });
+        if (!persistResult.success) {
+          console.warn(`Route persistence warning:`, persistResult.error);
+        }
+      } catch (err) {
+        console.warn(`Route persistence error:`, err instanceof Error ? err.message : err);
+      }
     }
 
     const route = await db.staticRoute.create({
@@ -216,6 +260,25 @@ export async function DELETE(request: NextRequest) {
         { success: false, error: { code: 'NOT_FOUND', message: 'Static route not found' } },
         { status: 404 },
       );
+    }
+
+    // Execute OS-level route deletion via shell script
+    try {
+      const osResult = deleteRoute(existing.destination, existing.gateway);
+      if (!osResult.success) {
+        console.warn(`OS route removal failed:`, osResult.error);
+      }
+    } catch (err) {
+      console.warn(`OS route removal error:`, err instanceof Error ? err.message : err);
+    }
+
+    // Remove persisted route from /etc/network/interfaces
+    if (existing.interfaceName) {
+      try {
+        persistRouteRemove(existing.interfaceName, existing.destination, existing.gateway);
+      } catch (err) {
+        console.warn(`Route persistence removal error:`, err instanceof Error ? err.message : err);
+      }
     }
 
     await db.staticRoute.delete({ where: { id } });

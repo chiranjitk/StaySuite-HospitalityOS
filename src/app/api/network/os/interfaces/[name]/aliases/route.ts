@@ -1,145 +1,21 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { execSync } from 'child_process';
-import * as fs from 'fs';
 import { db } from '@/lib/db';
+import { addAlias, removeAlias, listAliases } from '@/lib/network/alias';
+import { persistAliasAdd, persistAliasRemove } from '@/lib/network/persist';
 
 /**
  * POST   /api/network/os/interfaces/[name]/aliases — Add a secondary IP alias
  * GET    /api/network/os/interfaces/[name]/aliases — List all aliases for the interface
  * DELETE /api/network/os/interfaces/[name]/aliases — Remove an alias IP
  *
- * Uses `sudo ip addr add/del` on Debian 13 to manage secondary IPs.
- * Persists to /etc/network/interfaces and InterfaceAlias in DB.
+ * Uses shell script wrappers for OS commands and file persistence.
+ * Persists InterfaceAlias in DB after successful OS operations.
  */
 
-function safeExec(cmd: string, timeout = 5000): string {
-  try { return execSync(cmd, { encoding: 'utf-8', timeout }); } catch (e: any) { return e.stdout || ''; }
-}
-
-const INTERFACES_FILE = process.env.NETWORK_INTERFACES_FILE || '/etc/network/interfaces';
 const TENANT_ID = 'tenant-1';
 const PROPERTY_ID = 'property-1';
 
 const VALID_NAME = /^[a-zA-Z0-9._-]+$/;
-
-function isValidIPv4(ip: string): boolean {
-  const parts = ip.split('.');
-  if (parts.length !== 4) return false;
-  return parts.every(p => { const n = parseInt(p, 10); return !isNaN(n) && n >= 0 && n <= 255 && String(n) === p; });
-}
-
-function isValidNetmask(mask: string): boolean {
-  if (!isValidIPv4(mask)) return false;
-  const num = mask.split('.').reduce((acc, octet) => (acc << 8) + parseInt(octet, 10), 0) >>> 0;
-  const inverted = (~num) >>> 0;
-  return (inverted & (inverted + 1)) === 0 && num > 0;
-}
-
-function netmaskToCidr(mask: string): number {
-  const num = mask.split('.').reduce((acc, octet) => (acc << 8) + parseInt(octet, 10), 0) >>> 0;
-  let count = 0;
-  while (num & (1 << (31 - count))) count++;
-  return count;
-}
-
-/**
- * Persist alias to /etc/network/interfaces.
- * Adds an `up ip addr add ...` line inside the interface stanza.
- */
-function persistAliasToFile(
-  ifaceName: string,
-  ipAddress: string,
-  cidr: number,
-): { success: boolean; message: string } {
-  try {
-    let content = '';
-    try {
-      content = fs.readFileSync(INTERFACES_FILE, 'utf-8');
-    } catch {
-      content = '# /etc/network/interfaces — managed by StaySuite HospitalityOS\n\nsource /etc/network/interfaces.d/*\n\n';
-    }
-
-    const lines = content.split('\n');
-    const aliasLine = `\tup ip addr add ${ipAddress}/${cidr} dev ${ifaceName}`;
-    const aliasMarker = `# STAYSUITE_ALIAS ${ipAddress}/${cidr}`;
-
-    // Check if alias is already in the file
-    const alreadyExists = lines.some(
-      l => l.trim() === aliasLine.trim() || l.trim().includes(aliasMarker)
-    );
-    if (alreadyExists) {
-      return { success: true, message: 'Alias already present in interfaces file' };
-    }
-
-    // Find the iface stanza and append inside it
-    let stanzaEnd = -1;
-    for (let i = 0; i < lines.length; i++) {
-      const trimmed = lines[i].trim();
-      const ifaceMatch = trimmed.match(/^iface\s+([a-zA-Z0-9._:-]+)\s+inet\s+(\S+)/);
-      if (ifaceMatch && (ifaceMatch[1] === ifaceName || ifaceMatch[1].startsWith(ifaceName + ':'))) {
-        // Find end of stanza
-        for (let j = i + 1; j < lines.length; j++) {
-          const nextTrimmed = lines[j].trim();
-          if (nextTrimmed === '' || nextTrimmed.match(/^(?:auto|allow-hotplug|iface|source)\s/)) {
-            stanzaEnd = j;
-            break;
-          }
-        }
-        if (stanzaEnd === -1) stanzaEnd = lines.length;
-        break;
-      }
-    }
-
-    if (stanzaEnd > 0) {
-      lines.splice(stanzaEnd, 0, aliasMarker, aliasLine);
-    } else {
-      // No stanza found — append
-      if (lines.length > 0 && lines[lines.length - 1].trim() !== '') {
-        lines.push('');
-      }
-      lines.push(`iface ${ifaceName} inet manual`);
-      lines.push(aliasMarker);
-      lines.push(aliasLine);
-      lines.push('');
-    }
-
-    fs.writeFileSync(INTERFACES_FILE, lines.join('\n'), 'utf-8');
-    return { success: true, message: `Alias persisted to ${INTERFACES_FILE}` };
-  } catch (err: any) {
-    return { success: false, message: `File write error: ${err.message}` };
-  }
-}
-
-/**
- * Remove alias from /etc/network/interfaces.
- */
-function removeAliasFromFile(
-  ifaceName: string,
-  ipAddress: string,
-): { success: boolean; message: string } {
-  try {
-    let content = '';
-    try {
-      content = fs.readFileSync(INTERFACES_FILE, 'utf-8');
-    } catch {
-      return { success: true, message: 'No interfaces file to update' };
-    }
-
-    const lines = content.split('\n');
-    const resultLines = lines.filter(line => {
-      const trimmed = line.trim();
-      // Remove the marker and the alias line
-      if (trimmed.includes(`STAYSUITE_ALIAS ${ipAddress}`)) return false;
-      if (trimmed.match(new RegExp(`^up\\s+ip\\s+addr\\s+add\\s+${ipAddress.replace('.', '\\.')}\\/`))) return false;
-      return true;
-    });
-
-    fs.writeFileSync(INTERFACES_FILE, resultLines.join('\n'), 'utf-8');
-    return { success: true, message: `Alias removed from ${INTERFACES_FILE}` };
-  } catch (err: any) {
-    return { success: false, message: `File write error: ${err.message}` };
-  }
-}
 
 // ────────────────────────────────────────────────────────────
 // GET /api/network/os/interfaces/[name]/aliases — List aliases
@@ -158,31 +34,16 @@ export async function GET(
       );
     }
 
-    // 1. Parse from OS
-    const output = safeExec(`ip -o -4 addr show dev ${name} 2>/dev/null`);
-    const addresses: { ip: string; cidr: number; netmask: string; primary: boolean }[] = [];
+    // 1. List aliases from OS via shell script
+    const osResult = listAliases(name);
 
-    const addrLines = output.trim().split('\n').filter(Boolean);
-    for (let idx = 0; idx < addrLines.length; idx++) {
-      const match = addrLines[idx].match(/inet\s+(\S+)/);
-      if (match) {
-        const ipWithCidr = match[1];
-        const [ip, cidrStr] = ipWithCidr.split('/');
-        const cidr = parseInt(cidrStr, 10) || 24;
-        // Convert CIDR to netmask
-        const maskNum = (0xFFFFFFFF << (32 - cidr)) >>> 0;
-        const netmask = [
-          (maskNum >>> 24) & 0xFF,
-          (maskNum >>> 16) & 0xFF,
-          (maskNum >>> 8) & 0xFF,
-          maskNum & 0xFF,
-        ].join('.');
-        addresses.push({ ip, cidr, netmask, primary: idx === 0 });
-      }
-    }
-
-    // Aliases are everything after the first (primary) address
-    const osAliases = addresses.slice(1);
+    const osAliases = osResult.success && osResult.data
+      ? osResult.data.aliases.map(a => ({
+          ip: a.ipAddress,
+          cidr: a.cidr,
+          netmask: a.netmask,
+        }))
+      : [];
 
     // 2. Fetch from DB
     let dbAliases: any[] = [];
@@ -236,37 +97,45 @@ export async function POST(
       );
     }
 
-    if (!ipAddress || !isValidIPv4(ipAddress)) {
+    if (!ipAddress) {
       return NextResponse.json(
-        { success: false, error: { code: 'INVALID_IP', message: 'A valid IPv4 address is required' } },
+        { success: false, error: { code: 'INVALID_IP', message: 'An IP address is required' } },
         { status: 400 }
       );
     }
 
     const aliasNetmask = netmask || '255.255.255.0';
-    if (!isValidNetmask(aliasNetmask)) {
-      return NextResponse.json(
-        { success: false, error: { code: 'INVALID_NETMASK', message: 'Invalid netmask' } },
-        { status: 400 }
-      );
-    }
-
-    const cidr = netmaskToCidr(aliasNetmask);
     const results: { step: string; success: boolean; message: string }[] = [];
 
-    // 1. Add alias at OS level
-    const addOutput = safeExec(`sudo ip addr add ${ipAddress}/${cidr} dev ${name} 2>&1`);
-    if (addOutput.includes('File exists')) {
+    // 1. Add alias at OS level via shell script
+    const addResult = addAlias({ interface: name, ipAddress, netmask: aliasNetmask });
+
+    if (!addResult.success) {
+      const errMsg = addResult.error || 'Failed to add alias';
+      if (errMsg.includes('File exists') || errMsg.includes('exists')) {
+        return NextResponse.json(
+          { success: false, error: { code: 'EXISTS', message: `IP ${ipAddress} already exists on ${name}` } },
+          { status: 409 }
+        );
+      }
       return NextResponse.json(
-        { success: false, error: { code: 'EXISTS', message: `IP ${ipAddress}/${cidr} already exists on ${name}` } },
-        { status: 409 }
+        { success: false, error: { code: 'ADD_FAILED', message: errMsg } },
+        { status: 500 }
       );
     }
-    results.push({ step: 'add-addr', success: true, message: addOutput.trim() });
+    results.push({ step: 'add-addr', success: true, message: 'Alias added at OS level' });
 
-    // 2. Persist to /etc/network/interfaces
-    const fileResult = persistAliasToFile(name, ipAddress, cidr);
-    results.push({ step: 'file-persist', ...fileResult });
+    // 2. Persist to /etc/network/interfaces via shell script
+    const persistResult = persistAliasAdd({ interface: name, ipAddress, netmask: aliasNetmask });
+
+    if (!persistResult.success) {
+      console.warn(`[Network OS API] File persist failed for alias on ${name}: ${persistResult.error} — continuing with DB only`);
+    }
+    results.push({
+      step: 'file-persist',
+      success: persistResult.success,
+      message: persistResult.success ? 'Alias persisted to interfaces file' : (persistResult.error || 'File persist failed'),
+    });
 
     // 3. Save to DB (InterfaceAlias)
     try {
@@ -302,6 +171,7 @@ export async function POST(
       results.push({ step: 'database', success: false, message: dbErr.message });
     }
 
+    const cidr = addResult.data?.cidr || 24;
     return NextResponse.json({
       success: true,
       message: `Alias ${ipAddress}/${cidr} added to ${name}`,
@@ -328,6 +198,7 @@ export async function DELETE(
     const { name } = await params;
     const { searchParams } = new URL(request.url);
     const ip = searchParams.get('ip');
+    const netmask = searchParams.get('netmask') || '255.255.255.0';
 
     if (!VALID_NAME.test(name)) {
       return NextResponse.json(
@@ -336,7 +207,7 @@ export async function DELETE(
       );
     }
 
-    if (!ip || !isValidIPv4(ip)) {
+    if (!ip) {
       return NextResponse.json(
         { success: false, error: { code: 'INVALID_IP', message: 'Valid "ip" query parameter is required' } },
         { status: 400 }
@@ -345,26 +216,32 @@ export async function DELETE(
 
     const results: { step: string; success: boolean; message: string }[] = [];
 
-    // 1. Determine the CIDR — read from OS to get the correct prefix
-    const addrOutput = safeExec(`ip -o -4 addr show dev ${name} 2>/dev/null`);
-    let cidr = 24; // default
-    for (const line of addrOutput.trim().split('\n').filter(Boolean)) {
-      const match = line.match(new RegExp(`inet\\s+${ip.replace('.', '\\.')}/(\\d+)`));
-      if (match) {
-        cidr = parseInt(match[1], 10);
-        break;
-      }
+    // 1. Remove at OS level via shell script
+    const removeResult = removeAlias(name, ip, netmask);
+
+    if (!removeResult.success) {
+      // Log warning but continue — the alias may not exist at OS level
+      console.warn(`[Network OS API] OS remove for alias ${ip} on ${name}: ${removeResult.error}`);
     }
+    results.push({
+      step: 'del-addr',
+      success: removeResult.success,
+      message: removeResult.success ? 'Alias removed from OS' : (removeResult.error || 'OS remove failed'),
+    });
 
-    // 2. Remove at OS level
-    const delOutput = safeExec(`sudo ip addr del ${ip}/${cidr} dev ${name} 2>&1`);
-    results.push({ step: 'del-addr', success: true, message: delOutput.trim() });
+    // 2. Remove from /etc/network/interfaces via shell script
+    const persistResult = persistAliasRemove(name, ip);
 
-    // 3. Remove from /etc/network/interfaces
-    const fileResult = removeAliasFromFile(name, ip);
-    results.push({ step: 'file-remove', ...fileResult });
+    if (!persistResult.success) {
+      console.warn(`[Network OS API] File remove failed for alias ${ip} on ${name}: ${persistResult.error} — continuing with DB only`);
+    }
+    results.push({
+      step: 'file-remove',
+      success: persistResult.success,
+      message: persistResult.success ? 'Alias removed from interfaces file' : (persistResult.error || 'File remove failed'),
+    });
 
-    // 4. Remove from DB
+    // 3. Remove from DB
     try {
       const netIface = await db.networkInterface.findUnique({
         where: { propertyId_name: { propertyId: PROPERTY_ID, name } },
@@ -380,6 +257,7 @@ export async function DELETE(
       results.push({ step: 'database', success: false, message: dbErr.message });
     }
 
+    const cidr = removeResult.data?.cidr || 24;
     return NextResponse.json({
       success: true,
       message: `Alias ${ip}/${cidr} removed from ${name}`,

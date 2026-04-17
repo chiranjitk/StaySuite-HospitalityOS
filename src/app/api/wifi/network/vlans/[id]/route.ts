@@ -8,7 +8,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { getTenantIdFromSession } from '@/lib/auth/tenant-context';
-import { execSync } from 'child_process';
+import { deleteVlan } from '@/lib/network';
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -142,14 +142,17 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
     if (!existing) {
       // Even if not in DB, try to remove the OS-level VLAN interface
       try {
-        execSync(`ip link del ${id} 2>/dev/null`, { timeout: 5000 });
-        return NextResponse.json({ success: true, message: `VLAN interface ${id} removed from OS.` });
+        const osResult = deleteVlan(id);
+        if (osResult.success) {
+          return NextResponse.json({ success: true, message: `VLAN interface ${id} removed from OS.` });
+        }
       } catch {
-        return NextResponse.json(
-          { success: false, error: { code: 'NOT_FOUND', message: 'VLAN not found in DB or OS' } },
-          { status: 404 },
-        );
+        // Validation error or script failure
       }
+      return NextResponse.json(
+        { success: false, error: { code: 'NOT_FOUND', message: 'VLAN not found in DB or OS' } },
+        { status: 404 },
+      );
     }
 
     if (existing._count.dhcpSubnets > 0) {
@@ -165,12 +168,15 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
       );
     }
 
-    // Remove from OS first
+    // Remove from OS first via shell script
     const ifaceName = existing.subInterface;
     try {
-      execSync(`ip link del ${ifaceName} 2>/dev/null`, { timeout: 5000 });
-    } catch {
-      // OS removal failed — might not exist at OS level, continue with DB removal
+      const osResult = deleteVlan(ifaceName);
+      if (!osResult.success) {
+        console.warn(`OS VLAN removal failed for ${ifaceName}:`, osResult.error);
+      }
+    } catch (err) {
+      console.warn(`OS VLAN removal error for ${ifaceName}:`, err instanceof Error ? err.message : err);
     }
 
     await db.vlanConfig.delete({ where: { id: existing.id } });

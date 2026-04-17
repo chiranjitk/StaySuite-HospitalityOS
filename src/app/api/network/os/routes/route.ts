@@ -1,22 +1,26 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { execSync } from 'child_process';
-import * as fs from 'fs';
 import { db } from '@/lib/db';
+import {
+  addRoute,
+  deleteRoute,
+  addDefaultRoute,
+  listRoutes,
+  RouteInfo,
+} from '@/lib/network/route';
+import {
+  persistRouteAdd,
+  persistRouteRemove,
+} from '@/lib/network/persist';
 
 /**
  * POST   /api/network/os/routes — Add a static route
  * GET    /api/network/os/routes — Get all current routes (OS + DB)
  * DELETE /api/network/os/routes — Remove a route
  *
- * Uses `sudo ip route add/del/show` on Debian 13 to manage static routes.
- * Persists to /etc/network/interfaces (up/down commands) and StaticRoute in DB.
+ * Uses shell script wrappers from @/lib/network for OS-level operations.
+ * Persists to /etc/network/interfaces via persist.sh and StaticRoute in DB.
  */
 
-function safeExec(cmd: string, timeout = 5000): string {
-  try { return execSync(cmd, { encoding: 'utf-8', timeout }); } catch (e: any) { return e.stdout || ''; }
-}
-
-const INTERFACES_FILE = process.env.NETWORK_INTERFACES_FILE || '/etc/network/interfaces';
 const TENANT_ID = 'tenant-1';
 const PROPERTY_ID = 'property-1';
 
@@ -42,157 +46,16 @@ function isValidDestination(dest: string): boolean {
   return true;
 }
 
-/**
- * Persist route as up/down commands inside the interface stanza
- * in /etc/network/interfaces.
- */
-function persistRouteToFile(
-  ifaceName: string,
-  destination: string,
-  gateway: string,
-  metric: number,
-): { success: boolean; message: string } {
-  try {
-    let content = '';
-    try {
-      content = fs.readFileSync(INTERFACES_FILE, 'utf-8');
-    } catch {
-      content = '# /etc/network/interfaces — managed by StaySuite HospitalityOS\n\nsource /etc/network/interfaces.d/*\n\n';
-    }
-
-    const lines = content.split('\n');
-    const marker = `# STAYSUITE_ROUTE ${destination} via ${gateway}`;
-    const upLine = `\tup ip route add ${destination} via ${gateway} dev ${ifaceName} metric ${metric}`;
-    const downLine = `\tdown ip route del ${destination} via ${gateway} dev ${ifaceName} metric ${metric} 2>/dev/null || true`;
-
-    // Check if already present
-    const alreadyExists = lines.some(l => l.trim().includes(marker));
-    if (alreadyExists) {
-      return { success: true, message: 'Route already present in interfaces file' };
-    }
-
-    // Find the iface stanza and append inside it
-    let stanzaEnd = -1;
-    for (let i = 0; i < lines.length; i++) {
-      const trimmed = lines[i].trim();
-      const ifaceMatch = trimmed.match(/^iface\s+([a-zA-Z0-9._:-]+)\s+inet\s+(\S+)/);
-      if (ifaceMatch && ifaceMatch[1] === ifaceName) {
-        for (let j = i + 1; j < lines.length; j++) {
-          const nextTrimmed = lines[j].trim();
-          if (nextTrimmed === '' || nextTrimmed.match(/^(?:auto|allow-hotplug|iface|source)\s/)) {
-            stanzaEnd = j;
-            break;
-          }
-        }
-        if (stanzaEnd === -1) stanzaEnd = lines.length;
-        break;
-      }
-    }
-
-    if (stanzaEnd > 0) {
-      lines.splice(stanzaEnd, 0, marker, upLine, downLine);
-    } else {
-      // No stanza found — append
-      if (lines.length > 0 && lines[lines.length - 1].trim() !== '') {
-        lines.push('');
-      }
-      lines.push(`iface ${ifaceName} inet manual`);
-      lines.push(marker);
-      lines.push(upLine);
-      lines.push(downLine);
-      lines.push('');
-    }
-
-    fs.writeFileSync(INTERFACES_FILE, lines.join('\n'), 'utf-8');
-    return { success: true, message: `Route persisted to ${INTERFACES_FILE}` };
-  } catch (err: any) {
-    return { success: false, message: `File write error: ${err.message}` };
-  }
-}
-
-/**
- * Remove route entry from /etc/network/interfaces.
- */
-function removeRouteFromFile(
-  destination: string,
-  gateway: string,
-): { success: boolean; message: string } {
-  try {
-    let content = '';
-    try {
-      content = fs.readFileSync(INTERFACES_FILE, 'utf-8');
-    } catch {
-      return { success: true, message: 'No interfaces file to update' };
-    }
-
-    const lines = content.split('\n');
-    const escapedDest = destination.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const escapedGw = gateway.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
-    const resultLines = lines.filter(line => {
-      const trimmed = line.trim();
-      // Remove marker
-      if (trimmed.includes(`STAYSUITE_ROUTE ${destination}`)) return false;
-      // Remove up/down route lines
-      if (trimmed.match(new RegExp(`^(?:up|down)\\s+ip\\s+route\\s+(?:add|del)\\s+${escapedDest}\\s+via\\s+${escapedGw}`))) {
-        return false;
-      }
-      return true;
-    });
-
-    fs.writeFileSync(INTERFACES_FILE, resultLines.join('\n'), 'utf-8');
-    return { success: true, message: `Route removed from ${INTERFACES_FILE}` };
-  } catch (err: any) {
-    return { success: false, message: `File write error: ${err.message}` };
-  }
-}
-
-/**
- * Parse a single line of `ip route show` output into a structured object.
- */
-function parseRouteLine(line: string): Record<string, any> {
-  const parts = line.trim().split(/\s+/);
-  if (parts.length < 2) return {};
-
-  const route: Record<string, any> = {
-    destination: parts[0],
-    gateway: null,
-    interfaceName: null,
-    metric: null,
-    protocol: 'kernel',
-    raw: line.trim(),
-  };
-
-  for (let i = 1; i < parts.length; i++) {
-    if (parts[i] === 'via' && parts[i + 1]) {
-      route.gateway = parts[i + 1];
-      i++;
-    } else if (parts[i] === 'dev' && parts[i + 1]) {
-      route.interfaceName = parts[i + 1];
-      i++;
-    } else if (parts[i] === 'metric' && parts[i + 1]) {
-      route.metric = parseInt(parts[i + 1], 10);
-      i++;
-    } else if (parts[i] === 'proto' && parts[i + 1]) {
-      route.protocol = parts[i + 1];
-      i++;
-    }
-  }
-
-  // Flag default routes
-  route.isDefault = route.destination === 'default';
-
-  return route;
-}
-
 // ──────────────────────────────────────────────────
 // GET /api/network/os/routes — List all routes
 // ──────────────────────────────────────────────────
 export async function GET() {
   try {
-    // 1. Get OS routes
-    const output = safeExec('ip route show 2>/dev/null');
-    const osRoutes = output.trim().split('\n').filter(Boolean).map(parseRouteLine).filter(r => r.destination);
+    // 1. Get OS routes via shell script wrapper
+    const listResult = listRoutes();
+    const osRoutes: RouteInfo[] = (listResult.success && listResult.data)
+      ? listResult.data.routes
+      : [];
 
     // 2. Get DB routes
     let dbRoutes: any[] = [];
@@ -268,48 +131,60 @@ export async function POST(request: NextRequest) {
 
     const results: { step: string; success: boolean; message: string }[] = [];
 
-    // 1. Add route at OS level
-    let cmd: string;
-    if (routeDest === 'default') {
-      cmd = `sudo ip route add default via ${gateway} dev ${interfaceName} metric ${routeMetric} 2>&1`;
-    } else {
-      cmd = `sudo ip route add ${routeDest} via ${gateway} dev ${interfaceName} metric ${routeMetric} 2>&1`;
-    }
-    const addOutput = safeExec(cmd);
-    if (addOutput.includes('File exists') || addOutput.includes('Network is unreachable')) {
-      // Route may already exist — non-fatal
-      results.push({ step: 'add-route', success: false, message: addOutput.trim() || 'Route may already exist' });
-    } else {
-      results.push({ step: 'add-route', success: true, message: addOutput.trim() });
-    }
-
-    // 2. Persist to /etc/network/interfaces
-    const destForFile = routeDest === 'default' ? 'default' : routeDest;
-    const fileResult = persistRouteToFile(interfaceName, destForFile, gateway, routeMetric);
-    results.push({ step: 'file-persist', ...fileResult });
-
-    // 3. Save to DB (StaticRoute)
-    try {
-      const dbDest = isDefault ? '0.0.0.0/0' : routeDest;
-      await db.staticRoute.create({
-        data: {
-          tenantId: TENANT_ID,
-          propertyId: PROPERTY_ID,
-          name: routeName || `route-${dbDest}-${gateway}`,
-          destination: dbDest,
-          gateway,
-          metric: routeMetric,
-          interfaceName,
-          protocol: 'static',
-          isDefault: !!isDefault,
-          enabled: true,
-          description: description || null,
-        },
+    // 1. Add route at OS level via shell script wrapper
+    if (isDefault) {
+      const addResult = addDefaultRoute(gateway, interfaceName);
+      results.push({
+        step: 'add-route',
+        success: addResult.success,
+        message: addResult.success ? 'Default route added' : addResult.error || 'Failed to add default route',
       });
-      results.push({ step: 'database', success: true, message: 'Static route saved to database' });
-    } catch (dbErr: any) {
-      console.warn('[Network OS API] DB create failed for static route:', dbErr);
-      results.push({ step: 'database', success: false, message: dbErr.message });
+    } else {
+      const addResult = addRoute({ destination: routeDest, gateway, metric: routeMetric, interface: interfaceName });
+      results.push({
+        step: 'add-route',
+        success: addResult.success,
+        message: addResult.success ? 'Route added' : addResult.error || 'Failed to add route',
+      });
+    }
+
+    // 2. Persist to /etc/network/interfaces via shell script wrapper
+    const destForFile = routeDest === 'default' ? 'default' : routeDest;
+    const persistResult = persistRouteAdd({ interface: interfaceName, destination: destForFile, gateway });
+    results.push({
+      step: 'file-persist',
+      success: persistResult.success,
+      message: persistResult.success
+        ? `Route persisted to interfaces file`
+        : persistResult.error || 'Failed to persist route',
+    });
+
+    // 3. Save to DB (StaticRoute) — only if OS route add succeeded
+    if (results[0].success) {
+      try {
+        const dbDest = isDefault ? '0.0.0.0/0' : routeDest;
+        await db.staticRoute.create({
+          data: {
+            tenantId: TENANT_ID,
+            propertyId: PROPERTY_ID,
+            name: routeName || `route-${dbDest}-${gateway}`,
+            destination: dbDest,
+            gateway,
+            metric: routeMetric,
+            interfaceName,
+            protocol: 'static',
+            isDefault: !!isDefault,
+            enabled: true,
+            description: description || null,
+          },
+        });
+        results.push({ step: 'database', success: true, message: 'Static route saved to database' });
+      } catch (dbErr: any) {
+        console.warn('[Network OS API] DB create failed for static route:', dbErr);
+        results.push({ step: 'database', success: false, message: dbErr.message });
+      }
+    } else {
+      results.push({ step: 'database', success: false, message: 'Skipped: OS route add did not succeed' });
     }
 
     return NextResponse.json({
@@ -361,20 +236,28 @@ export async function DELETE(request: NextRequest) {
 
     const results: { step: string; success: boolean; message: string }[] = [];
 
-    // 1. Remove route at OS level
-    let cmd: string;
-    if (destination === 'default' || destination === '0.0.0.0/0') {
-      cmd = `sudo ip route del default via ${gateway}${interfaceName ? ` dev ${interfaceName}` : ''} 2>&1`;
-    } else {
-      cmd = `sudo ip route del ${destination} via ${gateway}${interfaceName ? ` dev ${interfaceName}` : ''} 2>&1`;
-    }
-    const delOutput = safeExec(cmd);
-    results.push({ step: 'del-route', success: true, message: delOutput.trim() });
+    // 1. Remove route at OS level via shell script wrapper
+    const delResult = deleteRoute(destination, gateway);
+    results.push({
+      step: 'del-route',
+      success: delResult.success,
+      message: delResult.success ? 'Route deleted' : delResult.error || 'Failed to delete route',
+    });
 
-    // 2. Remove from /etc/network/interfaces
+    // 2. Remove from /etc/network/interfaces via shell script wrapper
     const destForFile = (destination === 'default' || destination === '0.0.0.0/0') ? 'default' : destination;
-    const fileResult = removeRouteFromFile(destForFile, gateway);
-    results.push({ step: 'file-remove', ...fileResult });
+    if (interfaceName) {
+      const persistResult = persistRouteRemove(interfaceName, destForFile, gateway);
+      results.push({
+        step: 'file-remove',
+        success: persistResult.success,
+        message: persistResult.success
+          ? 'Route removed from interfaces file'
+          : persistResult.error || 'Failed to remove route from file',
+      });
+    } else {
+      results.push({ step: 'file-remove', success: false, message: 'Skipped: no interfaceName provided' });
+    }
 
     // 3. Remove from DB
     try {

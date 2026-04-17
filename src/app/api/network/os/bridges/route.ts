@@ -1,24 +1,23 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { execSync } from 'child_process';
-import * as fs from 'fs';
+import {
+  createBridge,
+  deleteBridge,
+  listBridges,
+  persistBridge,
+  removePersistedBridge,
+} from '@/lib/network';
 import { db } from '@/lib/db';
 
 /**
- * POST /api/network/os/bridges - Create a bridge interface
- * DELETE /api/network/os/bridges - Delete a bridge interface
+ * POST   /api/network/os/bridges — Create a bridge interface
+ * DELETE /api/network/os/bridges — Delete a bridge interface
  *
- * Uses `sudo ip link` commands on Debian 13 to manage Linux bridges.
- * Persists configuration to /etc/network/interfaces and BridgeConfig in DB.
+ * Uses shell script wrappers from @/lib/network for all OS commands
+ * and file persistence. DB operations remain inline.
  */
 
-function safeExec(cmd: string, timeout = 5000): string {
-  try { return execSync(cmd, { encoding: 'utf-8', timeout }); } catch (e: any) { return e.stdout || ''; }
-}
-
-const INTERFACES_FILE = process.env.NETWORK_INTERFACES_FILE || '/etc/network/interfaces';
 const TENANT_ID = 'tenant-1';
 const PROPERTY_ID = 'property-1';
-
 const VALID_NAME = /^[a-zA-Z0-9._-]+$/;
 
 function isValidIPv4(ip: string): boolean {
@@ -34,179 +33,8 @@ function isValidNetmask(mask: string): boolean {
   return (inverted & (inverted + 1)) === 0 && num > 0;
 }
 
-function netmaskToCidr(mask: string): number {
-  const num = mask.split('.').reduce((acc, octet) => (acc << 8) + parseInt(octet, 10), 0) >>> 0;
-  let count = 0;
-  while (num & (1 << (31 - count))) count++;
-  return count;
-}
-
-/**
- * Persist bridge stanza to /etc/network/interfaces.
- * Appends or replaces an existing stanza for the bridge.
- */
-function persistBridgeToFile(
-  bridgeName: string,
-  members: string[],
-  stpEnabled: boolean,
-  ipAddress?: string,
-  netmask?: string,
-): { success: boolean; message: string } {
-  try {
-    let content = '';
-    try {
-      content = fs.readFileSync(INTERFACES_FILE, 'utf-8');
-    } catch {
-      content = '# /etc/network/interfaces — managed by StaySuite HospitalityOS\n\nsource /etc/network/interfaces.d/*\n\n';
-    }
-
-    const lines = content.split('\n');
-
-    // Find existing stanza for this bridge
-    let stanzaStart = -1;
-    let stanzaEnd = lines.length;
-
-    for (let i = 0; i < lines.length; i++) {
-      const trimmed = lines[i].trim();
-      const ifaceMatch = trimmed.match(/^iface\s+([a-zA-Z0-9._-]+)\s+inet\s+(\S+)/);
-      if (ifaceMatch && ifaceMatch[1] === bridgeName) {
-        stanzaStart = i;
-        for (let j = i + 1; j < lines.length; j++) {
-          const nextTrimmed = lines[j].trim();
-          if (nextTrimmed === '' || nextTrimmed.match(/^(?:auto|allow-hotplug|iface|source)\s/)) {
-            stanzaEnd = j;
-            break;
-          }
-        }
-        break;
-      }
-    }
-
-    // Build stanza
-    const stanzaLines: string[] = [];
-
-    // Look for existing auto/allow-hotplug line
-    let hasAutoLine = false;
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if ((trimmed.match(/^auto\s+/) || trimmed.match(/^allow-hotplug\s+/)) && trimmed.includes(bridgeName)) {
-        hasAutoLine = true;
-        break;
-      }
-    }
-
-    const resultLines: string[] = [];
-
-    if (stanzaStart !== -1) {
-      // Replace existing stanza
-      const before = lines.slice(0, stanzaStart);
-      const after = lines.slice(stanzaEnd);
-      resultLines.push(...before);
-    } else {
-      resultLines.push(...lines);
-    }
-
-    if (!hasAutoLine) {
-      if (resultLines.length > 0 && resultLines[resultLines.length - 1].trim() !== '') {
-        resultLines.push('');
-      }
-      resultLines.push(`# STAYSUITE_MANAGED — bridge ${bridgeName}`);
-      resultLines.push(`auto ${bridgeName}`);
-    }
-
-    stanzaLines.push(`iface ${bridgeName} inet manual`);
-    if (stpEnabled) {
-      stanzaLines.push(`\tbridge-stp yes`);
-    } else {
-      stanzaLines.push(`\tbridge-stp no`);
-    }
-
-    if (members.length > 0) {
-      stanzaLines.push(`\tbridge-ports ${members.join(' ')}`);
-    }
-
-    if (ipAddress && netmask) {
-      stanzaLines.push(`\taddress ${ipAddress}`);
-      stanzaLines.push(`\tnetmask ${netmask}`);
-    }
-
-    if (resultLines.length > 0 && resultLines[resultLines.length - 1].trim() !== '' && stanzaStart === -1) {
-      resultLines.push('');
-    }
-
-    if (stanzaStart !== -1) {
-      // Already had the before portion, now add stanza + after
-      resultLines.push(...stanzaLines);
-      resultLines.push(...lines.slice(stanzaEnd));
-    } else {
-      resultLines.push(...stanzaLines);
-      resultLines.push('');
-    }
-
-    fs.writeFileSync(INTERFACES_FILE, resultLines.join('\n'), 'utf-8');
-    return { success: true, message: `Bridge stanza persisted to ${INTERFACES_FILE}` };
-  } catch (err: any) {
-    return { success: false, message: `File write error: ${err.message}` };
-  }
-}
-
-/**
- * Remove bridge stanza from /etc/network/interfaces.
- */
-function removeBridgeFromFile(bridgeName: string): { success: boolean; message: string } {
-  try {
-    let content = '';
-    try {
-      content = fs.readFileSync(INTERFACES_FILE, 'utf-8');
-    } catch {
-      return { success: true, message: 'No interfaces file to update' };
-    }
-
-    const lines = content.split('\n');
-    const resultLines: string[] = [];
-
-    let i = 0;
-    while (i < lines.length) {
-      const trimmed = lines[i].trim();
-      const ifaceMatch = trimmed.match(/^iface\s+([a-zA-Z0-9._-]+)\s+inet\s+(\S+)/);
-      if (ifaceMatch && ifaceMatch[1] === bridgeName) {
-        // Skip this stanza until the next blank line or next stanza
-        i++;
-        while (i < lines.length) {
-          const nextTrimmed = lines[i].trim();
-          if (nextTrimmed === '' || nextTrimmed.match(/^(?:auto|allow-hotplug|iface|source)\s/)) {
-            break;
-          }
-          i++;
-        }
-        continue;
-      }
-
-      // Also remove auto/allow-hotplug lines for this bridge
-      if ((trimmed.match(/^auto\s+/) || trimmed.match(/^allow-hotplug\s+/)) && trimmed.includes(bridgeName)) {
-        i++;
-        continue;
-      }
-
-      // Remove STAYSUITE_MANAGED comment for this bridge
-      if (trimmed.match(/^#\s*STAYSUITE_MANAGED/) && trimmed.includes(bridgeName)) {
-        i++;
-        continue;
-      }
-
-      resultLines.push(lines[i]);
-      i++;
-    }
-
-    fs.writeFileSync(INTERFACES_FILE, resultLines.join('\n'), 'utf-8');
-    return { success: true, message: `Bridge stanza removed from ${INTERFACES_FILE}` };
-  } catch (err: any) {
-    return { success: false, message: `File write error: ${err.message}` };
-  }
-}
-
 // ──────────────────────────────────────────────
-// POST /api/network/os/bridges — Create a bridge
+// POST — Create a bridge
 // ──────────────────────────────────────────────
 export async function POST(request: NextRequest) {
   try {
@@ -247,58 +75,58 @@ export async function POST(request: NextRequest) {
 
     const results: { step: string; success: boolean; message: string }[] = [];
 
-    // 1. Create the bridge at OS level
-    const createOutput = safeExec(`sudo ip link add name ${name} type bridge 2>&1`);
-    if (createOutput.includes('Error') || createOutput.includes('already exists')) {
-      if (createOutput.includes('already exists')) {
+    // 1. Create the bridge at OS level via shell script
+    try {
+      const bridgeResult = createBridge({
+        name,
+        stp: !!stp,
+        forwardDelay: forwardDelay ? parseInt(String(forwardDelay), 10) : 15,
+        members: safeMembers,
+      });
+
+      if (!bridgeResult.success) {
+        const errMsg = bridgeResult.error || 'Unknown error';
+        if (errMsg.toLowerCase().includes('already exists')) {
+          return NextResponse.json(
+            { success: false, error: { code: 'EXISTS', message: `Bridge ${name} already exists` } },
+            { status: 409 }
+          );
+        }
         return NextResponse.json(
-          { success: false, error: { code: 'EXISTS', message: `Bridge ${name} already exists` } },
-          { status: 409 }
+          { success: false, error: { code: 'OS_ERROR', message: errMsg } },
+          { status: 500 }
         );
       }
-      results.push({ step: 'create', success: false, message: createOutput.trim() });
-    } else {
+
       results.push({ step: 'create', success: true, message: `Bridge ${name} created` });
+    } catch (e: any) {
+      return NextResponse.json(
+        { success: false, error: { code: 'INVALID', message: e.message } },
+        { status: 400 }
+      );
     }
 
-    // 2. Set STP
-    if (stp !== undefined) {
-      const stpState = stp ? '1' : '0';
-      const stpOutput = safeExec(`sudo ip link set ${name} type bridge stp_state ${stpState} 2>&1`);
-      results.push({ step: 'stp', success: true, message: stpOutput.trim() });
-    }
+    // 2. Persist to /etc/network/interfaces via shell script
+    try {
+      const persistResult = persistBridge({
+        name,
+        stp: !!stp,
+        forwardDelay: forwardDelay ? parseInt(String(forwardDelay), 10) : 15,
+        members: safeMembers,
+        ipAddress,
+        netmask,
+      });
 
-    // 3. Set forward delay if provided
-    if (forwardDelay !== undefined) {
-      const fd = parseInt(String(forwardDelay), 10);
-      if (!isNaN(fd) && fd >= 2 && fd <= 30) {
-        safeExec(`sudo ip link set ${name} type bridge forward_delay ${fd} 2>&1`);
-        results.push({ step: 'forward-delay', success: true, message: `Forward delay set to ${fd}` });
+      if (!persistResult.success) {
+        results.push({ step: 'file-persist', success: false, message: persistResult.error || 'File persistence failed' });
+      } else {
+        results.push({ step: 'file-persist', success: true, message: `Bridge stanza persisted to /etc/network/interfaces` });
       }
+    } catch (e: any) {
+      results.push({ step: 'file-persist', success: false, message: e.message });
     }
 
-    // 4. Add member interfaces
-    for (const member of safeMembers) {
-      const memberOutput = safeExec(`sudo ip link set ${member} master ${name} 2>&1`);
-      results.push({ step: `member-${member}`, success: true, message: memberOutput.trim() });
-    }
-
-    // 5. Set bridge IP if provided
-    if (ipAddress && netmask) {
-      const cidr = netmaskToCidr(netmask);
-      const ipOutput = safeExec(`sudo ip addr add ${ipAddress}/${cidr} dev ${name} 2>&1`);
-      results.push({ step: 'ip-address', success: true, message: ipOutput.trim() });
-    }
-
-    // 6. Bring bridge up
-    const upOutput = safeExec(`sudo ip link set ${name} up 2>&1`);
-    results.push({ step: 'up', success: true, message: upOutput.trim() });
-
-    // 7. Persist to /etc/network/interfaces
-    const fileResult = persistBridgeToFile(name, safeMembers, !!stp, ipAddress, netmask);
-    results.push({ step: 'file-persist', ...fileResult });
-
-    // 8. Persist to DB (BridgeConfig)
+    // 3. Persist to DB (BridgeConfig)
     try {
       await db.bridgeConfig.create({
         data: {
@@ -339,12 +167,11 @@ export async function POST(request: NextRequest) {
 }
 
 // ──────────────────────────────────────────────
-// DELETE /api/network/os/bridges — Delete a bridge
+// DELETE — Delete a bridge
 // ──────────────────────────────────────────────
 export async function DELETE(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
-    // Accept name from query param
     let name = searchParams.get('name');
 
     // Also try to parse from body if not in query
@@ -373,35 +200,33 @@ export async function DELETE(request: NextRequest) {
 
     const results: { step: string; success: boolean; message: string }[] = [];
 
-    // 1. Get current members from the bridge
-    const linkOutput = safeExec(`ip -o link show master ${name} 2>/dev/null`);
-    const currentMembers: string[] = [];
-    for (const line of linkOutput.trim().split('\n').filter(Boolean)) {
-      const match = line.match(/:\s*(\S+):/);
-      if (match) {
-        currentMembers.push(match[1]);
+    // 1. Delete the bridge at OS level via shell script
+    try {
+      const bridgeResult = deleteBridge(name);
+
+      if (!bridgeResult.success) {
+        results.push({ step: 'delete', success: false, message: bridgeResult.error || 'OS deletion failed' });
+      } else {
+        results.push({ step: 'delete', success: true, message: `Bridge ${name} deleted` });
       }
+    } catch (e: any) {
+      results.push({ step: 'delete', success: false, message: e.message });
     }
 
-    // 2. Remove members from the bridge
-    for (const member of currentMembers) {
-      const memberOutput = safeExec(`sudo ip link set ${member} nomaster 2>&1`);
-      results.push({ step: `remove-member-${member}`, success: true, message: memberOutput.trim() });
+    // 2. Remove from /etc/network/interfaces via shell script
+    try {
+      const persistResult = removePersistedBridge(name);
+
+      if (!persistResult.success) {
+        results.push({ step: 'file-remove', success: false, message: persistResult.error || 'File removal failed' });
+      } else {
+        results.push({ step: 'file-remove', success: true, message: `Bridge stanza removed from /etc/network/interfaces` });
+      }
+    } catch (e: any) {
+      results.push({ step: 'file-remove', success: false, message: e.message });
     }
 
-    // 3. Bring bridge down
-    const downOutput = safeExec(`sudo ip link set ${name} down 2>&1`);
-    results.push({ step: 'down', success: true, message: downOutput.trim() });
-
-    // 4. Delete the bridge
-    const delOutput = safeExec(`sudo ip link del ${name} 2>&1`);
-    results.push({ step: 'delete', success: true, message: delOutput.trim() });
-
-    // 5. Remove from /etc/network/interfaces
-    const fileResult = removeBridgeFromFile(name);
-    results.push({ step: 'file-remove', ...fileResult });
-
-    // 6. Remove from DB
+    // 3. Remove from DB
     try {
       await db.bridgeConfig.deleteMany({
         where: { propertyId: PROPERTY_ID, name },

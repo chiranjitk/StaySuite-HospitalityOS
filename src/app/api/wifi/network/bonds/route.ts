@@ -7,6 +7,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { requirePermission } from '@/lib/auth/tenant-context';
+import { createBond, persistBond } from '@/lib/network';
 
 // GET /api/wifi/network/bonds - List all bond configs
 export async function GET(request: NextRequest) {
@@ -79,6 +80,56 @@ export async function POST(request: NextRequest) {
         { success: false, error: { code: 'DUPLICATE_NAME', message: 'A bond with this name already exists on this property' } },
         { status: 400 },
       );
+    }
+
+    // Resolve member interface names from IDs for the shell script
+    const ifaceNames: string[] = [];
+    if (members.length > 0) {
+      const ifaceRecords = await db.networkInterface.findMany({
+        where: { id: { in: members }, tenantId },
+        select: { name: true },
+      });
+      ifaceRecords.forEach((r) => ifaceNames.push(r.name));
+      if (ifaceNames.length !== members.length) {
+        return NextResponse.json(
+          { success: false, error: { code: 'VALIDATION_ERROR', message: 'One or more member interface IDs not found' } },
+          { status: 400 },
+        );
+      }
+    }
+
+    // Execute OS-level bond creation via shell script
+    try {
+      const osResult = createBond({
+        name,
+        mode,
+        miimon,
+        lacpRate,
+        primary: primaryMember,
+        members: ifaceNames,
+      });
+      if (!osResult.success) {
+        return NextResponse.json(
+          { success: false, error: { code: 'OS_ERROR', message: `Failed to create bond at OS level: ${osResult.error}` } },
+          { status: 500 },
+        );
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return NextResponse.json(
+        { success: false, error: { code: 'OS_ERROR', message: `Failed to create bond at OS level: ${msg}` } },
+        { status: 500 },
+      );
+    }
+
+    // Persist to /etc/network/interfaces
+    try {
+      const persistResult = persistBond({ name, mode, miimon, lacpRate, primary: primaryMember, members: ifaceNames });
+      if (!persistResult.success) {
+        console.warn(`Bond persistence warning for ${name}:`, persistResult.error);
+      }
+    } catch (err) {
+      console.warn(`Bond persistence error for ${name}:`, err instanceof Error ? err.message : err);
     }
 
     // Create bond with optional members

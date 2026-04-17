@@ -7,6 +7,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { getTenantIdFromSession } from '@/lib/auth/tenant-context';
+import { deleteBond, removePersistedBond } from '@/lib/network';
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -104,6 +105,23 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
         { success: false, error: { code: 'NOT_FOUND', message: 'Bond config not found' } },
         { status: 404 },
       );
+    }
+
+    // Execute OS-level bond deletion via shell script
+    try {
+      const osResult = deleteBond(existing.name);
+      if (!osResult.success) {
+        console.warn(`OS bond removal failed for ${existing.name}:`, osResult.error);
+      }
+    } catch (err) {
+      console.warn(`OS bond removal error for ${existing.name}:`, err instanceof Error ? err.message : err);
+    }
+
+    // Remove persisted bond config from /etc/network/interfaces
+    try {
+      removePersistedBond(existing.name);
+    } catch (err) {
+      console.warn(`Remove persisted bond error for ${existing.name}:`, err instanceof Error ? err.message : err);
     }
 
     // Members will be cascade-deleted

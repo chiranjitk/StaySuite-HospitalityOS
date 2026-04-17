@@ -2,11 +2,15 @@ import { NextRequest, NextResponse } from 'next/server';
 import { execSync } from 'child_process';
 import * as fs from 'fs';
 import { readInterfaceRolesFromOS } from '@/lib/interface-role-persist';
+import { listInterfaces, InterfaceInfo } from '@/lib/network/interface';
+import { listRoutes, RouteInfo } from '@/lib/network/route';
 
 /**
  * GET /api/network/os - Get comprehensive OS network data
  * Returns interfaces, system info, routes, DNS config, and ARP table
- * Works without kea-service - reads directly from OS
+ *
+ * Uses shell script wrappers from @/lib/network for interface listing
+ * and route listing. System info, DNS, and ARP are read inline (read-only).
  */
 
 function safeExec(cmd: string, timeout = 5000): string {
@@ -44,6 +48,8 @@ interface OsInterface {
 
 const VALID_ROLE_VALUES: string[] = ['wan', 'lan', 'dmz', 'management', 'wifi', 'guest', 'iot', 'unused'];
 
+const VALID_INTERFACE_TYPES: string[] = ['ethernet', 'wifi', 'loopback', 'bridge', 'bond', 'vlan', 'virtual', 'tunnel', 'unknown'];
+
 interface OsRoute {
   destination: string;
   gateway: string;
@@ -67,10 +73,68 @@ interface OsArpEntry {
   state: string;
 }
 
-function getOsInterfaces(): OsInterface[] {
-  const interfaces: OsInterface[] = [];
+/**
+ * Map shell script InterfaceInfo to OsInterface shape.
+ * Enriches with OS-persisted role tags and defaults for fields
+ * not provided by the wrapper.
+ */
+function mapToOsInterface(iface: InterfaceInfo, osPersistedRoles: Map<string, { role: string; priority: number }> | null): OsInterface {
+  const safeType = VALID_INTERFACE_TYPES.includes(iface.type) ? iface.type as OsInterface['type'] : 'unknown';
 
-  // Read OS-persisted roles once (file I/O outside the loop)
+  // Determine role: OS-persisted tag takes priority, otherwise heuristic
+  let role: OsInterface['role'] = 'unknown';
+  if (iface.name === 'lo') {
+    role = 'management';
+  } else if (safeType === 'ethernet') {
+    role = 'lan';
+  } else if (safeType === 'wifi' || iface.name.startsWith('wlan') || iface.name.startsWith('wl')) {
+    role = 'guest';
+  } else if (safeType === 'bridge' || iface.name.startsWith('br')) {
+    role = 'lan';
+  }
+
+  if (osPersistedRoles) {
+    const persisted = osPersistedRoles.get(iface.name);
+    if (persisted && VALID_ROLE_VALUES.includes(persisted.role)) {
+      role = persisted.role as OsInterface['role'];
+    }
+  }
+
+  return {
+    name: iface.name,
+    type: safeType,
+    macAddress: iface.hwAddress || '00:00:00:00:00:00',
+    ipv4Addresses: iface.ipv4Addresses || [],
+    ipv6Addresses: iface.ipv6Addresses || [],
+    gateway: '',
+    dnsServers: [],
+    mtu: iface.mtu || 1500,
+    state: iface.state === 'up' || iface.state === 'UNKNOWN' ? 'up' : iface.state === 'down' ? 'down' : 'unknown',
+    speed: iface.speed || (safeType === 'loopback' ? '' : 'Unknown'),
+    duplex: iface.duplex || (safeType === 'loopback' ? '' : 'Unknown'),
+    rxBytes: iface.stats?.rxBytes || 0,
+    txBytes: iface.stats?.txBytes || 0,
+    rxPackets: iface.stats?.rxPackets || 0,
+    txPackets: iface.stats?.txPackets || 0,
+    rxErrors: iface.stats?.rxErrors || 0,
+    txErrors: iface.stats?.txErrors || 0,
+    isDefaultRoute: false,
+    vendor: '',
+    driver: '',
+    vlans: [],
+    bridgePorts: [],
+    bondMembers: [],
+    role,
+    dhcpEnabled: false,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * Get OS interfaces via shell script wrapper, enriched with role data.
+ */
+function getOsInterfaces(): OsInterface[] {
+  // Read OS-persisted roles once
   let osPersistedRoles: Map<string, { role: string; priority: number }> | null = null;
   try {
     osPersistedRoles = readInterfaceRolesFromOS();
@@ -78,117 +142,35 @@ function getOsInterfaces(): OsInterface[] {
     osPersistedRoles = null;
   }
 
-  let ifNames: string[] = [];
-  try {
-    ifNames = fs.readdirSync('/sys/class/net').filter(n => !n.startsWith('.'));
-  } catch {
-    const ipOut = safeExec("ip -o link show | awk -F': ' '{print $2}'");
-    ifNames = ipOut.trim().split('\n').filter(Boolean);
+  // Call shell script wrapper
+  const result = listInterfaces();
+  if (!result.success || !result.data) {
+    console.warn('[Network OS API] listInterfaces script failed:', result.error);
+    return [];
   }
 
-  for (const name of ifNames) {
-    try {
-      let type: OsInterface['type'] = 'unknown';
-      const ifType = safeExec(`cat /sys/class/net/${name}/type 2>/dev/null`).trim();
-      if (name === 'lo') type = 'loopback';
-      else if (fs.existsSync(`/sys/class/net/${name}/wireless`) || fs.existsSync(`/sys/class/net/${name}/phy80211`)) type = 'wifi';
-      else if (fs.existsSync(`/sys/class/net/${name}/bridge`)) type = 'bridge';
-      else if (fs.existsSync(`/sys/class/net/${name}/bonding`)) type = 'bond';
-      else if (name.includes('.')) type = 'vlan';
-      else if (name.startsWith('tun') || name.startsWith('tap') || name.startsWith('wg')) type = 'tunnel';
-      else if (name.startsWith('veth') || name.startsWith('docker') || name.startsWith('br-')) type = 'virtual';
-      else if (ifType === '1' || name.startsWith('eth') || name.startsWith('en')) type = 'ethernet';
+  return result.data.interfaces.map(iface => mapToOsInterface(iface, osPersistedRoles));
+}
 
-      const macAddress = safeExec(`cat /sys/class/net/${name}/address 2>/dev/null`).trim() || '00:00:00:00:00:00';
-
-      const ipv4Out = safeExec(`ip -o -4 addr show dev ${name} 2>/dev/null`);
-      const ipv4Addresses = ipv4Out.trim().split('\n')
-        .filter(Boolean)
-        .map(line => { const m = line.match(/inet\s+([^\s]+)/); return m ? m[1] : ''; })
-        .filter(Boolean);
-
-      const ipv6Out = safeExec(`ip -o -6 addr show dev ${name} 2>/dev/null`);
-      const ipv6Addresses = ipv6Out.trim().split('\n')
-        .filter(Boolean)
-        .map(line => { const m = line.match(/inet6\s+([^\s]+)/); return m ? m[1] : ''; })
-        .filter(Boolean);
-
-      const operState = safeExec(`cat /sys/class/net/${name}/operstate 2>/dev/null`).trim();
-      const state: OsInterface['state'] = operState === 'up' || operState === 'UNKNOWN' ? 'up' : operState === 'down' ? 'down' : 'unknown';
-
-      const mtu = parseInt(safeExec(`cat /sys/class/net/${name}/mtu 2>/dev/null`).trim()) || 1500;
-      const speed = safeExec(`cat /sys/class/net/${name}/speed 2>/dev/null`).trim();
-      const duplex = safeExec(`cat /sys/class/net/${name}/duplex 2>/dev/null`).trim();
-
-      const readStat = (stat: string) => parseInt(safeExec(`cat /sys/class/net/${name}/statistics/${stat} 2>/dev/null`).trim()) || 0;
-      const rxBytes = readStat('rx_bytes');
-      const txBytes = readStat('tx_bytes');
-      const rxPackets = readStat('rx_packets');
-      const txPackets = readStat('tx_packets');
-      const rxErrors = readStat('rx_errors');
-      const txErrors = readStat('tx_errors');
-
-      const defaultRoute = safeExec(`ip route show default 2>/dev/null | grep dev\\s${name}`);
-      const isDefaultRoute = defaultRoute.includes(`dev ${name}`);
-
-      const gwMatch = safeExec(`ip route show dev ${name} 2>/dev/null`).match(/via\s+([^\s]+)/);
-      const gateway = gwMatch ? gwMatch[1] : '';
-
-      const vendor = safeExec(`cat /sys/class/net/${name}/device/vendor 2>/dev/null`).trim();
-      const driver = safeExec(`readlink /sys/class/net/${name}/device/driver 2>/dev/null`).split('/').pop()?.trim() || '';
-
-      const bridgePorts: string[] = [];
-      if (type === 'bridge') {
-        const brif = safeExec(`ls /sys/class/net/${name}/brif/ 2>/dev/null`);
-        bridgePorts.push(...brif.trim().split('\n').filter(Boolean));
-      }
-
-      const bondMembers: string[] = [];
-      if (type === 'bond') {
-        const slaves = safeExec(`cat /sys/class/net/${name}/bonding/slaves 2>/dev/null`).trim();
-        bondMembers.push(...slaves.split(/\s+/).filter(Boolean));
-      }
-
-      const dhclientPid = safeExec(`pgrep -f "dhclient.*${name}" 2>/dev/null`).trim();
-      const networkManagerConn = safeExec(`nmcli -t -f GENERAL.CONNECTION,DEVICE dev show ${name} 2>/dev/null | grep ${name}`).trim();
-      const dhcpEnabled = dhclientPid.length > 0 || networkManagerConn.includes('dhcp');
-
-      // Heuristic role detection (fallback when no OS-persisted tag exists)
-      let role: OsInterface['role'] = 'unknown';
-      if (name === 'lo') role = 'management';
-      else if (isDefaultRoute) role = 'wan';
-      else if (name.startsWith('eth') || name.startsWith('en')) {
-        role = isDefaultRoute ? 'wan' : 'lan';
-      } else if (name.startsWith('wlan') || name.startsWith('wl')) role = 'guest';
-      else if (name.startsWith('br')) role = 'lan';
-
-      // OS-persisted role tags take priority over heuristic detection
-      if (osPersistedRoles) {
-        const persisted = osPersistedRoles.get(name);
-        if (persisted && VALID_ROLE_VALUES.includes(persisted.role as OsInterface['role'])) {
-          role = persisted.role as OsInterface['role'];
-        }
-      }
-
-      const vlans: string[] = [];
-      if (type === 'bridge') {
-        vlans.push(...bridgePorts);
-      }
-
-      interfaces.push({
-        name, type, macAddress, ipv4Addresses, ipv6Addresses,
-        gateway, dnsServers: [], mtu, state,
-        speed: speed ? `${speed} Mbps` : (type === 'loopback' ? '' : 'Unknown'),
-        duplex: duplex || (type === 'loopback' ? '' : 'Unknown'),
-        rxBytes, txBytes, rxPackets, txPackets, rxErrors, txErrors,
-        isDefaultRoute, vendor, driver, vlans, bridgePorts, bondMembers,
-        role, dhcpEnabled,
-        createdAt: new Date().toISOString(),
-      });
-    } catch { /* skip interface on error */ }
+/**
+ * Get OS routes via shell script wrapper, mapped to OsRoute shape.
+ */
+function getOsRoutes(): OsRoute[] {
+  const result = listRoutes();
+  if (!result.success || !result.data) {
+    console.warn('[Network OS API] listRoutes script failed:', result.error);
+    return [];
   }
 
-  return interfaces;
+  return result.data.routes.map((r: RouteInfo) => ({
+    destination: r.destination === 'default' ? '0.0.0.0/0' : r.destination,
+    gateway: r.gateway || '',
+    interface: r.interface || '',
+    metric: r.metric || 0,
+    scope: '',
+    protocol: r.protocol || '',
+    isDefault: r.destination === 'default',
+  }));
 }
 
 function getOsSystemInfo() {
@@ -233,31 +215,6 @@ function getOsSystemInfo() {
   } catch { cpuCount = 1; }
 
   return { hostname, kernel, osRelease, uptimeFormatted, loadAverage, memory, cpuCount };
-}
-
-function getOsRoutes(): OsRoute[] {
-  const routes: OsRoute[] = [];
-  const output = safeExec("ip -o route show 2>/dev/null");
-  for (const line of output.trim().split('\n').filter(Boolean)) {
-    const parts = line.split(/\s+/);
-    const destination = parts[0] || '';
-    const isDefault = destination === 'default';
-    const gwIdx = parts.indexOf('via');
-    const devIdx = parts.indexOf('dev');
-    const metricIdx = parts.indexOf('metric');
-    const scopeIdx = parts.indexOf('scope');
-    const protoIdx = parts.indexOf('proto');
-    routes.push({
-      destination: isDefault ? '0.0.0.0/0' : destination,
-      gateway: gwIdx >= 0 ? parts[gwIdx + 1] : '',
-      interface: devIdx >= 0 ? parts[devIdx + 1] : '',
-      metric: metricIdx >= 0 ? parseInt(parts[metricIdx + 1]) || 0 : 0,
-      scope: scopeIdx >= 0 ? parts[scopeIdx + 1] : '',
-      protocol: protoIdx >= 0 ? parts[protoIdx + 1] : '',
-      isDefault,
-    });
-  }
-  return routes;
 }
 
 function getOsDnsConfig(): OsDnsConfig {

@@ -7,6 +7,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { requirePermission } from '@/lib/auth/tenant-context';
+import { createVlan } from '@/lib/network';
 
 // GET /api/wifi/network/vlans - List all VLANs
 export async function GET(request: NextRequest) {
@@ -168,6 +169,28 @@ export async function POST(request: NextRequest) {
           error: { code: 'DUPLICATE_SUBIF', message: 'A sub-interface with this name already exists on this property' },
         },
         { status: 400 },
+      );
+    }
+
+    // Execute OS-level VLAN creation via shell script
+    try {
+      const osResult = createVlan({
+        parentInterface: parentIfaceName,
+        vlanId: parseInt(vlanId, 10),
+        name: subInterface,
+        mtu: parseInt(mtu, 10),
+      });
+      if (!osResult.success) {
+        return NextResponse.json(
+          { success: false, error: { code: 'OS_ERROR', message: `Failed to create VLAN at OS level: ${osResult.error}` } },
+          { status: 500 },
+        );
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return NextResponse.json(
+        { success: false, error: { code: 'OS_ERROR', message: `Failed to create VLAN at OS level: ${msg}` } },
+        { status: 500 },
       );
     }
 

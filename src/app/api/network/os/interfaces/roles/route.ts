@@ -1,17 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
-import {
-  readInterfaceRolesFromOS,
-  writeInterfaceRoleToOS,
-  removeInterfaceRoleFromOS,
-  type InterfaceRoleInfo,
-} from '@/lib/interface-role-persist';
+import { setRole, listRoles } from '@/lib/network/role';
 
 /**
  * Bulk Interface Roles API
  *
- * GET  /api/network/os/interfaces/roles — read all roles from OS file
+ * GET  /api/network/os/interfaces/roles — read all roles (OS first, DB fills gaps)
  * PUT  /api/network/os/interfaces/roles — write multiple roles at once (OS + DB)
+ *
+ * Uses shell script wrappers for OS commands and file persistence.
  */
 
 const VALID_ROLES = ['wan', 'lan', 'dmz', 'management', 'wifi', 'guest', 'iot', 'unused'];
@@ -26,8 +23,8 @@ const PROPERTY_ID = 'property-1';
 
 export async function GET() {
   try {
-    // Read from OS file
-    const osRoles = readInterfaceRolesFromOS();
+    // Read from OS via shell script wrapper
+    const osResult = listRoles();
 
     // Also read from DB to merge
     const dbRoles = await db.interfaceRole.findMany({
@@ -58,16 +55,18 @@ export async function GET() {
     }
 
     // OS entries override DB
-    for (const [ifaceName, info] of osRoles) {
-      const existing = merged.get(ifaceName);
-      merged.set(ifaceName, {
-        interfaceName: ifaceName,
-        role: info.role,
-        priority: info.priority,
-        isPrimary: existing?.isPrimary ?? false,
-        enabled: existing?.enabled ?? true,
-        source: 'os',
-      });
+    if (osResult.success && osResult.data) {
+      for (const info of osResult.data.roles) {
+        const existing = merged.get(info.interface);
+        merged.set(info.interface, {
+          interfaceName: info.interface,
+          role: info.role,
+          priority: info.priority,
+          isPrimary: existing?.isPrimary ?? false,
+          enabled: existing?.enabled ?? true,
+          source: 'os',
+        });
+      }
     }
 
     return NextResponse.json({
@@ -158,8 +157,8 @@ export async function PUT(request: NextRequest) {
             ? entry.priority
             : 0;
 
-        // 1. Write to OS
-        const osResult = await writeInterfaceRoleToOS(ifaceName, role, priority);
+        // 1. Write to OS via shell script wrapper
+        const osResult = setRole(ifaceName, role, priority);
 
         // 2. Upsert to DB — ensure NetworkInterface exists for FK
         let dbSuccess = false;

@@ -1,10 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
-import {
-  readInterfaceRolesFromOS,
-  writeInterfaceRoleToOS,
-  removeInterfaceRoleFromOS,
-} from '@/lib/interface-role-persist';
+import { setRole, removeRole, listRoles } from '@/lib/network/role';
 
 /**
  * Interface Role API
@@ -12,6 +8,8 @@ import {
  * GET    /api/network/os/interfaces/[name]/role  — read role (OS first, DB fallback)
  * PUT    /api/network/os/interfaces/[name]/role  — set role (OS + DB)
  * DELETE /api/network/os/interfaces/[name]/role  — remove role (OS + DB)
+ *
+ * Uses shell script wrappers for OS commands and file persistence.
  */
 
 const VALID_ROLES = ['wan', 'lan', 'dmz', 'management', 'wifi', 'guest', 'iot', 'unused'];
@@ -38,9 +36,16 @@ export async function GET(
       );
     }
 
-    // 1. Try OS-persisted role first
-    const osRoles = readInterfaceRolesFromOS();
-    const osRole = osRoles.get(name);
+    // 1. Try OS-persisted roles first via shell script
+    const osResult = listRoles();
+    let osRole = null;
+
+    if (osResult.success && osResult.data) {
+      const found = osResult.data.roles.find(r => r.interface === name);
+      if (found) {
+        osRole = found;
+      }
+    }
 
     if (osRole) {
       return NextResponse.json({
@@ -144,11 +149,11 @@ export async function PUT(
     const safePriority = typeof priority === 'number' && priority >= 0 ? priority : 0;
     const safeIsPrimary = typeof isPrimary === 'boolean' ? isPrimary : false;
 
-    // 1. Persist to OS file
-    const osResult = await writeInterfaceRoleToOS(name, role, safePriority);
+    // 1. Set role via shell script wrapper
+    const osResult = setRole(name, role, safePriority);
     if (!osResult.success) {
       console.warn(
-        `[Interface Role API] OS write failed for ${name}: ${osResult.message} — continuing with DB only`
+        `[Interface Role API] OS write failed for ${name}: ${osResult.error} — continuing with DB only`
       );
     }
 
@@ -249,11 +254,11 @@ export async function DELETE(
       );
     }
 
-    // 1. Remove from OS file
-    const osResult = await removeInterfaceRoleFromOS(name);
+    // 1. Remove from OS via shell script wrapper
+    const osResult = removeRole(name);
     if (!osResult.success) {
       console.warn(
-        `[Interface Role API] OS remove failed for ${name}: ${osResult.message} — continuing with DB only`
+        `[Interface Role API] OS remove failed for ${name}: ${osResult.error} — continuing with DB only`
       );
     }
 

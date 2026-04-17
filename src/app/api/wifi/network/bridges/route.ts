@@ -7,6 +7,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { requirePermission } from '@/lib/auth/tenant-context';
+import { createBridge, persistBridge } from '@/lib/network';
 
 // GET /api/wifi/network/bridges - List all bridge configs
 export async function GET(request: NextRequest) {
@@ -77,6 +78,41 @@ export async function POST(request: NextRequest) {
         { success: false, error: { code: 'DUPLICATE_NAME', message: 'A bridge with this name already exists on this property' } },
         { status: 400 },
       );
+    }
+
+    // Parse member interfaces for shell script
+    const parsedMembers = JSON.parse(members);
+
+    // Execute OS-level bridge creation via shell script
+    try {
+      const osResult = createBridge({
+        name,
+        stp: stpEnabled,
+        forwardDelay,
+        members: parsedMembers,
+      });
+      if (!osResult.success) {
+        return NextResponse.json(
+          { success: false, error: { code: 'OS_ERROR', message: `Failed to create bridge at OS level: ${osResult.error}` } },
+          { status: 500 },
+        );
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return NextResponse.json(
+        { success: false, error: { code: 'OS_ERROR', message: `Failed to create bridge at OS level: ${msg}` } },
+        { status: 500 },
+      );
+    }
+
+    // Persist to /etc/network/interfaces
+    try {
+      const persistResult = persistBridge({ name, stp: stpEnabled, forwardDelay, members: parsedMembers });
+      if (!persistResult.success) {
+        console.warn(`Bridge persistence warning for ${name}:`, persistResult.error);
+      }
+    } catch (err) {
+      console.warn(`Bridge persistence error for ${name}:`, err instanceof Error ? err.message : err);
     }
 
     const bridge = await db.bridgeConfig.create({

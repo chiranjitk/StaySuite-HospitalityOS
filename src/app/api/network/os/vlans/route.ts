@@ -1,27 +1,31 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { execSync } from 'child_process';
+import { createVlan, deleteVlan, listVlans } from '@/lib/network';
 
 /**
- * POST /api/network/os/vlans - Create a VLAN interface on the OS
- * GET /api/network/os/vlans - List VLAN interfaces from the OS
+ * GET  /api/network/os/vlans — List VLAN interfaces from the OS
+ * POST /api/network/os/vlans — Create a VLAN interface on the OS
+ * DELETE /api/network/os/vlans — Delete a VLAN interface from the OS
+ *
+ * All OS operations go through shell script wrappers in @/lib/network.
  */
 
-function safeExec(cmd: string, timeout = 5000): string {
-  try { return execSync(cmd, { encoding: 'utf-8', timeout }); } catch { return ''; }
-}
-
+// ──────────────────────────────────────────────
+// GET — List VLAN interfaces
+// ──────────────────────────────────────────────
 export async function GET() {
   try {
-    const output = safeExec('ip -o link show type vlan 2>/dev/null');
-    const vlans: any[] = [];
-    for (const line of output.trim().split('\n').filter(Boolean)) {
-      const match = line.match(/:\s*(\S+).*vlan\s+id\s+(\d+)/);
-      if (match) {
-        vlans.push({ name: match[1], vlanId: parseInt(match[2]) });
-      }
+    const result = listVlans();
+
+    if (!result.success || !result.data) {
+      return NextResponse.json(
+        { success: false, error: { code: 'OS_ERROR', message: result.error || 'Failed to list VLANs' } },
+        { status: 500 }
+      );
     }
-    return NextResponse.json({ success: true, data: vlans });
-  } catch (error) {
+
+    return NextResponse.json({ success: true, data: result.data.vlans });
+  } catch (error: any) {
+    console.error('[Network OS API] VLAN list error:', error);
     return NextResponse.json(
       { success: false, error: { code: 'OS_ERROR', message: 'Failed to list VLANs' } },
       { status: 500 }
@@ -29,10 +33,13 @@ export async function GET() {
   }
 }
 
+// ──────────────────────────────────────────────
+// POST — Create a VLAN interface
+// ──────────────────────────────────────────────
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
-    const { parentInterface, vlanId, mtu } = body;
+    const { parentInterface, vlanId, mtu, name } = body;
 
     if (!parentInterface || !vlanId) {
       return NextResponse.json(
@@ -41,13 +48,6 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Security: validate inputs
-    if (!/^[a-zA-Z0-9._-]+$/.test(parentInterface)) {
-      return NextResponse.json(
-        { success: false, error: { code: 'INVALID', message: 'Invalid parent interface name' } },
-        { status: 400 }
-      );
-    }
     const vid = parseInt(String(vlanId), 10);
     if (isNaN(vid) || vid < 1 || vid > 4094) {
       return NextResponse.json(
@@ -56,23 +56,100 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const vlanName = `${parentInterface}.${vid}`;
-    const output = safeExec(`sudo ip link add link ${parentInterface} name ${vlanName} type vlan id ${vid} 2>&1`);
+    // Auto-generate VLAN name if not provided
+    const vlanName = name || `${parentInterface}.${vid}`;
 
-    if (mtu && mtu >= 68 && mtu <= 9000) {
-      safeExec(`sudo ip link set dev ${vlanName} mtu ${mtu} 2>&1`);
+    const result = createVlan({
+      parentInterface,
+      vlanId: vid,
+      name: vlanName,
+      mtu: mtu ? parseInt(String(mtu), 10) : undefined,
+    });
+
+    if (!result.success) {
+      const errMsg = result.error || 'Failed to create VLAN';
+      if (errMsg.toLowerCase().includes('already exists')) {
+        return NextResponse.json(
+          { success: false, error: { code: 'EXISTS', message: `VLAN ${vid} on ${parentInterface} already exists` } },
+          { status: 409 }
+        );
+      }
+      return NextResponse.json(
+        { success: false, error: { code: 'OS_ERROR', message: errMsg } },
+        { status: 500 }
+      );
     }
-    safeExec(`sudo ip link set dev ${vlanName} up 2>&1`);
 
     return NextResponse.json({
       success: true,
       message: `VLAN ${vid} created on ${parentInterface}`,
-      output: output.trim(),
+      data: result.data,
     });
-  } catch (error) {
+  } catch (error: any) {
+    // Catch validation errors thrown by the wrapper (sanitizeInterfaceName, validateVlanId, validateMtu)
+    if (error.message?.includes('Invalid')) {
+      return NextResponse.json(
+        { success: false, error: { code: 'INVALID', message: error.message } },
+        { status: 400 }
+      );
+    }
     console.error('[Network OS API] VLAN create error:', error);
     return NextResponse.json(
       { success: false, error: { code: 'OS_ERROR', message: 'Failed to create VLAN' } },
+      { status: 500 }
+    );
+  }
+}
+
+// ──────────────────────────────────────────────
+// DELETE — Delete a VLAN interface
+// ──────────────────────────────────────────────
+export async function DELETE(request: NextRequest) {
+  try {
+    const { searchParams } = new URL(request.url);
+    let vlanName = searchParams.get('name');
+
+    // Also try to parse from body if not in query
+    if (!vlanName) {
+      try {
+        const body = await request.json();
+        vlanName = body.name;
+      } catch {
+        // No body
+      }
+    }
+
+    if (!vlanName || typeof vlanName !== 'string') {
+      return NextResponse.json(
+        { success: false, error: { code: 'VALIDATION', message: 'VLAN name is required (query param or body)' } },
+        { status: 400 }
+      );
+    }
+
+    const result = deleteVlan(vlanName);
+
+    if (!result.success) {
+      return NextResponse.json(
+        { success: false, error: { code: 'OS_ERROR', message: result.error || 'Failed to delete VLAN' } },
+        { status: 500 }
+      );
+    }
+
+    return NextResponse.json({
+      success: true,
+      message: `VLAN ${vlanName} deleted successfully`,
+      data: result.data,
+    });
+  } catch (error: any) {
+    if (error.message?.includes('Invalid')) {
+      return NextResponse.json(
+        { success: false, error: { code: 'INVALID', message: error.message } },
+        { status: 400 }
+      );
+    }
+    console.error('[Network OS API] VLAN delete error:', error);
+    return NextResponse.json(
+      { success: false, error: { code: 'OS_ERROR', message: 'Failed to delete VLAN' } },
       { status: 500 }
     );
   }

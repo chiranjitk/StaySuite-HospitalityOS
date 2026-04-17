@@ -7,6 +7,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { getTenantIdFromSession } from '@/lib/auth/tenant-context';
+import { deleteBridge, removePersistedBridge } from '@/lib/network';
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -91,6 +92,23 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
         { success: false, error: { code: 'NOT_FOUND', message: 'Bridge config not found' } },
         { status: 404 },
       );
+    }
+
+    // Execute OS-level bridge deletion via shell script
+    try {
+      const osResult = deleteBridge(existing.name);
+      if (!osResult.success) {
+        console.warn(`OS bridge removal failed for ${existing.name}:`, osResult.error);
+      }
+    } catch (err) {
+      console.warn(`OS bridge removal error for ${existing.name}:`, err instanceof Error ? err.message : err);
+    }
+
+    // Remove persisted bridge config from /etc/network/interfaces
+    try {
+      removePersistedBridge(existing.name);
+    } catch (err) {
+      console.warn(`Remove persisted bridge error for ${existing.name}:`, err instanceof Error ? err.message : err);
     }
 
     await db.bridgeConfig.delete({ where: { id } });

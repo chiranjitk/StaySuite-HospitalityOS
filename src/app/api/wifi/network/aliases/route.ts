@@ -7,6 +7,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { requirePermission } from '@/lib/auth/tenant-context';
+import { addAlias, persistAliasAdd } from '@/lib/network';
 
 // GET /api/wifi/network/aliases - List all interface aliases
 export async function GET(request: NextRequest) {
@@ -78,6 +79,37 @@ export async function POST(request: NextRequest) {
         { success: false, error: { code: 'NOT_FOUND', message: 'Referenced network interface not found' } },
         { status: 404 },
       );
+    }
+
+    // Execute OS-level alias creation via shell script
+    try {
+      const osResult = addAlias({
+        interface: interfaceName,
+        ipAddress,
+        netmask,
+      });
+      if (!osResult.success) {
+        return NextResponse.json(
+          { success: false, error: { code: 'OS_ERROR', message: `Failed to add alias at OS level: ${osResult.error}` } },
+          { status: 500 },
+        );
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return NextResponse.json(
+        { success: false, error: { code: 'OS_ERROR', message: `Failed to add alias at OS level: ${msg}` } },
+        { status: 500 },
+      );
+    }
+
+    // Persist alias to /etc/network/interfaces
+    try {
+      const persistResult = persistAliasAdd({ interface: interfaceName, ipAddress, netmask });
+      if (!persistResult.success) {
+        console.warn(`Alias persistence warning for ${interfaceName}:`, persistResult.error);
+      }
+    } catch (err) {
+      console.warn(`Alias persistence error for ${interfaceName}:`, err instanceof Error ? err.message : err);
     }
 
     // Use upsert to avoid duplicates on unique constraint [propertyId, interfaceId, ipAddress]

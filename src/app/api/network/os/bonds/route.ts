@@ -1,25 +1,23 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { execSync } from 'child_process';
-import * as fs from 'fs';
+import {
+  createBond,
+  deleteBond,
+  listBonds,
+  persistBond,
+  removePersistedBond,
+} from '@/lib/network';
 import { db } from '@/lib/db';
 
 /**
- * POST /api/network/os/bonds - Create a bond interface
- * DELETE /api/network/os/bonds - Delete a bond interface
+ * POST   /api/network/os/bonds — Create a bond interface
+ * DELETE /api/network/os/bonds — Delete a bond interface
  *
- * Uses `sudo ip link` and `sudo modprobe bonding` commands on Debian 13
- * to manage Linux bonding. Persists to /etc/network/interfaces and
- * BondConfig + BondMember in DB.
+ * Uses shell script wrappers from @/lib/network for all OS commands
+ * and file persistence. DB operations remain inline.
  */
 
-function safeExec(cmd: string, timeout = 5000): string {
-  try { return execSync(cmd, { encoding: 'utf-8', timeout }); } catch (e: any) { return e.stdout || ''; }
-}
-
-const INTERFACES_FILE = process.env.NETWORK_INTERFACES_FILE || '/etc/network/interfaces';
 const TENANT_ID = 'tenant-1';
 const PROPERTY_ID = 'property-1';
-
 const VALID_NAME = /^[a-zA-Z0-9._-]+$/;
 
 const VALID_BOND_MODES = [
@@ -40,175 +38,9 @@ function isValidNetmask(mask: string): boolean {
   return (inverted & (inverted + 1)) === 0 && num > 0;
 }
 
-function netmaskToCidr(mask: string): number {
-  const num = mask.split('.').reduce((acc, octet) => (acc << 8) + parseInt(octet, 10), 0) >>> 0;
-  let count = 0;
-  while (num & (1 << (31 - count))) count++;
-  return count;
-}
-
-/**
- * Persist bond stanza to /etc/network/interfaces.
- */
-function persistBondToFile(
-  bondName: string,
-  mode: string,
-  members: string[],
-  miimon: number,
-  lacpRate: string,
-  primary?: string,
-  ipAddress?: string,
-  netmask?: string,
-): { success: boolean; message: string } {
-  try {
-    let content = '';
-    try {
-      content = fs.readFileSync(INTERFACES_FILE, 'utf-8');
-    } catch {
-      content = '# /etc/network/interfaces — managed by StaySuite HospitalityOS\n\nsource /etc/network/interfaces.d/*\n\n';
-    }
-
-    const lines = content.split('\n');
-
-    // Find existing stanza for this bond
-    let stanzaStart = -1;
-    let stanzaEnd = lines.length;
-
-    for (let i = 0; i < lines.length; i++) {
-      const trimmed = lines[i].trim();
-      const ifaceMatch = trimmed.match(/^iface\s+([a-zA-Z0-9._-]+)\s+inet\s+(\S+)/);
-      if (ifaceMatch && ifaceMatch[1] === bondName) {
-        stanzaStart = i;
-        for (let j = i + 1; j < lines.length; j++) {
-          const nextTrimmed = lines[j].trim();
-          if (nextTrimmed === '' || nextTrimmed.match(/^(?:auto|allow-hotplug|iface|source)\s/)) {
-            stanzaEnd = j;
-            break;
-          }
-        }
-        break;
-      }
-    }
-
-    // Build stanza lines
-    const stanzaLines: string[] = [];
-    stanzaLines.push(`iface ${bondName} inet manual`);
-    stanzaLines.push(`\tbond-mode ${mode}`);
-    stanzaLines.push(`\tbond-miimon ${miimon}`);
-
-    if (mode === '802.3ad' && lacpRate) {
-      stanzaLines.push(`\tbond-lacp-rate ${lacpRate}`);
-    }
-
-    if (primary) {
-      stanzaLines.push(`\tbond-primary ${primary}`);
-    }
-
-    if (members.length > 0) {
-      stanzaLines.push(`\tslaves ${members.join(' ')}`);
-    }
-
-    if (ipAddress && netmask) {
-      stanzaLines.push(`\taddress ${ipAddress}`);
-      stanzaLines.push(`\tnetmask ${netmask}`);
-    }
-
-    // Check for existing auto line
-    let hasAutoLine = false;
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if ((trimmed.match(/^auto\s+/) || trimmed.match(/^allow-hotplug\s+/)) && trimmed.includes(bondName)) {
-        hasAutoLine = true;
-        break;
-      }
-    }
-
-    const resultLines: string[] = [];
-
-    if (stanzaStart !== -1) {
-      const before = lines.slice(0, stanzaStart);
-      const after = lines.slice(stanzaEnd);
-      resultLines.push(...before);
-      resultLines.push(...stanzaLines);
-      resultLines.push(...after);
-    } else {
-      resultLines.push(...lines);
-
-      if (resultLines.length > 0 && resultLines[resultLines.length - 1].trim() !== '') {
-        resultLines.push('');
-      }
-
-      if (!hasAutoLine) {
-        resultLines.push(`# STAYSUITE_MANAGED — bond ${bondName}`);
-        resultLines.push(`auto ${bondName}`);
-      }
-
-      resultLines.push(...stanzaLines);
-      resultLines.push('');
-    }
-
-    fs.writeFileSync(INTERFACES_FILE, resultLines.join('\n'), 'utf-8');
-    return { success: true, message: `Bond stanza persisted to ${INTERFACES_FILE}` };
-  } catch (err: any) {
-    return { success: false, message: `File write error: ${err.message}` };
-  }
-}
-
-/**
- * Remove bond stanza from /etc/network/interfaces.
- */
-function removeBondFromFile(bondName: string): { success: boolean; message: string } {
-  try {
-    let content = '';
-    try {
-      content = fs.readFileSync(INTERFACES_FILE, 'utf-8');
-    } catch {
-      return { success: true, message: 'No interfaces file to update' };
-    }
-
-    const lines = content.split('\n');
-    const resultLines: string[] = [];
-
-    let i = 0;
-    while (i < lines.length) {
-      const trimmed = lines[i].trim();
-      const ifaceMatch = trimmed.match(/^iface\s+([a-zA-Z0-9._-]+)\s+inet\s+(\S+)/);
-      if (ifaceMatch && ifaceMatch[1] === bondName) {
-        i++;
-        while (i < lines.length) {
-          const nextTrimmed = lines[i].trim();
-          if (nextTrimmed === '' || nextTrimmed.match(/^(?:auto|allow-hotplug|iface|source)\s/)) {
-            break;
-          }
-          i++;
-        }
-        continue;
-      }
-
-      if ((trimmed.match(/^auto\s+/) || trimmed.match(/^allow-hotplug\s+/)) && trimmed.includes(bondName)) {
-        i++;
-        continue;
-      }
-
-      if (trimmed.match(/^#\s*STAYSUITE_MANAGED/) && trimmed.includes(bondName)) {
-        i++;
-        continue;
-      }
-
-      resultLines.push(lines[i]);
-      i++;
-    }
-
-    fs.writeFileSync(INTERFACES_FILE, resultLines.join('\n'), 'utf-8');
-    return { success: true, message: `Bond stanza removed from ${INTERFACES_FILE}` };
-  } catch (err: any) {
-    return { success: false, message: `File write error: ${err.message}` };
-  }
-}
-
-// ────────────────────────────────────────────
-// POST /api/network/os/bonds — Create a bond
-// ────────────────────────────────────────────
+// ──────────────────────────────────────────────
+// POST — Create a bond
+// ──────────────────────────────────────────────
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
@@ -277,57 +109,60 @@ export async function POST(request: NextRequest) {
 
     const results: { step: string; success: boolean; message: string }[] = [];
 
-    // 1. Load bonding kernel module
-    const modprobeOutput = safeExec('sudo modprobe bonding 2>&1');
-    results.push({ step: 'modprobe', success: true, message: modprobeOutput.trim() });
+    // 1. Create the bond at OS level via shell script
+    try {
+      const bondResult = createBond({
+        name,
+        mode: bondMode,
+        miimon: bondMiimon,
+        lacpRate: bondLacpRate as 'slow' | 'fast',
+        primary: primary || undefined,
+        members: safeMembers,
+      });
 
-    // 2. Create bond interface
-    const createOutput = safeExec(`sudo ip link add name ${name} type bond mode ${bondMode} miimon ${bondMiimon} 2>&1`);
-    if (createOutput.includes('already exists')) {
+      if (!bondResult.success) {
+        const errMsg = bondResult.error || 'Unknown error';
+        if (errMsg.toLowerCase().includes('already exists')) {
+          return NextResponse.json(
+            { success: false, error: { code: 'EXISTS', message: `Bond ${name} already exists` } },
+            { status: 409 }
+          );
+        }
+        return NextResponse.json(
+          { success: false, error: { code: 'OS_ERROR', message: errMsg } },
+          { status: 500 }
+        );
+      }
+
+      results.push({ step: 'create', success: true, message: `Bond ${name} created` });
+    } catch (e: any) {
       return NextResponse.json(
-        { success: false, error: { code: 'EXISTS', message: `Bond ${name} already exists` } },
-        { status: 409 }
+        { success: false, error: { code: 'INVALID', message: e.message } },
+        { status: 400 }
       );
     }
-    results.push({ step: 'create', success: true, message: createOutput.trim() });
 
-    // 3. Set LACP rate for 802.3ad mode
-    if (bondMode === '802.3ad') {
-      const lacpOutput = safeExec(`sudo ip link set ${name} type bond lacp_rate ${bondLacpRate} 2>&1`);
-      results.push({ step: 'lacp-rate', success: true, message: lacpOutput.trim() });
+    // 2. Persist to /etc/network/interfaces via shell script
+    try {
+      const persistResult = persistBond({
+        name,
+        mode: bondMode,
+        miimon: bondMiimon,
+        lacpRate: bondLacpRate,
+        primary: primary || undefined,
+        members: safeMembers,
+      });
+
+      if (!persistResult.success) {
+        results.push({ step: 'file-persist', success: false, message: persistResult.error || 'File persistence failed' });
+      } else {
+        results.push({ step: 'file-persist', success: true, message: `Bond stanza persisted to /etc/network/interfaces` });
+      }
+    } catch (e: any) {
+      results.push({ step: 'file-persist', success: false, message: e.message });
     }
 
-    // 4. Set primary member if specified
-    if (primary) {
-      const primaryOutput = safeExec(`sudo ip link set ${name} type bond primary ${primary} 2>&1`);
-      results.push({ step: 'primary', success: true, message: primaryOutput.trim() });
-    }
-
-    // 5. Add member interfaces
-    for (const member of safeMembers) {
-      const memberOutput = safeExec(`sudo ip link set ${member} master ${name} 2>&1`);
-      results.push({ step: `member-${member}`, success: true, message: memberOutput.trim() });
-    }
-
-    // 6. Set bond IP if provided
-    if (ipAddress && netmask) {
-      const cidr = netmaskToCidr(netmask);
-      const ipOutput = safeExec(`sudo ip addr add ${ipAddress}/${cidr} dev ${name} 2>&1`);
-      results.push({ step: 'ip-address', success: true, message: ipOutput.trim() });
-    }
-
-    // 7. Bring bond up
-    const upOutput = safeExec(`sudo ip link set ${name} up 2>&1`);
-    results.push({ step: 'up', success: true, message: upOutput.trim() });
-
-    // 8. Persist to /etc/network/interfaces
-    const fileResult = persistBondToFile(
-      name, bondMode, safeMembers, bondMiimon, bondLacpRate,
-      primary, ipAddress, netmask,
-    );
-    results.push({ step: 'file-persist', ...fileResult });
-
-    // 9. Persist to DB (BondConfig + BondMember)
+    // 3. Persist to DB (BondConfig + BondMember)
     try {
       const bondConfig = await db.bondConfig.create({
         data: {
@@ -396,14 +231,15 @@ export async function POST(request: NextRequest) {
   }
 }
 
-// ────────────────────────────────────────────
-// DELETE /api/network/os/bonds — Delete a bond
-// ────────────────────────────────────────────
+// ──────────────────────────────────────────────
+// DELETE — Delete a bond
+// ──────────────────────────────────────────────
 export async function DELETE(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
     let name = searchParams.get('name');
 
+    // Also try to parse from body if not in query
     if (!name) {
       try {
         const body = await request.json();
@@ -429,35 +265,33 @@ export async function DELETE(request: NextRequest) {
 
     const results: { step: string; success: boolean; message: string }[] = [];
 
-    // 1. Get current members from the bond
-    const linkOutput = safeExec(`ip -o link show master ${name} 2>/dev/null`);
-    const currentMembers: string[] = [];
-    for (const line of linkOutput.trim().split('\n').filter(Boolean)) {
-      const match = line.match(/:\s*(\S+):/);
-      if (match) {
-        currentMembers.push(match[1]);
+    // 1. Delete the bond at OS level via shell script
+    try {
+      const bondResult = deleteBond(name);
+
+      if (!bondResult.success) {
+        results.push({ step: 'delete', success: false, message: bondResult.error || 'OS deletion failed' });
+      } else {
+        results.push({ step: 'delete', success: true, message: `Bond ${name} deleted` });
       }
+    } catch (e: any) {
+      results.push({ step: 'delete', success: false, message: e.message });
     }
 
-    // 2. Remove members from the bond
-    for (const member of currentMembers) {
-      const memberOutput = safeExec(`sudo ip link set ${member} nomaster 2>&1`);
-      results.push({ step: `remove-member-${member}`, success: true, message: memberOutput.trim() });
+    // 2. Remove from /etc/network/interfaces via shell script
+    try {
+      const persistResult = removePersistedBond(name);
+
+      if (!persistResult.success) {
+        results.push({ step: 'file-remove', success: false, message: persistResult.error || 'File removal failed' });
+      } else {
+        results.push({ step: 'file-remove', success: true, message: `Bond stanza removed from /etc/network/interfaces` });
+      }
+    } catch (e: any) {
+      results.push({ step: 'file-remove', success: false, message: e.message });
     }
 
-    // 3. Bring bond down
-    const downOutput = safeExec(`sudo ip link set ${name} down 2>&1`);
-    results.push({ step: 'down', success: true, message: downOutput.trim() });
-
-    // 4. Delete the bond
-    const delOutput = safeExec(`sudo ip link del ${name} 2>&1`);
-    results.push({ step: 'delete', success: true, message: delOutput.trim() });
-
-    // 5. Remove from /etc/network/interfaces
-    const fileResult = removeBondFromFile(name);
-    results.push({ step: 'file-remove', ...fileResult });
-
-    // 6. Remove from DB
+    // 3. Remove from DB
     try {
       // Delete BondMember records first
       const bondConfig = await db.bondConfig.findFirst({
