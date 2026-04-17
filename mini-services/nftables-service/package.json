@@ -1,0 +1,13 @@
+{
+  "name": "nftables-service",
+  "version": "1.0.0",
+  "description": "nftables Firewall Management Service for StaySuite HospitalityOS",
+  "type": "module",
+  "scripts": {
+    "dev": "bun --hot index.ts",
+    "start": "bun index.ts"
+  },
+  "dependencies": {
+    "hono": "^4.7.0"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "name": "freeradius-service",
+  "version": "1.0.0",
+  "description": "FreeRADIUS Management Service for StaySuite",
+  "type": "module",
+  "scripts": {
+    "dev": "bun --hot index.ts",
+    "start": "bun index.ts"
+  },
+  "dependencies": {
+    "hono": "^4.6.0"
+  }
+}

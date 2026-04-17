@@ -36,7 +36,6 @@ yarn-error.log*
 # vercel
 .vercel
 
-
 # typescript
 *.tsbuildinfo
 next-env.d.ts
@@ -50,5 +49,148 @@ test
 prompt
 
 server.log
-# Skills directory
+
+# ==========================================
+# Z.AI Sandbox — Environment & Skill files
+# ==========================================
+
+# Z.AI skill directories (all AI capabilities injected by sandbox)
 /skills/
+/agent-browser/
+/ASR/
+/LLM/
+/TTS/
+/VLM/
+/docx/
+/pdf/
+/pptx/
+/ppt/
+/xlsx/
+/charts/
+/finance/
+/image-generation/
+/video-generation/
+/video-understand/
+/skill-creator/
+/skill-vetter/
+/fullstack-dev/
+/dream-interpreter/
+/mindfulness-meditation/
+/podcast-generate/
+/marketing-mode/
+/interview-designer/
+/market-research-reports/
+/seo-content-writer/
+/qingyan-research/
+/gift-evaluator/
+/get-fortune-analysis/
+/multi-search-engine/
+/image-edit/
+/image-understand/
+/coding-agent/
+/content-strategy/
+/contentanalysis/
+/ai-news-collectors/
+/aminer-open-academic/
+/auto-target-tracker/
+/blog-writer/
+/stock-analysis-skill/
+/storyboard-manager/
+/ui-ux-pro-max/
+/visual-design-foundations/
+/writing-plans/
+/skill-finder-cn/
+/web-reader/
+/web-search/
+/web-shader-extractor/
+
+# Z.AI sandbox environment files
+.zscripts/
+.accesslog
+.stats
+.dev-pid
+dev.pid
+dev.sh
+build.sh
+description
+COMMIT_EDITMSG
+HEAD
+keep-alive.pid
+keep-alive.sh
+launch-server.sh
+mini-services-build.sh
+server-watchdog.sh
+start.sh
+
+# Z.AI development context & QA artifacts
+/agent-ctx/
+/download/
+/worklog.md
+
+# Git internal files (should never be tracked)
+/objects/
+/refs/
+/info/
+/index/
+/logs/
+
+# Database binary files
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+/db/*.db
+/db/*.db-shm
+/db/*.db-wal
+
+# FreeRADIUS local config (runtime extracted)
+/freeradius-local/
+
+# DNS local config (runtime generated)
+/dns-local/
+
+# KEA DHCP local config (runtime extracted)
+/kea-local/
+
+# Stale worklog / test files
+/worklog-*.md
+/test-write
+
+# Lock file backups
+*.bak
+
+# QA screenshots
+/download/
+
+# Duplicate root-level files (canonically in src/)
+/i18n/
+/messages/
+/*.json
+!/src/
+
+# Misc z.ai artifacts
+cryptsk_stay_suite_master_prompt_full_structured.md
+website-development-prompt.md
+postgresql-migration-notes.md
+
+# Duplicate service directories (canonical location: mini-services/)
+/availability-service/
+/realtime-service/
+/freeradius-service/
+
+# Duplicate docs (canonical location: root-level and product-docs/)
+/docs/
+
+# Sandbox-specific scripts (use mini-services/start-services.sh instead)
+/start-services.sh
+/mini-services-install.sh
+/mini-services-start.sh
+
+# Sandbox upload artifacts
+/upload/
+
+# Duplicate scripts dir
+/scripts/
+
+# Sandbox websocket example (use examples/ instead)
+/websocket/

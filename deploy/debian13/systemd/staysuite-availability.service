@@ -1,0 +1,55 @@
+# =============================================================================
+# StaySuite HospitalityOS - Availability WebSocket Service
+# =============================================================================
+# Handles room availability queries, inventory locking, and rate checks
+# via Socket.IO on port 3002
+#
+# Install:
+#   sudo cp staysuite-availability.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now staysuite-availability
+#
+# Manage:
+#   sudo systemctl restart staysuite-availability
+#   journalctl -u staysuite-availability -f
+# =============================================================================
+
+[Unit]
+Description=StaySuite HospitalityOS - Availability WebSocket Service (port 3002)
+Documentation=https://github.com/staysuite/hospitality-os
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=staysuite
+Group=staysuite
+WorkingDirectory=/opt/staysuite/mini-services/availability-service
+EnvironmentFile=/opt/staysuite/.env
+ExecStart=/usr/local/bin/bun --hot server.ts
+PIDFile=/opt/staysuite/mini-services/availability-service/.availability.pid
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=30
+TimeoutStopSec=15
+
+# --- Security Hardening ---
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/staysuite/mini-services/availability-service /tmp
+PrivateTmp=true
+
+# --- Resource Limits ---
+LimitNOFILE=65535
+LimitNPROC=1024
+MemoryHigh=512M
+MemoryMax=1G
+
+# --- Logging ---
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=staysuite-availability
+
+[Install]
+WantedBy=multi-user.target

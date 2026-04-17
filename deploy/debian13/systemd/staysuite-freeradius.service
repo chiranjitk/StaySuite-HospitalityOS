@@ -1,0 +1,55 @@
+# =============================================================================
+# StaySuite HospitalityOS - FreeRADIUS Management Service
+# =============================================================================
+# Provides WiFi AAA management, RADIUS server configuration, and
+# authentication proxy via Socket.IO and REST API on port 3010
+#
+# Install:
+#   sudo cp staysuite-freeradius.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now staysuite-freeradius
+#
+# Manage:
+#   sudo systemctl restart staysuite-freeradius
+#   journalctl -u staysuite-freeradius -f
+# =============================================================================
+
+[Unit]
+Description=StaySuite HospitalityOS - FreeRADIUS Management Service (port 3010)
+Documentation=https://github.com/staysuite/hospitality-os
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=staysuite
+Group=staysuite
+WorkingDirectory=/opt/staysuite/mini-services/freeradius-service
+EnvironmentFile=/opt/staysuite/.env
+ExecStart=/usr/local/bin/bun --hot index.ts
+PIDFile=/opt/staysuite/mini-services/freeradius-service/.freeradius.pid
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=30
+TimeoutStopSec=15
+
+# --- Security Hardening ---
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/staysuite/mini-services/freeradius-service /tmp
+PrivateTmp=true
+
+# --- Resource Limits ---
+LimitNOFILE=65535
+LimitNPROC=1024
+MemoryHigh=512M
+MemoryMax=1G
+
+# --- Logging ---
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=staysuite-freeradius
+
+[Install]
+WantedBy=multi-user.target

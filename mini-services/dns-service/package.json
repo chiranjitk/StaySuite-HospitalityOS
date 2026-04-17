@@ -1,0 +1,13 @@
+{
+  "name": "dns-service",
+  "version": "1.0.0",
+  "description": "DNS (dnsmasq) Management Service for StaySuite",
+  "type": "module",
+  "scripts": {
+    "dev": "bun --hot index.ts",
+    "start": "bun index.ts"
+  },
+  "dependencies": {
+    "hono": "^4.6.0"
+  }
+}
