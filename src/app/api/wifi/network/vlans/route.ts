@@ -87,6 +87,7 @@ export async function POST(request: NextRequest) {
     const {
       propertyId,
       parentInterfaceId,
+      parentInterfaceName,
       vlanId,
       subInterface,
       description,
@@ -94,16 +95,61 @@ export async function POST(request: NextRequest) {
       enabled = true,
     } = body;
 
-    if (!propertyId || !parentInterfaceId || vlanId === undefined || !subInterface) {
+    if (!propertyId || !vlanId === undefined || !subInterface) {
       return NextResponse.json(
         {
           success: false,
           error: {
             code: 'VALIDATION_ERROR',
-            message: 'Missing required fields: propertyId, parentInterfaceId, vlanId, subInterface',
+            message: 'Missing required fields: propertyId, vlanId, subInterface',
           },
         },
         { status: 400 },
+      );
+    }
+
+    // Resolve parent interface: try by CUID id first, then by name, then auto-create
+    let parentId = parentInterfaceId;
+    if (!parentId && parentInterfaceName) {
+      const byName = await db.networkInterface.findFirst({
+        where: { name: parentInterfaceName, tenantId },
+      });
+      parentId = byName?.id || null;
+    }
+
+    // If still no parent found, try the id field as a name (frontend may send interface name as id)
+    if (!parentId && parentInterfaceId) {
+      const byName = await db.networkInterface.findFirst({
+        where: { name: parentInterfaceId, tenantId },
+      });
+      if (byName) {
+        parentId = byName.id;
+      }
+    }
+
+    // Auto-create parent NetworkInterface if it doesn't exist in DB yet
+    if (!parentId) {
+      const ifaceName = parentInterfaceName || parentInterfaceId || subInterface.split('.')[0];
+      if (ifaceName) {
+        const created = await db.networkInterface.create({
+          data: {
+            tenantId,
+            propertyId,
+            name: ifaceName,
+            type: 'ethernet',
+            status: 'up',
+            hwAddress: '',
+            mtu: 1500,
+          },
+        });
+        parentId = created.id;
+      }
+    }
+
+    if (!parentId) {
+      return NextResponse.json(
+        { success: false, error: { code: 'NOT_FOUND', message: 'Parent interface not found and could not be created' } },
+        { status: 404 },
       );
     }
 
@@ -134,23 +180,11 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Verify parent interface exists
-    const parent = await db.networkInterface.findFirst({
-      where: { id: parentInterfaceId, tenantId },
-    });
-
-    if (!parent) {
-      return NextResponse.json(
-        { success: false, error: { code: 'NOT_FOUND', message: 'Parent interface not found' } },
-        { status: 404 },
-      );
-    }
-
     const vlan = await db.vlanConfig.create({
       data: {
         tenantId,
         propertyId,
-        parentInterfaceId,
+        parentInterfaceId: parentId,
         vlanId: parseInt(vlanId, 10),
         subInterface,
         description,
