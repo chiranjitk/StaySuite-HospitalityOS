@@ -178,6 +178,7 @@ export async function POST(request: NextRequest) {
     const vlan = await db.vlanConfig.create({
       data: {
         tenantId,
+        tenant: { connect: { id: tenantId } },
         property: { connect: { id: propertyId } },
         parentInterface: {
           connectOrCreate: {
@@ -189,6 +190,7 @@ export async function POST(request: NextRequest) {
             },
             create: {
               tenantId,
+              tenant: { connect: { id: tenantId } },
               property: { connect: { id: propertyId } },
               name: parentIfaceName,
               type: 'ethernet',

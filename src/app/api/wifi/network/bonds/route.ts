@@ -85,7 +85,8 @@ export async function POST(request: NextRequest) {
     const bond = await db.bondConfig.create({
       data: {
         tenantId,
-        propertyId,
+        tenant: { connect: { id: tenantId } },
+        property: { connect: { id: propertyId } },
         name,
         mode,
         miimon,

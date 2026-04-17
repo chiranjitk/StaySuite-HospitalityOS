@@ -142,7 +142,8 @@ export async function POST(request: NextRequest) {
     const iface = await db.networkInterface.create({
       data: {
         tenantId,
-        propertyId,
+        tenant: { connect: { id: tenantId } },
+        property: { connect: { id: propertyId } },
         name,
         type,
         hwAddress,

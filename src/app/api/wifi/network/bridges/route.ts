@@ -82,7 +82,8 @@ export async function POST(request: NextRequest) {
     const bridge = await db.bridgeConfig.create({
       data: {
         tenantId,
-        propertyId,
+        tenant: { connect: { id: tenantId } },
+        property: { connect: { id: propertyId } },
         name,
         memberInterfaces: members,
         stpEnabled,

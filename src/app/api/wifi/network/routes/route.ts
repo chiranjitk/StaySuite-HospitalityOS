@@ -74,7 +74,8 @@ export async function POST(request: NextRequest) {
     const route = await db.staticRoute.create({
       data: {
         tenantId,
-        propertyId,
+        tenant: { connect: { id: tenantId } },
+        property: { connect: { id: propertyId } },
         name,
         destination,
         gateway,
