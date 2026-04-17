@@ -54,15 +54,21 @@ export async function GET(
       });
     }
 
-    // 2. Fallback to database
-    const dbRole = await db.interfaceRole.findUnique({
-      where: {
-        propertyId_interfaceId: {
-          propertyId: PROPERTY_ID,
-          interfaceId: name,
-        },
-      },
+    // 2. Fallback to database — need to find NetworkInterface by name first
+    const dbIface = await db.networkInterface.findUnique({
+      where: { propertyId_name: { propertyId: PROPERTY_ID, name } },
     });
+    let dbRole = null;
+    if (dbIface) {
+      dbRole = await db.interfaceRole.findUnique({
+        where: {
+          propertyId_interfaceId: {
+            propertyId: PROPERTY_ID,
+            interfaceId: dbIface.id,
+          },
+        },
+      });
+    }
 
     if (dbRole) {
       return NextResponse.json({
@@ -146,19 +152,35 @@ export async function PUT(
       );
     }
 
-    // 2. Upsert to database
+    // 2. Upsert to database — ensure NetworkInterface record exists first
     try {
+      // Find or create the NetworkInterface record so FK constraint is satisfied
+      let dbIface = await db.networkInterface.findUnique({
+        where: { propertyId_name: { propertyId: PROPERTY_ID, name } },
+      });
+      if (!dbIface) {
+        dbIface = await db.networkInterface.create({
+          data: {
+            tenantId: TENANT_ID,
+            propertyId: PROPERTY_ID,
+            name,
+            type: 'ethernet', // default; will be corrected when OS data is synced
+            status: 'up',
+          },
+        });
+      }
+
       await db.interfaceRole.upsert({
         where: {
           propertyId_interfaceId: {
             propertyId: PROPERTY_ID,
-            interfaceId: name,
+            interfaceId: dbIface.id,
           },
         },
         create: {
           tenantId: TENANT_ID,
           propertyId: PROPERTY_ID,
-          interfaceId: name,
+          interfaceId: dbIface.id,
           role,
           priority: safePriority,
           isPrimary: safeIsPrimary,
@@ -238,17 +260,22 @@ export async function DELETE(
     // 2. Remove from database
     let dbDeleted = false;
     try {
-      const existing = await db.interfaceRole.findUnique({
-        where: {
-          propertyId_interfaceId: {
-            propertyId: PROPERTY_ID,
-            interfaceId: name,
-          },
-        },
+      const dbIface = await db.networkInterface.findUnique({
+        where: { propertyId_name: { propertyId: PROPERTY_ID, name } },
       });
-      if (existing) {
-        await db.interfaceRole.delete({ where: { id: existing.id } });
-        dbDeleted = true;
+      if (dbIface) {
+        const existing = await db.interfaceRole.findUnique({
+          where: {
+            propertyId_interfaceId: {
+              propertyId: PROPERTY_ID,
+              interfaceId: dbIface.id,
+            },
+          },
+        });
+        if (existing) {
+          await db.interfaceRole.delete({ where: { id: existing.id } });
+          dbDeleted = true;
+        }
       }
     } catch (dbErr: any) {
       console.error(

@@ -287,19 +287,34 @@ export async function POST(
       const fileResult = persistIPConfigToFile(name, mode, body.ipAddress, body.netmask, body.gateway);
       results.push({ step: 'file-persist', ...fileResult });
 
-      // 3. Store in database (InterfaceConfig)
+      // 3. Store in database (InterfaceConfig) — ensure NetworkInterface exists for FK
       try {
+        let dbIface = await db.networkInterface.findUnique({
+          where: { propertyId_name: { propertyId: PROPERTY_ID, name } },
+        });
+        if (!dbIface) {
+          dbIface = await db.networkInterface.create({
+            data: {
+              tenantId: TENANT_ID,
+              propertyId: PROPERTY_ID,
+              name,
+              type: 'ethernet',
+              status: 'up',
+            },
+          });
+        }
+
         await db.interfaceConfig.upsert({
           where: {
             propertyId_interfaceId: {
               propertyId: PROPERTY_ID,
-              interfaceId: name,
+              interfaceId: dbIface.id,
             },
           },
           create: {
             tenantId: TENANT_ID,
             propertyId: PROPERTY_ID,
-            interfaceId: name,
+            interfaceId: dbIface.id,
             mode,
             ipAddress: body.ipAddress || null,
             netmask: body.netmask || null,

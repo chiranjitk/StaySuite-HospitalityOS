@@ -44,10 +44,11 @@ export async function GET() {
       source: 'os' | 'database';
     }>();
 
-    // DB entries first (lower priority)
+    // DB entries first (lower priority) — include the interface name from the relation
     for (const dbRole of dbRoles) {
-      merged.set(dbRole.interfaceId, {
-        interfaceName: dbRole.interfaceId,
+      const iface = await db.networkInterface.findUnique({ where: { id: dbRole.interfaceId } });
+      merged.set(iface?.name || dbRole.interfaceId, {
+        interfaceName: iface?.name || dbRole.interfaceId,
         role: dbRole.role,
         priority: dbRole.priority,
         isPrimary: dbRole.isPrimary,
@@ -160,20 +161,35 @@ export async function PUT(request: NextRequest) {
         // 1. Write to OS
         const osResult = await writeInterfaceRoleToOS(ifaceName, role, priority);
 
-        // 2. Upsert to DB
+        // 2. Upsert to DB — ensure NetworkInterface exists for FK
         let dbSuccess = false;
         try {
+          let dbIface = await db.networkInterface.findUnique({
+            where: { propertyId_name: { propertyId: PROPERTY_ID, name: ifaceName } },
+          });
+          if (!dbIface) {
+            dbIface = await db.networkInterface.create({
+              data: {
+                tenantId: TENANT_ID,
+                propertyId: PROPERTY_ID,
+                name: ifaceName,
+                type: 'ethernet',
+                status: 'up',
+              },
+            });
+          }
+
           await db.interfaceRole.upsert({
             where: {
               propertyId_interfaceId: {
                 propertyId: PROPERTY_ID,
-                interfaceId: ifaceName,
+                interfaceId: dbIface.id,
               },
             },
             create: {
               tenantId: TENANT_ID,
               propertyId: PROPERTY_ID,
-              interfaceId: ifaceName,
+              interfaceId: dbIface.id,
               role,
               priority,
               isPrimary: entry.isPrimary === true,
