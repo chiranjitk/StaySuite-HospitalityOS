@@ -245,21 +245,112 @@ async function keaHttpCommand(command: Record<string, any>): Promise<any[] | nul
   }
 }
 
+function isCtrlAgentRunning(): boolean {
+  try {
+    const result = execSync('ps aux | grep -E "[k]ea-ctrl-agent"', { encoding: 'utf-8' });
+    return result.trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
+function startCtrlAgent(): { success: boolean; message: string; pid?: number } {
+  if (isCtrlAgentRunning()) {
+    return { success: true, message: 'kea-ctrl-agent is already running' };
+  }
+
+  // Find the ctrl-agent config path
+  const configPaths = [
+    CTRL_AGENT.configFilePath,
+    '/etc/kea/kea-ctrl-agent.conf',
+  ].filter(Boolean);
+
+  let configPath = '';
+  for (const cp of configPaths) {
+    try {
+      if (fs.existsSync(cp)) { configPath = cp; break; }
+    } catch {}
+  }
+
+  if (!configPath) {
+    return { success: false, message: 'kea-ctrl-agent config file not found' };
+  }
+
+  try {
+    // Check if kea-ctrl-agent binary exists
+    execSync('which kea-ctrl-agent 2>/dev/null', { encoding: 'utf-8' });
+  } catch {
+    return { success: false, message: 'kea-ctrl-agent binary not found. Install with: dnf install kea-ctrl-agent' };
+  }
+
+  try {
+    const proc = Bun.spawn(['sh', '-c', `kea-ctrl-agent -c ${configPath}`], {
+      detached: true,
+      stdin: 'ignore',
+      stdout: 'ignore',
+      stderr: 'ignore',
+    });
+    proc.unref();
+
+    // Wait for the process to appear and the HTTP port to be listening
+    const startTime = Date.now();
+    while (Date.now() - startTime < 5000) {
+      if (isCtrlAgentRunning()) {
+        // Give an extra second for the HTTP server to bind
+        execSync('sleep 1');
+        // Verify the HTTP port is actually listening
+        try {
+          const check = execSync(`ss -tlnp 2>/dev/null | grep ':${CTRL_AGENT.httpPort}' | grep -c 'LISTEN'`, { encoding: 'utf-8' }).trim();
+          if (parseInt(check) > 0) {
+            return { success: true, message: `kea-ctrl-agent started successfully on port ${CTRL_AGENT.httpPort}`, pid: proc.pid };
+          }
+        } catch {}
+      }
+      execSync('sleep 0.3');
+    }
+
+    // Process may be running but port not bound yet — still count as success
+    if (isCtrlAgentRunning()) {
+      return { success: true, message: 'kea-ctrl-agent started (port binding may take a moment)', pid: proc.pid };
+    }
+
+    return { success: false, message: 'kea-ctrl-agent failed to start within timeout' };
+  } catch (error) {
+    return { success: false, message: `Failed to start kea-ctrl-agent: ${error}` };
+  }
+}
+
+function stopCtrlAgent(): { success: boolean; message: string } {
+  if (!isCtrlAgentRunning()) {
+    return { success: true, message: 'kea-ctrl-agent is not running' };
+  }
+  try {
+    execSync('pkill -f kea-ctrl-agent 2>/dev/null || true');
+    const startTime = Date.now();
+    while (Date.now() - startTime < 3000) {
+      if (!isCtrlAgentRunning()) {
+        return { success: true, message: 'kea-ctrl-agent stopped successfully' };
+      }
+      execSync('sleep 0.5');
+    }
+    try { execSync('pkill -9 -f kea-ctrl-agent 2>/dev/null'); } catch {}
+    return { success: true, message: 'kea-ctrl-agent force-stopped' };
+  } catch (error) {
+    return { success: false, message: `Failed to stop kea-ctrl-agent: ${error}` };
+  }
+}
+
 async function keaHttpPing(): Promise<boolean> {
   // First check if ctrl-agent process is running
-  try {
-    const ctrlAgentRunning = execSync('ps aux | grep -E "[k]ea-ctrl-agent"', { encoding: 'utf-8' }).trim().length > 0;
-    if (!ctrlAgentRunning) {
-      log.warn('kea-ctrl-agent process is not running — attempting to start it');
-      try {
-        execSync('kea-ctrl-agent -c /etc/kea/kea-ctrl-agent.conf &', { encoding: 'utf-8', timeout: 3000 });
-        execSync('sleep 2');
-        log.info('kea-ctrl-agent start attempted');
-      } catch (e) {
-        log.warn(`Failed to start kea-ctrl-agent: ${e}`);
-      }
+  if (!isCtrlAgentRunning()) {
+    log.info('kea-ctrl-agent not running — attempting auto-start');
+    const result = startCtrlAgent();
+    if (!result.success) {
+      log.info(`kea-ctrl-agent auto-start skipped: ${result.message}`);
+      return false;
     }
-  } catch {}
+    log.info(`kea-ctrl-agent auto-start: ${result.message}`);
+  }
 
   const resp = await keaHttpCommand({ command: 'status-get' });
   return resp !== null && resp[0]?.result === 0;
@@ -312,7 +403,7 @@ async function keaPing(): Promise<boolean> {
   if (useHttpApi) {
     const reachable = await keaHttpPing();
     if (reachable) return true;
-    log.warn('Ctrl-agent HTTP ping failed — kea-ctrl-agent may not be running. Try: systemctl start kea-ctrl-agent or kea-ctrl-agent -c /etc/kea/kea-ctrl-agent.conf');
+    log.info('Ctrl-agent HTTP unavailable, switching to unix socket fallback');
     useHttpApi = false;
   }
   return keaSocketPing();
@@ -322,7 +413,7 @@ async function keaCommand(command: Record<string, any>): Promise<any[] | null> {
   if (useHttpApi) {
     const resp = await keaHttpCommand(command);
     if (resp !== null) return resp;
-    log.warn(`Ctrl-agent HTTP command '${command.command}' failed, falling back to unix socket`);
+    log.info(`Ctrl-agent HTTP command '${command.command}' failed, using unix socket`);
     useHttpApi = false;
   }
   return keaSocketCommand(command);
@@ -456,8 +547,19 @@ async function updateCache() {
   }
 }
 
-// Initial cache update (async) - also auto-start Kea if not running
+// Initial cache update (async) - also auto-start ctrl-agent and Kea if not running
 (async () => {
+  // Start ctrl-agent first so kea-dhcp4 can connect to it
+  if (CTRL_AGENT.available && !isCtrlAgentRunning()) {
+    log.info('kea-ctrl-agent not running, auto-starting...');
+    const result = startCtrlAgent();
+    if (result.success) {
+      log.info('kea-ctrl-agent auto-started', { pid: result.pid });
+    } else {
+      log.info('kea-ctrl-agent auto-start skipped', { message: result.message });
+    }
+  }
+
   if (!isKeaProcessRunning()) {
     log.info('Kea DHCP4 not running, auto-starting...');
     const result = startKeaServer();
@@ -630,7 +732,16 @@ app.get('/health', (c) => {
     uptime: Math.floor((Date.now() - startTime) / 1000),
     port: PORT,
     memoryUsage: process.memoryUsage(),
-    kea: { running: cachedKeaRunning, socketPath: RESOLVED_SOCKET_PATH, leaseFile: KEA_LEASES_FILE, subnetCount: cachedSubnetCount, leaseCount: cachedLeaseCount, ctrlAgent: CTRL_AGENT.available ? `http://${CTRL_AGENT.httpHost}:${CTRL_AGENT.httpPort}` : 'unavailable', commMethod: useHttpApi ? 'http' : 'unix-socket' }
+    kea: {
+      running: cachedKeaRunning,
+      socketPath: RESOLVED_SOCKET_PATH,
+      leaseFile: KEA_LEASES_FILE,
+      subnetCount: cachedSubnetCount,
+      leaseCount: cachedLeaseCount,
+      ctrlAgent: CTRL_AGENT.available ? `http://${CTRL_AGENT.httpHost}:${CTRL_AGENT.httpPort}` : 'unavailable',
+      ctrlAgentRunning: isCtrlAgentRunning(),
+      commMethod: useHttpApi ? 'http' : 'unix-socket'
+    }
   });
 });
 
@@ -677,18 +788,25 @@ app.get('/api/status', async (c) => {
       currentInterfaces,
       systemInterfaces,
       ctrlAgent: CTRL_AGENT.available ? `http://${CTRL_AGENT.httpHost}:${CTRL_AGENT.httpPort}` : 'unavailable',
+      ctrlAgentRunning: isCtrlAgentRunning(),
       commMethod: useHttpApi ? 'http' : 'unix-socket',
     }
   });
 });
 
 app.post('/api/service/start', async (c) => {
+  // Start ctrl-agent first
+  let ctrlAgentResult = { success: false, message: '' };
+  if (CTRL_AGENT.available) {
+    ctrlAgentResult = startCtrlAgent();
+  }
   const result = startKeaServer();
   await updateCache();
   return c.json({
     success: result.success,
     message: result.message,
     pid: result.pid,
+    ctrlAgent: ctrlAgentResult.success ? 'started' : ctrlAgentResult.message,
     status: cachedKeaRunning ? 'running' : 'stopped'
   });
 });
@@ -706,12 +824,18 @@ app.post('/api/service/stop', async (c) => {
 app.post('/api/service/restart', async (c) => {
   stopKeaServer();
   await new Promise(r => setTimeout(r, 1000));
+  // Start ctrl-agent first
+  let ctrlAgentResult = { success: false, message: '' };
+  if (CTRL_AGENT.available && !isCtrlAgentRunning()) {
+    ctrlAgentResult = startCtrlAgent();
+  }
   const result = startKeaServer();
   await updateCache();
   return c.json({
     success: result.success,
     message: result.message,
     pid: result.pid,
+    ctrlAgent: ctrlAgentResult.success ? 'started' : ctrlAgentResult.message,
     status: cachedKeaRunning ? 'running' : 'stopped'
   });
 });
