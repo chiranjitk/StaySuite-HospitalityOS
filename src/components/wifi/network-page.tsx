@@ -1059,7 +1059,16 @@ export default function NetworkPage() {
   };
 
   const handleAddVlan = async () => {
-    if (!newVlan.vlanId || !newVlan.description.trim()) return;
+    console.log('[VLAN ADD] newVlan state:', JSON.stringify(newVlan));
+    if (!newVlan.vlanId || !newVlan.parentInterface) {
+      toast({ title: 'Missing Fields', description: 'VLAN ID and Parent Interface are required.', variant: 'destructive' });
+      return;
+    }
+    if (!newVlan.description.trim()) {
+      toast({ title: 'Missing Description', description: 'Please enter a description for this VLAN.', variant: 'destructive' });
+      return;
+    }
+    console.log('[VLAN ADD] Validation passed, calling APIs...');
     try {
       // Create VLAN via OS API first (real ip link command)
       if (osDataLoaded) {
