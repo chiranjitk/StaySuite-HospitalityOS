@@ -7,7 +7,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { requirePermission } from '@/lib/auth/tenant-context';
-import { createBridge, persistBridge } from '@/lib/network';
+// OS-level bridge creation and file persistence are handled by the frontend
+// calling /api/network/os/bridges before this route.
 
 // GET /api/wifi/network/bridges - List all bridge configs
 export async function GET(request: NextRequest) {
@@ -80,40 +81,11 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Parse member interfaces for shell script
+    // Parse member interfaces
     const parsedMembers = JSON.parse(members);
 
-    // Execute OS-level bridge creation via shell script
-    try {
-      const osResult = createBridge({
-        name,
-        stp: stpEnabled,
-        forwardDelay,
-        members: parsedMembers,
-      });
-      if (!osResult.success) {
-        return NextResponse.json(
-          { success: false, error: { code: 'OS_ERROR', message: `Failed to create bridge at OS level: ${osResult.error}` } },
-          { status: 500 },
-        );
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return NextResponse.json(
-        { success: false, error: { code: 'OS_ERROR', message: `Failed to create bridge at OS level: ${msg}` } },
-        { status: 500 },
-      );
-    }
-
-    // Persist to /etc/network/interfaces
-    try {
-      const persistResult = persistBridge({ name, stp: stpEnabled, forwardDelay, members: parsedMembers });
-      if (!persistResult.success) {
-        console.warn(`Bridge persistence warning for ${name}:`, persistResult.error);
-      }
-    } catch (err) {
-      console.warn(`Bridge persistence error for ${name}:`, err instanceof Error ? err.message : err);
-    }
+    // OS-level bridge creation and file persistence are handled by the frontend
+    // calling /api/network/os/bridges before this route.
 
     const bridge = await db.bridgeConfig.create({
       data: {

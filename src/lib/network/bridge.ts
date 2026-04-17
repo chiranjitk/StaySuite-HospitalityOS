@@ -7,6 +7,8 @@
 import {
   executeScript,
   sanitizeInterfaceName,
+  validateIPv4,
+  validateNetmask,
   ScriptResult,
 } from './executor';
 
@@ -15,6 +17,8 @@ export interface BridgeCreateParams {
   stp?: boolean;
   forwardDelay?: number;
   members?: string[];
+  ipAddress?: string;
+  netmask?: string;
 }
 
 export interface BridgeInfo {
@@ -36,6 +40,9 @@ export interface BridgeCreateResult {
   forwardDelay: number;
   members: string[];
   state: string;
+  ipAddress?: string;
+  netmask?: string;
+  cidr?: number;
 }
 
 export interface BridgeDeleteResult {
@@ -68,6 +75,15 @@ export function createBridge(params: BridgeCreateParams): ScriptResult<BridgeCre
   if (members.length > 0) {
     members.forEach((m) => sanitizeInterfaceName(m));
     args.push('--members', members.join(','));
+  }
+
+  if (params.ipAddress) {
+    validateIPv4(params.ipAddress);
+    args.push('--ip', params.ipAddress);
+  }
+  if (params.netmask) {
+    validateNetmask(params.netmask);
+    args.push('--netmask', params.netmask);
   }
 
   return executeScript<BridgeCreateResult>('bridge.sh', args);

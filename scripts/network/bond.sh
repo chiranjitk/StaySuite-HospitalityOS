@@ -1,7 +1,7 @@
 #!/bin/bash
 # bond.sh — Bond interface management for StaySuite-HospitalityOS
 # Usage:
-#   bond.sh create <name> <mode> [--miimon <N>] [--lacp-rate <slow|fast>] [--primary <iface>] [--members <m1>,<m2>]
+#   bond.sh create <name> <mode> [--miimon <N>] [--lacp-rate <slow|fast>] [--primary <iface>] [--members <m1>,<m2>] [--ip IP] [--netmask MASK]
 #   bond.sh delete <name>
 #   bond.sh list
 
@@ -37,6 +37,8 @@ validate_bond_mode() {
 # Parse bond options
 ###############################################################################
 parse_bond_options() {
+    BOND_IP_ADDRESS=""
+    BOND_NETMASK=""
     BOND_MIIMON="${DEFAULT_MIIMON}"
     BOND_LACP_RATE="${DEFAULT_LACP_RATE}"
     BOND_PRIMARY=""
@@ -64,6 +66,14 @@ parse_bond_options() {
                 BOND_MEMBERS="$2"
                 shift 2
                 ;;
+            --ip)
+                BOND_IP_ADDRESS="$2"
+                shift 2
+                ;;
+            --netmask)
+                BOND_NETMASK="$2"
+                shift 2
+                ;;
             *)
                 shift
                 ;;
@@ -75,6 +85,8 @@ BOND_MIIMON=""
 BOND_LACP_RATE=""
 BOND_PRIMARY=""
 BOND_MEMBERS=""
+BOND_IP_ADDRESS=""
+BOND_NETMASK=""
 
 ###############################################################################
 # bond_create <name> <mode> [options...]
@@ -168,8 +180,31 @@ bond_create() {
         return 1
     fi
 
-    log_info "Bond '${name}' created (mode=${mode}, miimon=${BOND_MIIMON})"
-    json_output true "{\"name\":\"${name}\",\"mode\":\"${mode}\",\"miimon\":${BOND_MIIMON},\"lacp_rate\":\"${BOND_LACP_RATE}\",\"primary\":\"${BOND_PRIMARY}\",\"members\":${members_json}}" ""
+    # L3: Assign IP address if provided
+    local ip_address=""
+    local netmask=""
+    local cidr_prefix=0
+    if [[ -n "${BOND_IP_ADDRESS:-}" ]]; then
+        ip_address="${BOND_IP_ADDRESS}"
+        netmask="${BOND_NETMASK:-255.255.255.0}"
+        cidr_prefix=$(netmask_to_cidr "${netmask}")
+        
+        if ! run_cmd "Assign IP ${ip_address}/${cidr_prefix} to ${name}" sudo ip addr add "${ip_address}/${cidr_prefix}" dev "${name}"; then
+            log_warn "Failed to assign IP to bond, cleaning up"
+            run_cmd "Delete bond ${name} (rollback)" sudo ip link del "${name}" || true
+            json_output false "{}" "Failed to assign IP ${ip_address}/${cidr_prefix} to bond '${name}'"
+            return 1
+        fi
+        log_info "IP ${ip_address}/${cidr_prefix} assigned to bond ${name}"
+    fi
+
+    local ip_json="null"
+    local netmask_json="null"
+    [[ -n "${ip_address}" ]] && ip_json="\"${ip_address}\""
+    [[ -n "${netmask}" ]] && netmask_json="\"${netmask}\""
+    
+    log_info "Bond '${name}' created (mode=${mode}, miimon=${BOND_MIIMON}${ip_address:+, ip=${ip_address}/${cidr_prefix}})"
+    json_output true "{\"name\":\"${name}\",\"mode\":\"${mode}\",\"miimon\":${BOND_MIIMON},\"lacp_rate\":\"${BOND_LACP_RATE}\",\"primary\":\"${BOND_PRIMARY}\",\"members\":${members_json},\"ipAddress\":${ip_json},\"netmask\":${netmask_json},\"cidr\":${cidr_prefix}}" ""
 }
 
 ###############################################################################
@@ -276,7 +311,7 @@ main() {
     case "${action}" in
         create)
             if (( $# < 3 )); then
-                json_output false "{}" "Usage: bond.sh create <name> <mode> [--miimon <N>] [--lacp-rate <slow|fast>] [--primary <iface>] [--members <m1>,<m2>]"
+                json_output false "{}" "Usage: bond.sh create <name> <mode> [--miimon <N>] [--lacp-rate <slow|fast>] [--primary <iface>] [--members <m1>,<m2>] [--ip IP] [--netmask MASK]"
                 exit 1
             fi
             bond_create "$2" "$3" "${@:4}"

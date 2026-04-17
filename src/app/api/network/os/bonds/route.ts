@@ -38,6 +38,15 @@ function isValidNetmask(mask: string): boolean {
   return (inverted & (inverted + 1)) === 0 && num > 0;
 }
 
+function netmaskToCidr(netmask: string): number {
+  const parts = netmask.split('.').map(Number);
+  let cidr = 0;
+  for (const part of parts) {
+    cidr += (part >>> 0).toString(2).split('1').length - 1;
+  }
+  return cidr;
+}
+
 // ──────────────────────────────────────────────
 // POST — Create a bond
 // ──────────────────────────────────────────────
@@ -109,7 +118,8 @@ export async function POST(request: NextRequest) {
 
     const results: { step: string; success: boolean; message: string }[] = [];
 
-    // 1. Create the bond at OS level via shell script
+    // 1. Create the bond at OS level via shell script (with inline fallback)
+    let scriptSuccess = false;
     try {
       const bondResult = createBond({
         name,
@@ -118,9 +128,14 @@ export async function POST(request: NextRequest) {
         lacpRate: bondLacpRate as 'slow' | 'fast',
         primary: primary || undefined,
         members: safeMembers,
+        ...(ipAddress ? { ipAddress } : {}),
+        ...(netmask ? { netmask } : {}),
       });
 
-      if (!bondResult.success) {
+      if (bondResult.success) {
+        scriptSuccess = true;
+        results.push({ step: 'create', success: true, message: `Bond ${name} created` });
+      } else {
         const errMsg = bondResult.error || 'Unknown error';
         if (errMsg.toLowerCase().includes('already exists')) {
           return NextResponse.json(
@@ -128,18 +143,34 @@ export async function POST(request: NextRequest) {
             { status: 409 }
           );
         }
+        console.warn(`[Network OS API] Bond create script failed: ${errMsg}, using inline fallback`);
+      }
+    } catch (e: any) {
+      console.warn(`[Network OS API] Bond create script error: ${e.message}, using inline fallback`);
+    }
+
+    if (!scriptSuccess) {
+      let cmd = `sudo modprobe bonding 2>/dev/null; sudo ip link add name ${name} type bond mode ${bondMode} miimon ${bondMiimon}`;
+      for (const m of safeMembers) {
+        cmd += ` && sudo ip link set ${m} master ${name}`;
+      }
+      if (ipAddress) {
+        const cidr = netmask ? netmaskToCidr(netmask) : 24;
+        cmd += ` && sudo ip addr add ${ipAddress}/${cidr} dev ${name}`;
+      }
+      cmd += ` && sudo ip link set ${name} up`;
+      console.log(`[Network OS API] Bond inline fallback cmd: ${cmd}`);
+      const { execSync } = require('child_process');
+      try {
+        execSync(cmd, { encoding: 'utf-8', timeout: 15000 });
+        results.push({ step: 'create', success: true, message: `Bond ${name} created (inline fallback)` });
+      } catch (execErr: any) {
+        const errMsg = execErr.stderr?.trim() || execErr.stdout?.trim() || execErr.message;
         return NextResponse.json(
-          { success: false, error: { code: 'OS_ERROR', message: errMsg } },
+          { success: false, error: { code: 'OS_ERROR', message: `Failed to create bond: ${errMsg}` } },
           { status: 500 }
         );
       }
-
-      results.push({ step: 'create', success: true, message: `Bond ${name} created` });
-    } catch (e: any) {
-      return NextResponse.json(
-        { success: false, error: { code: 'INVALID', message: e.message } },
-        { status: 400 }
-      );
     }
 
     // 2. Persist to /etc/network/interfaces via shell script

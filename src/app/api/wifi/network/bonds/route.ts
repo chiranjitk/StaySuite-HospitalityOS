@@ -7,7 +7,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { requirePermission } from '@/lib/auth/tenant-context';
-import { createBond, persistBond } from '@/lib/network';
+// OS-level bond creation and file persistence are handled by the frontend
+// calling /api/network/os/bonds before this route.
 
 // GET /api/wifi/network/bonds - List all bond configs
 export async function GET(request: NextRequest) {
@@ -98,39 +99,8 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Execute OS-level bond creation via shell script
-    try {
-      const osResult = createBond({
-        name,
-        mode,
-        miimon,
-        lacpRate,
-        primary: primaryMember,
-        members: ifaceNames,
-      });
-      if (!osResult.success) {
-        return NextResponse.json(
-          { success: false, error: { code: 'OS_ERROR', message: `Failed to create bond at OS level: ${osResult.error}` } },
-          { status: 500 },
-        );
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return NextResponse.json(
-        { success: false, error: { code: 'OS_ERROR', message: `Failed to create bond at OS level: ${msg}` } },
-        { status: 500 },
-      );
-    }
-
-    // Persist to /etc/network/interfaces
-    try {
-      const persistResult = persistBond({ name, mode, miimon, lacpRate, primary: primaryMember, members: ifaceNames });
-      if (!persistResult.success) {
-        console.warn(`Bond persistence warning for ${name}:`, persistResult.error);
-      }
-    } catch (err) {
-      console.warn(`Bond persistence error for ${name}:`, err instanceof Error ? err.message : err);
-    }
+    // OS-level bond creation and file persistence are handled by the frontend
+    // calling /api/network/os/bonds before this route.
 
     // Create bond with optional members
     const bond = await db.bondConfig.create({

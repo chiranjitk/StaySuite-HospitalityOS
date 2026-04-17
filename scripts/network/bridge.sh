@@ -1,7 +1,7 @@
 #!/bin/bash
 # bridge.sh — Bridge interface management for StaySuite-HospitalityOS
 # Usage:
-#   bridge.sh create <name> [--stp <on|off>] [--forward-delay <N>] [--members <m1>,<m2>]
+#   bridge.sh create <name> [--stp <on|off>] [--forward-delay <N>] [--members <m1>,<m2>] [--ip IP] [--netmask MASK]
 #   bridge.sh delete <name>
 #   bridge.sh add-member <bridge> <member>
 #   bridge.sh remove-member <bridge> <member>
@@ -17,6 +17,8 @@ source "${SCRIPT_DIR}/lib/common.sh"
 # Parse options for create
 ###############################################################################
 parse_bridge_options() {
+    BRIDGE_IP_ADDRESS=""
+    BRIDGE_NETMASK=""
     local stp="${DEFAULT_STP}"
     local forward_delay="${DEFAULT_FORWARD_DELAY}"
     local members=""
@@ -39,6 +41,14 @@ parse_bridge_options() {
                 members="$2"
                 shift 2
                 ;;
+            --ip)
+                BRIDGE_IP_ADDRESS="$2"
+                shift 2
+                ;;
+            --netmask)
+                BRIDGE_NETMASK="$2"
+                shift 2
+                ;;
             *)
                 shift
                 ;;
@@ -54,6 +64,8 @@ parse_bridge_options() {
 BRIDGE_STP=""
 BRIDGE_FORWARD_DELAY=""
 BRIDGE_MEMBERS=""
+BRIDGE_IP_ADDRESS=""
+BRIDGE_NETMASK=""
 
 ###############################################################################
 # bridge_create <name> [options...]
@@ -135,8 +147,31 @@ bridge_create() {
         return 1
     fi
 
-    log_info "Bridge '${name}' created successfully (stp=${BRIDGE_STP}, forward_delay=${BRIDGE_FORWARD_DELAY})"
-    json_output true "{\"name\":\"${name}\",\"stp\":\"${BRIDGE_STP}\",\"forward_delay\":${BRIDGE_FORWARD_DELAY},\"members\":${members_json}}" ""
+    # L3: Assign IP address if provided
+    local ip_address=""
+    local netmask=""
+    local cidr_prefix=0
+    if [[ -n "${BRIDGE_IP_ADDRESS:-}" ]]; then
+        ip_address="${BRIDGE_IP_ADDRESS}"
+        netmask="${BRIDGE_NETMASK:-255.255.255.0}"
+        cidr_prefix=$(netmask_to_cidr "${netmask}")
+        
+        if ! run_cmd "Assign IP ${ip_address}/${cidr_prefix} to ${name}" sudo ip addr add "${ip_address}/${cidr_prefix}" dev "${name}"; then
+            log_warn "Failed to assign IP to bridge, cleaning up"
+            run_cmd "Delete bridge ${name} (rollback)" sudo ip link del "${name}" || true
+            json_output false "{}" "Failed to assign IP ${ip_address}/${cidr_prefix} to bridge '${name}'"
+            return 1
+        fi
+        log_info "IP ${ip_address}/${cidr_prefix} assigned to bridge ${name}"
+    fi
+
+    local ip_json="null"
+    local netmask_json="null"
+    [[ -n "${ip_address}" ]] && ip_json="\"${ip_address}\""
+    [[ -n "${netmask}" ]] && netmask_json="\"${netmask}\""
+    
+    log_info "Bridge '${name}' created successfully (stp=${BRIDGE_STP}, forward_delay=${BRIDGE_FORWARD_DELAY}${ip_address:+, ip=${ip_address}/${cidr_prefix}})"
+    json_output true "{\"name\":\"${name}\",\"stp\":\"${BRIDGE_STP}\",\"forward_delay\":${BRIDGE_FORWARD_DELAY},\"members\":${members_json},\"ipAddress\":${ip_json},\"netmask\":${netmask_json},\"cidr\":${cidr_prefix}}" ""
 }
 
 ###############################################################################
@@ -302,7 +337,7 @@ main() {
     case "${action}" in
         create)
             if (( $# < 2 )); then
-                json_output false "{}" "Usage: bridge.sh create <name> [--stp <on|off>] [--forward-delay <N>] [--members <m1>,<m2>]"
+                json_output false "{}" "Usage: bridge.sh create <name> [--stp <on|off>] [--forward-delay <N>] [--members <m1>,<m2>] [--ip IP] [--netmask MASK]"
                 exit 1
             fi
             bridge_create "$2" "${@:3}"

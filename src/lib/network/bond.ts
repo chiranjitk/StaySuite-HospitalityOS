@@ -8,6 +8,8 @@ import {
   executeScript,
   sanitizeInterfaceName,
   validateBondMode,
+  validateIPv4,
+  validateNetmask,
   ScriptResult,
 } from './executor';
 
@@ -18,6 +20,8 @@ export interface BondCreateParams {
   lacpRate?: 'slow' | 'fast';
   primary?: string;
   members?: string[];
+  ipAddress?: string;
+  netmask?: string;
 }
 
 export interface BondInfo {
@@ -41,6 +45,9 @@ export interface BondCreateResult {
   miimon: number;
   members: string[];
   state: string;
+  ipAddress?: string;
+  netmask?: string;
+  cidr?: number;
 }
 
 export interface BondDeleteResult {
@@ -71,6 +78,15 @@ export function createBond(params: BondCreateParams): ScriptResult<BondCreateRes
   if (members.length > 0) {
     members.forEach((m) => sanitizeInterfaceName(m));
     args.push('--members', members.join(','));
+  }
+
+  if (params.ipAddress) {
+    validateIPv4(params.ipAddress);
+    args.push('--ip', params.ipAddress);
+  }
+  if (params.netmask) {
+    validateNetmask(params.netmask);
+    args.push('--netmask', params.netmask);
   }
 
   return executeScript<BondCreateResult>('bond.sh', args);

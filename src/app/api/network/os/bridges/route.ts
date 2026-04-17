@@ -33,6 +33,15 @@ function isValidNetmask(mask: string): boolean {
   return (inverted & (inverted + 1)) === 0 && num > 0;
 }
 
+function netmaskToCidr(netmask: string): number {
+  const parts = netmask.split('.').map(Number);
+  let cidr = 0;
+  for (const part of parts) {
+    cidr += (part >>> 0).toString(2).split('1').length - 1;
+  }
+  return cidr;
+}
+
 // ──────────────────────────────────────────────
 // POST — Create a bridge
 // ──────────────────────────────────────────────
@@ -75,16 +84,22 @@ export async function POST(request: NextRequest) {
 
     const results: { step: string; success: boolean; message: string }[] = [];
 
-    // 1. Create the bridge at OS level via shell script
+    // 1. Create the bridge at OS level via shell script (with inline fallback)
+    let scriptSuccess = false;
     try {
       const bridgeResult = createBridge({
         name,
         stp: !!stp,
         forwardDelay: forwardDelay ? parseInt(String(forwardDelay), 10) : 15,
         members: safeMembers,
+        ...(ipAddress ? { ipAddress } : {}),
+        ...(netmask ? { netmask } : {}),
       });
 
-      if (!bridgeResult.success) {
+      if (bridgeResult.success) {
+        scriptSuccess = true;
+        results.push({ step: 'create', success: true, message: `Bridge ${name} created` });
+      } else {
         const errMsg = bridgeResult.error || 'Unknown error';
         if (errMsg.toLowerCase().includes('already exists')) {
           return NextResponse.json(
@@ -92,18 +107,36 @@ export async function POST(request: NextRequest) {
             { status: 409 }
           );
         }
+        console.warn(`[Network OS API] Bridge create script failed: ${errMsg}, using inline fallback`);
+      }
+    } catch (e: any) {
+      console.warn(`[Network OS API] Bridge create script error: ${e.message}, using inline fallback`);
+    }
+
+    if (!scriptSuccess) {
+      const fdVal = forwardDelay ? parseInt(String(forwardDelay), 10) : 15;
+      const stpVal = !!stp;
+      let cmd = `sudo ip link add name ${name} type bridge && sudo ip link set ${name} type bridge stp_state ${stpVal ? 1 : 0} forward_delay ${fdVal}`;
+      for (const m of safeMembers) {
+        cmd += ` && sudo ip link set ${m} master ${name}`;
+      }
+      if (ipAddress) {
+        const cidr = netmask ? netmaskToCidr(netmask) : 24;
+        cmd += ` && sudo ip addr add ${ipAddress}/${cidr} dev ${name}`;
+      }
+      cmd += ` && sudo ip link set ${name} up`;
+      console.log(`[Network OS API] Bridge inline fallback cmd: ${cmd}`);
+      const { execSync } = require('child_process');
+      try {
+        execSync(cmd, { encoding: 'utf-8', timeout: 15000 });
+        results.push({ step: 'create', success: true, message: `Bridge ${name} created (inline fallback)` });
+      } catch (execErr: any) {
+        const errMsg = execErr.stderr?.trim() || execErr.stdout?.trim() || execErr.message;
         return NextResponse.json(
-          { success: false, error: { code: 'OS_ERROR', message: errMsg } },
+          { success: false, error: { code: 'OS_ERROR', message: `Failed to create bridge: ${errMsg}` } },
           { status: 500 }
         );
       }
-
-      results.push({ step: 'create', success: true, message: `Bridge ${name} created` });
-    } catch (e: any) {
-      return NextResponse.json(
-        { success: false, error: { code: 'INVALID', message: e.message } },
-        { status: 400 }
-      );
     }
 
     // 2. Persist to /etc/network/interfaces via shell script
