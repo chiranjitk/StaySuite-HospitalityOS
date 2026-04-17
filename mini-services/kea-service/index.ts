@@ -1,8 +1,8 @@
 /**
  * Kea DHCP4 Management Service for StaySuite HospitalityOS
  *
- * Uses a Node.js helper subprocess for unix socket communication
- * because Bun's net module has issues with unix domain sockets.
+ * PRIMARY: Communicates via kea-ctrl-agent HTTP REST API (port 8000)
+ * FALLBACK: Node.js helper subprocess for unix socket communication
  *
  * Port: 3011 (REST API)
  */
@@ -12,6 +12,7 @@ import { cors } from 'hono/cors';
 import { execSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
+import { fileURLToPath } from 'url';
 import { createLogger } from '../shared/logger';
 
 // Resolve __dirname safely for Bun (both --hot and normal mode)
@@ -34,7 +35,6 @@ const SYSTEM_KEA = (() => {
   } catch { return false; }
 })();
 
-const KEA_SOCKET_PATH = process.env.KEA_SOCKET_PATH || (SYSTEM_KEA ? '/run/kea/kea4-ctrl-socket' : '/tmp/kea/kea4-ctrl-socket');
 const KEA_CONFIG_PATH = SYSTEM_KEA
   ? (process.env.KEA_CONFIG_PATH || '/etc/kea/kea-dhcp4.conf')
   : (process.env.KEA_CONFIG_PATH || `${PROJECT_ROOT}/kea-local/kea-dhcp4-writable.conf`);
@@ -47,87 +47,208 @@ const KEA_LEASES_FILE = SYSTEM_KEA
 const HELPER_PATH = path.join(__dirname, 'kea-helper.mjs');
 const LD_LIB = SYSTEM_KEA ? '' : (process.env.KEA_LD_LIB || `${PROJECT_ROOT}/kea-local/extracted/usr/lib/x86_64-linux-gnu`);
 
-// Try to dynamically resolve socket path from config files
-function resolveSocketPath(): string {
-  if (process.env.KEA_SOCKET_PATH) return process.env.KEA_SOCKET_PATH;
-  try {
-    const configPaths = ['/etc/kea/kea-ctrl-agent.conf', '/etc/kea/kea-dhcp4.conf', KEA_CONFIG_PATH];
-    for (const cfgPath of configPaths) {
-      try {
-        const content = fs.readFileSync(cfgPath, 'utf-8');
-        const match = content.match(/"socket-name"\s*:\s*"([^"]+)"/);
-        if (match && match[1]) {
-          let sockPath = match[1];
-          // Handle relative paths (no leading /)
-          if (!sockPath.startsWith('/')) {
-            const socketDirs = ['/run/kea', '/var/run/kea', '/tmp/kea', '/run'];
-            for (const dir of socketDirs) {
-              const candidate = `${dir}/${sockPath}`;
-              try {
-                fs.accessSync(candidate, fs.constants.R_OK);
-                log.info(`Resolved socket from ${cfgPath}: ${sockPath} → ${candidate}`);
-                return candidate;
-              } catch {}
-            }
-            sockPath = `/run/kea/${sockPath}`;
-          }
-          log.info(`Resolved socket from ${cfgPath}: ${match[1]} → ${sockPath}`);
-          return sockPath;
-        }
-      } catch {}
-    }
-    // Scan filesystem
-    const commonPaths = ['/run/kea/kea4-ctrl-socket', '/tmp/kea/kea4-ctrl-socket', '/run/kea-dhcp4/kea4-ctrl-socket', '/run/kea/kea-ctrl-agent-socket'];
-    for (const sp of commonPaths) {
-      try {
-        fs.accessSync(sp, fs.constants.R_OK | fs.constants.W_OK);
-        log.info(`Found socket at ${sp}`);
-        return sp;
-      } catch {}
-    }
-    // Last resort: find on filesystem
-    try {
-      const found = execSync('find /run /tmp /var/run -name "*kea*ctrl*socket*" -type S 2>/dev/null | head -1', { encoding: 'utf-8' }).trim();
-      if (found) {
-        log.info(`Discovered socket via find: ${found}`);
-        return found;
-      }
-    } catch {}
-  } catch {}
-  return KEA_SOCKET_PATH;
+// ============================================================================
+// Ctrl-Agent Configuration Discovery
+// ============================================================================
+
+interface CtrlAgentConfig {
+  httpHost: string;
+  httpPort: number;
+  authUser: string;
+  authPassword: string;
+  socketPaths: Record<string, string>;
+  configFilePath: string;
+  available: boolean;
 }
 
-// Resolve actual socket and leases path at startup
-const RESOLVED_SOCKET_PATH = resolveSocketPath();
-log.info('Kea configuration', { systemKea: SYSTEM_KEA, socketPath: RESOLVED_SOCKET_PATH, configPath: KEA_CONFIG_PATH, leasesFile: KEA_LEASES_FILE });
+function discoverCtrlAgentConfig(): CtrlAgentConfig {
+  const configPaths = [
+    '/etc/kea/kea-ctrl-agent.conf',
+    '/etc/kea/ctrl-agent.conf',
+    `${PROJECT_ROOT}/kea-local/kea-ctrl-agent.conf`,
+  ];
 
-// ============================================================================
-// Kea Communication via Node.js Helper
-// ============================================================================
+  for (const cfgPath of configPaths) {
+    try {
+      if (!fs.existsSync(cfgPath)) continue;
+      const content = fs.readFileSync(cfgPath, 'utf-8');
+      log.info(`Reading ctrl-agent config from ${cfgPath}`);
 
-function keaPing(): boolean {
-  try {
-    // Verify helper exists before spawning
-    if (!fs.existsSync(HELPER_PATH)) {
-      log.warn(`kea-helper.mjs not found at ${HELPER_PATH} — run: git pull`);
-      return false;
+      // Parse HTTP server: http-host, http-port
+      const httpHost = content.match(/"http-host"\s*:\s*"([^"]+)"/)?.[1] || '127.0.0.1';
+      const httpPort = parseInt(content.match(/"http-port"\s*:\s*(\d+)/)?.[1] || '8000', 10);
+
+      // Parse authentication
+      let authUser = '';
+      let authPassword = '';
+      const authMatch = content.match(/"authentication"\s*:\s*\{([^}]+)\}/);
+      if (authMatch) {
+        const authBlock = authMatch[1];
+        authUser = authBlock.match(/"user"\s*:\s*"([^"]+)"/)?.[1] || '';
+        const passwordFileMatch = authBlock.match(/"password-file"\s*:\s*"([^"]+)"/);
+        if (passwordFileMatch) {
+          try {
+            const passwordFilePath = passwordFileMatch[1];
+            // Handle relative paths
+            const absPasswordFile = passwordFilePath.startsWith('/')
+              ? passwordFilePath
+              : path.dirname(cfgPath) + '/' + passwordFilePath;
+            authPassword = fs.readFileSync(absPasswordFile, 'utf-8').trim();
+          } catch (e) {
+            log.warn(`Could not read ctrl-agent password file: ${e}`);
+          }
+        }
+        // Fallback: password directly in config
+        if (!authPassword) {
+          authPassword = authBlock.match(/"password"\s*:\s*"([^"]+)"/)?.[1] || '';
+        }
+      }
+
+      // Parse control-sockets (dhcp4, dhcp6, d2, etc.)
+      const socketPaths: Record<string, string> = {};
+      const socketSectionRegex = /"(dhcp4|dhcp6|d2|ca)"\s*:\s*\{[^}]*"socket-name"\s*:\s*"([^"]+)"[^}]*\}/g;
+      let socketMatch;
+      while ((socketMatch = socketSectionRegex.exec(content)) !== null) {
+        const svc = socketMatch[1];
+        const sockName = socketMatch[2];
+        if (sockName.startsWith('/')) {
+          socketPaths[svc] = sockName;
+        } else {
+          // Relative socket path — resolve against common directories
+          const socketDirs = ['/run/kea', '/var/run/kea', '/tmp/kea', '/run'];
+          let resolved = false;
+          for (const dir of socketDirs) {
+            try {
+              const candidate = `${dir}/${sockName}`;
+              fs.accessSync(candidate, fs.constants.R_OK);
+              socketPaths[svc] = candidate;
+              resolved = true;
+              break;
+            } catch {}
+          }
+          if (!resolved) {
+            socketPaths[svc] = `/run/kea/${sockName}`;
+          }
+        }
+      }
+
+      const config: CtrlAgentConfig = {
+        httpHost,
+        httpPort,
+        authUser,
+        authPassword,
+        socketPaths,
+        configFilePath: cfgPath,
+        available: true,
+      };
+
+      log.info('Ctrl-agent config discovered', {
+        httpEndpoint: `http://${httpHost}:${httpPort}`,
+        authUser: authUser || '(none)',
+        hasPassword: !!authPassword,
+        sockets: socketPaths,
+      });
+
+      return config;
+    } catch (e) {
+      log.warn(`Failed to parse ctrl-agent config at ${cfgPath}: ${e}`);
     }
-    const result = execSync(`KEA_SOCKET_PATH="${RESOLVED_SOCKET_PATH}" KEA_LEASES_FILE="${KEA_LEASES_FILE}" node ${HELPER_PATH} ping`, { encoding: 'utf-8', timeout: 8000 });
-    const parsed = JSON.parse(result.trim());
-    return parsed.success && parsed.reachable === true;
-  } catch {
-    return false;
+  }
+
+  return {
+    httpHost: '127.0.0.1',
+    httpPort: 8000,
+    authUser: '',
+    authPassword: '',
+    socketPaths: {},
+    configFilePath: '',
+    available: false,
+  };
+}
+
+const CTRL_AGENT = discoverCtrlAgentConfig();
+const RESOLVED_SOCKET_PATH = CTRL_AGENT.socketPaths.dhcp4 || '/run/kea/kea4-ctrl-socket';
+
+log.info('Kea configuration', {
+  systemKea: SYSTEM_KEA,
+  ctrlAgent: CTRL_AGENT.available
+    ? `http://${CTRL_AGENT.httpHost}:${CTRL_AGENT.httpPort}`
+    : 'NOT AVAILABLE (will use unix socket fallback)',
+  socketPath: RESOLVED_SOCKET_PATH,
+  configPath: KEA_CONFIG_PATH,
+  leasesFile: KEA_LEASES_FILE,
+});
+
+// ============================================================================
+// Kea Communication — Ctrl-Agent HTTP API (Primary)
+// ============================================================================
+
+async function keaHttpCommand(command: Record<string, any>): Promise<any[] | null> {
+  if (!CTRL_AGENT.available) return null;
+
+  const url = `http://${CTRL_AGENT.httpHost}:${CTRL_AGENT.httpPort}/`;
+  const payload = {
+    ...command,
+    service: command.service || ['dhcp4'],
+  };
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+
+  if (CTRL_AGENT.authUser && CTRL_AGENT.authPassword) {
+    const credentials = Buffer.from(`${CTRL_AGENT.authUser}:${CTRL_AGENT.authPassword}`).toString('base64');
+    headers['Authorization'] = `Basic ${credentials}`;
+  }
+
+  try {
+    const resp = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(10000),
+    });
+
+    if (!resp.ok) {
+      const text = await resp.text();
+      log.warn(`Ctrl-agent HTTP ${resp.status}: ${text.substring(0, 200)}`);
+      return null;
+    }
+
+    const data = await resp.json();
+    // Ctrl-agent returns either a single response object or an array
+    if (Array.isArray(data)) return data;
+    return [data];
+  } catch (e: any) {
+    if (e.name === 'TimeoutError' || e.name === 'AbortError') {
+      log.warn('Ctrl-agent HTTP request timed out');
+    } else {
+      log.warn(`Ctrl-agent HTTP error: ${e.message}`);
+    }
+    return null;
   }
 }
 
-function keaCommand(command: Record<string, any>): any[] | null {
+async function keaHttpPing(): Promise<boolean> {
+  const resp = await keaHttpCommand({ command: 'status-get' });
+  return resp !== null && resp[0]?.result === 0;
+}
+
+// ============================================================================
+// Kea Communication — Unix Socket Helper (Fallback)
+// ============================================================================
+
+function keaSocketCommand(command: Record<string, any>): any[] | null {
   try {
     if (!fs.existsSync(HELPER_PATH)) {
-      log.warn(`kea-helper.mjs not found at ${HELPER_PATH} — run: git pull`);
+      log.warn(`kea-helper.mjs not found at ${HELPER_PATH}`);
       return null;
     }
     const cmdStr = JSON.stringify(command).replace(/'/g, "'\\''");
-    const result = execSync(`KEA_SOCKET_PATH="${RESOLVED_SOCKET_PATH}" KEA_LEASES_FILE="${KEA_LEASES_FILE}" node ${HELPER_PATH} command '${cmdStr}'`, { encoding: 'utf-8', timeout: 10000 });
+    const result = execSync(
+      `KEA_SOCKET_PATH="${RESOLVED_SOCKET_PATH}" KEA_LEASES_FILE="${KEA_LEASES_FILE}" node ${HELPER_PATH} command '${cmdStr}'`,
+      { encoding: 'utf-8', timeout: 10000 }
+    );
     const parsed = JSON.parse(result.trim());
     return parsed.success ? parsed.data : null;
   } catch {
@@ -135,18 +256,133 @@ function keaCommand(command: Record<string, any>): any[] | null {
   }
 }
 
-function keaReadLeases(): any[] {
+function keaSocketPing(): boolean {
   try {
-    if (!fs.existsSync(HELPER_PATH)) {
-      log.warn(`kea-helper.mjs not found at ${HELPER_PATH} — run: git pull`);
-      return [];
-    }
-    const result = execSync(`KEA_SOCKET_PATH="${RESOLVED_SOCKET_PATH}" KEA_LEASES_FILE="${KEA_LEASES_FILE}" node ${HELPER_PATH} leases`, { encoding: 'utf-8', timeout: 5000 });
+    if (!fs.existsSync(HELPER_PATH)) return false;
+    const result = execSync(
+      `KEA_SOCKET_PATH="${RESOLVED_SOCKET_PATH}" KEA_LEASES_FILE="${KEA_LEASES_FILE}" node ${HELPER_PATH} ping`,
+      { encoding: 'utf-8', timeout: 8000 }
+    );
     const parsed = JSON.parse(result.trim());
-    return parsed.success ? parsed.data : [];
+    return parsed.success && parsed.reachable === true;
   } catch {
-    return [];
+    return false;
   }
+}
+
+// ============================================================================
+// Unified Kea API — tries HTTP first, falls back to unix socket
+// ============================================================================
+
+let useHttpApi = CTRL_AGENT.available;
+
+async function keaPing(): Promise<boolean> {
+  // Try the currently preferred method
+  if (useHttpApi) {
+    const reachable = await keaHttpPing();
+    if (reachable) return true;
+    log.warn('Ctrl-agent HTTP ping failed, falling back to unix socket');
+    useHttpApi = false;
+  }
+  return keaSocketPing();
+}
+
+async function keaCommand(command: Record<string, any>): Promise<any[] | null> {
+  if (useHttpApi) {
+    const resp = await keaHttpCommand(command);
+    if (resp !== null) return resp;
+    log.warn(`Ctrl-agent HTTP command '${command.command}' failed, falling back to unix socket`);
+    useHttpApi = false;
+  }
+  return keaSocketCommand(command);
+}
+
+function keaReadLeases(): any[] {
+  // Leases are always read from file, not via API
+  // Try the helper first, then read directly
+  try {
+    if (fs.existsSync(HELPER_PATH)) {
+      const result = execSync(
+        `KEA_SOCKET_PATH="${RESOLVED_SOCKET_PATH}" KEA_LEASES_FILE="${KEA_LEASES_FILE}" node ${HELPER_PATH} leases`,
+        { encoding: 'utf-8', timeout: 5000 }
+      );
+      const parsed = JSON.parse(result.trim());
+      if (parsed.success && parsed.data && parsed.data.length > 0) return parsed.data;
+    }
+  } catch {}
+
+  // Fallback: read CSV file directly
+  return readLeasesFileDirectly();
+}
+
+function readLeasesFileDirectly(): any[] {
+  // Try common lease file locations
+  const leasePaths = [
+    KEA_LEASES_FILE,
+    '/var/lib/kea/kea-leases4.csv',
+    '/var/lib/kea/kea-leases4.csv.4',
+  ];
+
+  for (const lp of leasePaths) {
+    try {
+      if (!fs.existsSync(lp)) continue;
+      const content = fs.readFileSync(lp, 'utf-8');
+      const lines = content.trim().split('\n');
+      if (lines.length <= 1) continue;
+
+      const leases: any[] = [];
+      // Header: address,hwaddr,client_id,valid_lifetime,expire,subnet_id,fqdn_fwd,fqdn_rev,hostname,state,user_context,pool_id
+      for (let i = 1; i < lines.length; i++) {
+        const fields = lines[i].split(',');
+        if (fields.length < 10) continue;
+        leases.push({
+          address: fields[0] || '',
+          hwaddr: fields[1] || '',
+          clientId: fields[2] || '',
+          validLifetime: parseInt(fields[3]) || 3600,
+          expire: parseInt(fields[4]) || 0,
+          subnetId: parseInt(fields[5]) || 0,
+          fqdnFwd: fields[6] === '1',
+          fqdnRev: fields[7] === '1',
+          hostname: fields[8] || '',
+          state: parseInt(fields[9]) || 0,
+        });
+      }
+      if (leases.length > 0) {
+        log.info(`Read ${leases.length} leases from ${lp}`);
+        return leases;
+      }
+    } catch {}
+  }
+
+  // Check config for lease file path
+  const configPaths = ['/etc/kea/kea-dhcp4.conf', KEA_CONFIG_PATH];
+  for (const cfgPath of configPaths) {
+    try {
+      const content = fs.readFileSync(cfgPath, 'utf-8');
+      // Match lease-file or name in Dhcp4/lease-database
+      const lfMatch = content.match(/"lease-file"\s*:\s*"([^"]+)"/);
+      if (lfMatch) {
+        try {
+          const lf = fs.readFileSync(lfMatch[1], 'utf-8');
+          const lines = lf.trim().split('\n');
+          const leases: any[] = [];
+          for (let i = 1; i < lines.length; i++) {
+            const fields = lines[i].split(',');
+            if (fields.length < 10) continue;
+            leases.push({
+              address: fields[0], hwaddr: fields[1], clientId: fields[2],
+              validLifetime: parseInt(fields[3]) || 3600, expire: parseInt(fields[4]) || 0,
+              subnetId: parseInt(fields[5]) || 0, hostname: fields[8] || '', state: parseInt(fields[9]) || 0,
+            });
+          }
+          return leases;
+        } catch {}
+      }
+    } catch {}
+  }
+
+  return [];
 }
 
 // ============================================================================
@@ -160,17 +396,17 @@ let cachedLeaseCount = 0;
 
 async function updateCache() {
   try {
-    cachedKeaRunning = keaPing();
+    cachedKeaRunning = await keaPing();
     if (cachedKeaRunning) {
       try {
-        const resp = keaCommand({ command: 'version-get' });
+        const resp = await keaCommand({ command: 'version-get' });
         if (resp && resp[0]?.result === 0 && resp[0]?.arguments) {
           cachedKeaVersion = resp[0].arguments.extended || resp[0].text || 'Unknown';
         }
       } catch {}
 
       try {
-        const resp = keaCommand({ command: 'config-get' });
+        const resp = await keaCommand({ command: 'config-get' });
         if (resp && resp[0]?.result === 0 && resp[0]?.arguments?.Dhcp4?.subnet4) {
           cachedSubnetCount = resp[0].arguments.Dhcp4.subnet4.length;
         }
@@ -363,7 +599,7 @@ app.get('/health', (c) => {
     uptime: Math.floor((Date.now() - startTime) / 1000),
     port: PORT,
     memoryUsage: process.memoryUsage(),
-    kea: { running: cachedKeaRunning, socketPath: RESOLVED_SOCKET_PATH, leaseFile: KEA_LEASES_FILE, subnetCount: cachedSubnetCount, leaseCount: cachedLeaseCount }
+    kea: { running: cachedKeaRunning, socketPath: RESOLVED_SOCKET_PATH, leaseFile: KEA_LEASES_FILE, subnetCount: cachedSubnetCount, leaseCount: cachedLeaseCount, ctrlAgent: CTRL_AGENT.available ? `http://${CTRL_AGENT.httpHost}:${CTRL_AGENT.httpPort}` : 'unavailable', commMethod: useHttpApi ? 'http' : 'unix-socket' }
   });
 });
 
@@ -378,7 +614,7 @@ app.get('/api/status', async (c) => {
   // Get current interfaces from Kea config
   let currentInterfaces: string[] = ['lo'];
   try {
-    const resp = keaCommand({ command: 'config-get' });
+    const resp = await keaCommand({ command: 'config-get' });
     if (resp && resp[0]?.result === 0 && resp[0]?.arguments?.Dhcp4?.['interfaces-config']) {
       currentInterfaces = resp[0].arguments.Dhcp4['interfaces-config'].interfaces || ['lo'];
     }
@@ -409,6 +645,8 @@ app.get('/api/status', async (c) => {
       leaseCount: cachedLeaseCount,
       currentInterfaces,
       systemInterfaces,
+      ctrlAgent: CTRL_AGENT.available ? `http://${CTRL_AGENT.httpHost}:${CTRL_AGENT.httpPort}` : 'unavailable',
+      commMethod: useHttpApi ? 'http' : 'unix-socket',
     }
   });
 });
@@ -453,7 +691,7 @@ app.post('/api/service/restart', async (c) => {
 
 app.get('/api/subnets', async (c) => {
   try {
-    const resp = keaCommand({ command: 'config-get' });
+    const resp = await keaCommand({ command: 'config-get' });
     if (!resp || resp[0]?.result !== 0 || !resp[0]?.arguments?.Dhcp4?.subnet4) {
       return c.json({ success: true, data: [] });
     }
@@ -508,7 +746,7 @@ app.get('/api/subnets', async (c) => {
 app.post('/api/subnets', async (c) => {
   try {
     const body = await c.req.json();
-    const resp = keaCommand({ command: 'config-get' });
+    const resp = await keaCommand({ command: 'config-get' });
     if (!resp || resp[0]?.result !== 0 || !resp[0]?.arguments?.Dhcp4) {
       return c.json({ success: false, error: 'Could not read Kea configuration' });
     }
@@ -541,13 +779,13 @@ app.post('/api/subnets', async (c) => {
     if (!config.subnet4) config.subnet4 = [];
     config.subnet4.push(newSubnet);
 
-    const setResp = keaCommand({ command: 'config-set', arguments: { Dhcp4: config } });
+    const setResp = await keaCommand({ command: 'config-set', arguments: { Dhcp4: config } });
     if (!setResp || setResp[0]?.result !== 0) {
       return c.json({ success: false, error: setResp?.[0]?.text || 'Failed to set config' });
     }
 
     // Persist to file
-    keaCommand({ command: 'config-write' });
+    await keaCommand({ command: 'config-write' });
     await updateCache();
 
     return c.json({
@@ -565,7 +803,7 @@ app.put('/api/subnets/:id', async (c) => {
     const { id } = c.req.param();
     const body = await c.req.json();
     const subnetId = parseInt(id);
-    const resp = keaCommand({ command: 'config-get' });
+    const resp = await keaCommand({ command: 'config-get' });
 
     if (!resp || resp[0]?.result !== 0 || !resp[0]?.arguments?.Dhcp4?.subnet4) {
       return c.json({ success: false, error: 'Could not read Kea configuration' });
@@ -590,12 +828,12 @@ app.put('/api/subnets/:id', async (c) => {
 
     config.subnet4[subnetIndex] = subnet;
 
-    const setResp = keaCommand({ command: 'config-set', arguments: { Dhcp4: config } });
+    const setResp = await keaCommand({ command: 'config-set', arguments: { Dhcp4: config } });
     if (!setResp || setResp[0]?.result !== 0) {
       return c.json({ success: false, error: setResp?.[0]?.text || 'Failed to set config' });
     }
 
-    keaCommand({ command: 'config-write' });
+    await keaCommand({ command: 'config-write' });
 
     return c.json({ success: true, data: { id, ...body }, message: 'Subnet updated in Kea DHCP4 configuration' });
   } catch (error) {
@@ -607,7 +845,7 @@ app.delete('/api/subnets/:id', async (c) => {
   try {
     const { id } = c.req.param();
     const subnetId = parseInt(id);
-    const resp = keaCommand({ command: 'config-get' });
+    const resp = await keaCommand({ command: 'config-get' });
 
     if (!resp || resp[0]?.result !== 0 || !resp[0]?.arguments?.Dhcp4?.subnet4) {
       return c.json({ success: false, error: 'Could not read Kea configuration' });
@@ -616,12 +854,12 @@ app.delete('/api/subnets/:id', async (c) => {
     const config = JSON.parse(JSON.stringify(resp[0].arguments.Dhcp4));
     config.subnet4 = config.subnet4.filter((s: any) => s.id !== subnetId);
 
-    const setResp = keaCommand({ command: 'config-set', arguments: { Dhcp4: config } });
+    const setResp = await keaCommand({ command: 'config-set', arguments: { Dhcp4: config } });
     if (!setResp || setResp[0]?.result !== 0) {
       return c.json({ success: false, error: setResp?.[0]?.text || 'Failed to set config' });
     }
 
-    keaCommand({ command: 'config-write' });
+    await keaCommand({ command: 'config-write' });
     await updateCache();
 
     return c.json({ success: true, message: `Subnet ${id} removed from Kea DHCP4 configuration` });
@@ -641,7 +879,7 @@ app.get('/api/leases', async (c) => {
     // Get subnet map
     let subnetMap: Record<number, { subnet: string; name: string }> = {};
     try {
-      const resp = keaCommand({ command: 'config-get' });
+      const resp = await keaCommand({ command: 'config-get' });
       if (resp?.[0]?.result === 0 && resp[0]?.arguments?.Dhcp4?.subnet4) {
         for (const s of resp[0].arguments.Dhcp4.subnet4) {
           subnetMap[s.id] = { subnet: s.subnet, name: getSubnetFriendlyName(s.subnet) };
@@ -680,7 +918,7 @@ app.get('/api/leases', async (c) => {
 
 app.post('/api/leases/reclaim', async (c) => {
   try {
-    const resp = keaCommand({ command: 'leases-reclaim', arguments: { remove: true } });
+    const resp = await keaCommand({ command: 'leases-reclaim', arguments: { remove: true } });
     if (resp && resp[0]?.result === 0) {
       return c.json({ success: true, message: 'Expired leases reclaimed' });
     } else {
@@ -697,7 +935,7 @@ app.post('/api/leases/reclaim', async (c) => {
 
 app.get('/api/reservations', async (c) => {
   try {
-    const resp = keaCommand({ command: 'config-get' });
+    const resp = await keaCommand({ command: 'config-get' });
     if (!resp?.[0]?.arguments?.Dhcp4?.subnet4) {
       return c.json({ success: true, data: [] });
     }
@@ -727,7 +965,7 @@ app.get('/api/reservations', async (c) => {
 app.post('/api/reservations', async (c) => {
   try {
     const body = await c.req.json();
-    const resp = keaCommand({ command: 'config-get' });
+    const resp = await keaCommand({ command: 'config-get' });
     if (!resp?.[0]?.arguments?.Dhcp4?.subnet4) {
       return c.json({ success: false, error: 'Could not read Kea configuration' });
     }
@@ -745,12 +983,12 @@ app.post('/api/reservations', async (c) => {
     if (body.hostname) newRes.hostname = body.hostname;
     subnet.reservations.push(newRes);
 
-    const setResp = keaCommand({ command: 'config-set', arguments: { Dhcp4: config } });
+    const setResp = await keaCommand({ command: 'config-set', arguments: { Dhcp4: config } });
     if (!setResp || setResp[0]?.result !== 0) {
       return c.json({ success: false, error: setResp?.[0]?.text || 'Failed to set config' });
     }
 
-    keaCommand({ command: 'config-write' });
+    await keaCommand({ command: 'config-write' });
 
     return c.json({ success: true, data: newRes, message: 'Reservation added to Kea DHCP4 configuration' });
   } catch (error) {
@@ -761,7 +999,7 @@ app.post('/api/reservations', async (c) => {
 app.delete('/api/reservations/:subnetId/:mac', async (c) => {
   try {
     const { subnetId, mac } = c.req.param();
-    const resp = keaCommand({ command: 'config-get' });
+    const resp = await keaCommand({ command: 'config-get' });
     if (!resp?.[0]?.arguments?.Dhcp4?.subnet4) {
       return c.json({ success: false, error: 'Could not read Kea configuration' });
     }
@@ -779,12 +1017,12 @@ app.delete('/api/reservations/:subnetId/:mac', async (c) => {
       return c.json({ success: false, error: `Reservation for ${macClean} not found` });
     }
 
-    const setResp = keaCommand({ command: 'config-set', arguments: { Dhcp4: config } });
+    const setResp = await keaCommand({ command: 'config-set', arguments: { Dhcp4: config } });
     if (!setResp || setResp[0]?.result !== 0) {
       return c.json({ success: false, error: setResp?.[0]?.text || 'Failed to set config' });
     }
 
-    keaCommand({ command: 'config-write' });
+    await keaCommand({ command: 'config-write' });
 
     return c.json({ success: true, message: `Reservation for ${macClean} removed from subnet ${subnetId}` });
   } catch (error) {
@@ -798,7 +1036,7 @@ app.delete('/api/reservations/:subnetId/:mac', async (c) => {
 
 app.get('/api/stats', async (c) => {
   try {
-    const resp = keaCommand({ command: 'statistic-get-all' });
+    const resp = await keaCommand({ command: 'statistic-get-all' });
     if (resp && resp[0]?.result === 0) {
       return c.json({ success: true, data: resp[0].arguments || {} });
     }
@@ -814,7 +1052,7 @@ app.get('/api/stats', async (c) => {
 
 app.get('/api/config', async (c) => {
   try {
-    const resp = keaCommand({ command: 'config-get' });
+    const resp = await keaCommand({ command: 'config-get' });
     if (resp && resp[0]?.result === 0) {
       return c.json({ success: true, data: resp[0].arguments || {} });
     }
@@ -826,7 +1064,7 @@ app.get('/api/config', async (c) => {
 
 app.post('/api/config/reload', async (c) => {
   try {
-    const resp = keaCommand({ command: 'config-reload' });
+    const resp = await keaCommand({ command: 'config-reload' });
     if (resp && resp[0]?.result === 0) {
       return c.json({ success: true, message: 'Kea configuration reloaded from file' });
     }
@@ -838,7 +1076,7 @@ app.post('/api/config/reload', async (c) => {
 
 app.post('/api/config/write', async (c) => {
   try {
-    const resp = keaCommand({ command: 'config-write' });
+    const resp = await keaCommand({ command: 'config-write' });
     if (resp && resp[0]?.result === 0) {
       return c.json({ success: true, message: 'Kea running configuration written to file' });
     }
@@ -856,7 +1094,7 @@ app.post('/api/interfaces', async (c) => {
       return c.json({ success: false, error: 'At least one interface is required' });
     }
 
-    const resp = keaCommand({ command: 'config-get' });
+    const resp = await keaCommand({ command: 'config-get' });
     if (!resp || resp[0]?.result !== 0 || !resp[0]?.arguments?.Dhcp4) {
       return c.json({ success: false, error: 'Could not read Kea configuration' });
     }
@@ -868,12 +1106,12 @@ app.post('/api/interfaces', async (c) => {
       're-detect': true,
     };
 
-    const setResp = keaCommand({ command: 'config-set', arguments: { Dhcp4: config } });
+    const setResp = await keaCommand({ command: 'config-set', arguments: { Dhcp4: config } });
     if (!setResp || setResp[0]?.result !== 0) {
       return c.json({ success: false, error: setResp?.[0]?.text || 'Failed to set config' });
     }
 
-    keaCommand({ command: 'config-write' });
+    await keaCommand({ command: 'config-write' });
 
     return c.json({
       success: true,
@@ -891,7 +1129,7 @@ app.post('/api/interfaces', async (c) => {
 
 app.post('/api/dhcp/enable', async (c) => {
   try {
-    const resp = keaCommand({ command: 'dhcp-enable', arguments: { 'max-period': 0 } });
+    const resp = await keaCommand({ command: 'dhcp-enable', arguments: { 'max-period': 0 } });
     if (resp && resp[0]?.result === 0) {
       return c.json({ success: true, message: 'DHCP service enabled' });
     }
@@ -903,7 +1141,7 @@ app.post('/api/dhcp/enable', async (c) => {
 
 app.post('/api/dhcp/disable', async (c) => {
   try {
-    const resp = keaCommand({ command: 'dhcp-disable', arguments: { 'max-period': 60 } });
+    const resp = await keaCommand({ command: 'dhcp-disable', arguments: { 'max-period': 60 } });
     if (resp && resp[0]?.result === 0) {
       return c.json({ success: true, message: 'DHCP service disabled for 60 seconds' });
     }
@@ -919,7 +1157,7 @@ app.post('/api/dhcp/disable', async (c) => {
 
 app.post('/api/sync', async (c) => {
   try {
-    const resp = keaCommand({ command: 'config-write' });
+    const resp = await keaCommand({ command: 'config-write' });
     return c.json({
       success: resp?.[0]?.result === 0,
       message: resp?.[0]?.result === 0 ? 'Kea configuration synced' : (resp?.[0]?.text || 'Failed'),
@@ -1544,7 +1782,7 @@ const server = Bun.serve({
   port: PORT,
   fetch: app.fetch,
 });
-log.info('Kea DHCP4 Management Service running', { port: PORT, socket: KEA_SOCKET_PATH, config: KEA_CONFIG_PATH, leases: KEA_LEASES_FILE });
+log.info('Kea DHCP4 Management Service running', { port: PORT, socketPath: RESOLVED_SOCKET_PATH, ctrlAgent: CTRL_AGENT.available ? `http://${CTRL_AGENT.httpHost}:${CTRL_AGENT.httpPort}` : 'unavailable', config: KEA_CONFIG_PATH, leases: KEA_LEASES_FILE });
 
 // Graceful shutdown
 process.on('SIGTERM', () => {
