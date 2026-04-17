@@ -424,6 +424,15 @@ export default function DhcpPage() {
       const result = await response.json();
       if (result.success) {
         toast({ title: 'Success', description: result.message });
+        // Immediately sync the running state from response
+        if (result.status === 'running') {
+          setKeaConnected(true);
+          setKeaStatus(prev => prev ? { ...prev, running: true } : prev);
+        } else if (result.status === 'stopped') {
+          setKeaConnected(false);
+          setKeaStatus(prev => prev ? { ...prev, running: false } : prev);
+        }
+        // Then do a full refresh after 2s
         setTimeout(fetchKeaStatus, 2000);
       } else {
         toast({ title: 'Error', description: result.message || `Failed to ${action} Kea`, variant: 'destructive' });

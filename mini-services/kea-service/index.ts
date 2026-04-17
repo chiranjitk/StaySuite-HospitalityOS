@@ -588,14 +588,59 @@ function isKeaProcessRunning(): boolean {
 
 function startKeaServer(): { success: boolean; message: string; pid?: number } {
   if (isKeaProcessRunning()) {
-    return { success: true, message: 'Kea DHCP4 is already running' };
+    // Process exists but may be a zombie or crashed systemd instance — verify it's responsive
+    // If /run/kea PID file is stale (owned by root while kea runs as user 'kea'), kill it
+    try {
+      const pidFile = '/run/kea/kea-dhcp4.kea-dhcp4.pid';
+      if (fs.existsSync(pidFile)) {
+        const pidContent = fs.readFileSync(pidFile, 'utf-8').trim();
+        const pid = parseInt(pidContent, 10);
+        // Check if that PID is actually our kea-dhcp4 process
+        try {
+          const pidRunning = execSync(`kill -0 ${pid} 2>/dev/null && echo alive`, { encoding: 'utf-8' }).trim() === 'alive';
+          if (!pidRunning) {
+            log.info(`Stale PID file detected (PID ${pid} not alive), cleaning up`);
+            try { fs.unlinkSync(pidFile); } catch {}
+            execSync('pkill -f kea-dhcp4 2>/dev/null || true');
+            execSync('sleep 0.5');
+          }
+        } catch {
+          // PID doesn't exist — stale file
+          log.info('Stale PID file detected (PID not found), cleaning up');
+          try { fs.unlinkSync(pidFile); } catch {}
+        }
+      }
+    } catch {}
+
+    if (isKeaProcessRunning()) {
+      return { success: true, message: 'Kea DHCP4 is already running' };
+    }
   }
 
   try {
     const ldPrefix = LD_LIB ? `LD_LIBRARY_PATH=${LD_LIB} ` : '';
-    // Ensure /run/kea exists (kea-dhcp4 needs it for PID file and sockets)
+    // Ensure /run/kea exists and is writable (kea-dhcp4 needs it for PID file and sockets)
     try {
       execSync('mkdir -p /run/kea && chmod 755 /run/kea');
+      // Fix ownership if kea user exists (systemd runs kea-dhcp4 as user 'kea')
+      try {
+        const keaUser = execSync('id kea 2>/dev/null', { encoding: 'utf-8' }).trim();
+        if (keaUser) {
+          execSync('chown -R kea:kea /run/kea');
+          // Remove stale PID files owned by root that kea can't overwrite
+          const pidFile = '/run/kea/kea-dhcp4.kea-dhcp4.pid';
+          if (fs.existsSync(pidFile)) {
+            const stat = fs.statSync(pidFile);
+            if (stat.uid !== 0) {
+              // Wrong owner, check if process is alive
+              const pidContent = fs.readFileSync(pidFile, 'utf-8').trim();
+              try { execSync(`kill -0 ${pidContent} 2>/dev/null`); } catch {
+                fs.unlinkSync(pidFile);
+              }
+            }
+          }
+        }
+      } catch {}
     } catch {}
 
     const cmd = `${ldPrefix}${KEA_BINARY_PATH} -c ${KEA_CONFIG_PATH}`;
