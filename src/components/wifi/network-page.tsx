@@ -1421,11 +1421,6 @@ export default function NetworkPage() {
     }
   };
 
-  // ── Bridge/Bond handlers ──
-  const handleToggleBridge = (id: string) => {
-    setBridges(prev => prev.map(b => b.id === id ? { ...b, enabled: !b.enabled } : b));
-  };
-
   // ── Role handlers (persist to OS + DB) ──
   const [roleSaving, setRoleSaving] = useState<string | null>(null);
 
