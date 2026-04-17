@@ -1,10 +1,100 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { execSync } from 'child_process';
+import { readFileSync, writeFileSync, existsSync } from 'fs';
 import { db } from '@/lib/db';
 import { addRoute, removeRoute, withStaySuitePreserved } from '@/lib/network/nmcli';
 
 function safeExec(cmd: string, timeout = 10000): string {
   try { return execSync(cmd, { encoding: 'utf-8', timeout }); } catch (e: any) { return e.stderr?.trim() || e.stdout?.trim() || ''; }
+}
+
+// ─── /etc/route persistence helpers ─────────────────────────────────────
+const ROUTE_FILE = '/etc/route';
+const ROUTE_FILE_HEADER = `# StaySuite Static Routes Configuration
+# This file is managed by StaySuite-HospitalityOS
+# Routes added here can be applied with: sudo ip route add <line>
+# or source this file
+`;
+
+/** Ensure /etc/route exists with the proper header */
+function ensureRouteFile(): boolean {
+  try {
+    if (!existsSync(ROUTE_FILE)) {
+      writeFileSync(ROUTE_FILE, ROUTE_FILE_HEADER, { encoding: 'utf-8', mode: 0o644 });
+      return true;
+    }
+    // Ensure header exists
+    const content = readFileSync(ROUTE_FILE, 'utf-8');
+    if (!content.includes('# StaySuite Static Routes Configuration')) {
+      writeFileSync(ROUTE_FILE, ROUTE_FILE_HEADER + content, { encoding: 'utf-8' });
+    }
+    return true;
+  } catch (err) {
+    console.warn('[Network OS API] Failed to ensure /etc/route file:', err);
+    return false;
+  }
+}
+
+/** Append a route entry to /etc/route */
+function persistRouteToFile(destination: string, gateway: string, interfaceName: string, metric: number, name?: string): boolean {
+  try {
+    ensureRouteFile();
+    const timestamp = new Date().toISOString();
+    const routeLine = `${destination} via ${gateway} dev ${interfaceName}${metric ? ` metric ${metric}` : ''}`;
+    const nameLine = name ? `# Name: ${name}\n` : '';
+    const entry = `\n# StaySuite Static Route\n# Added: ${timestamp}\n${nameLine}${routeLine}\n`;
+    execSync(`echo '${entry.replace(/'/g, "'\\''")}' | sudo tee -a ${ROUTE_FILE} > /dev/null`, { encoding: 'utf-8', timeout: 5000 });
+    return true;
+  } catch (err) {
+    console.warn('[Network OS API] Failed to persist route to /etc/route:', err);
+    return false;
+  }
+}
+
+/** Remove a route entry from /etc/route by destination + gateway + interfaceName */
+function removeRouteFromFile(destination: string, gateway: string, interfaceName?: string): boolean {
+  try {
+    if (!existsSync(ROUTE_FILE)) return true;
+    const content = readFileSync(ROUTE_FILE, 'utf-8');
+    const lines = content.split('\n');
+    const newLines: string[] = [];
+    let i = 0;
+    while (i < lines.length) {
+      const line = lines[i];
+      // Check if this line matches the route pattern
+      const routePattern = new RegExp(`^${escapeRegExp(destination)}\\s+via\\s+${escapeRegExp(gateway)}(\\s+dev\\s+${interfaceName ? escapeRegExp(interfaceName) + '\\b' : '\\S+'})`);
+      if (routePattern.test(line.trim())) {
+        // Walk backwards through newLines to remove comment header for this route
+        while (newLines.length > 0 && newLines[newLines.length - 1].trimStart().startsWith('#') && newLines[newLines.length - 1].trim() !== '') {
+          // Stop if we hit the file header or another route entry
+          if (newLines[newLines.length - 1].includes('StaySuite Static Routes Configuration')) break;
+          newLines.pop();
+        }
+        // Skip trailing empty line if present
+        if (i + 1 < lines.length && lines[i + 1].trim() === '') {
+          i += 2;
+        } else {
+          i += 1;
+        }
+      } else {
+        newLines.push(line);
+        i += 1;
+      }
+    }
+    // Clean up trailing empty lines (keep at most one)
+    while (newLines.length > 1 && newLines[newLines.length - 1].trim() === '' && newLines[newLines.length - 2].trim() === '') {
+      newLines.pop();
+    }
+    writeFileSync(ROUTE_FILE, newLines.join('\n'), { encoding: 'utf-8' });
+    return true;
+  } catch (err) {
+    console.warn('[Network OS API] Failed to remove route from /etc/route:', err);
+    return false;
+  }
+}
+
+function escapeRegExp(string: string): string {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 const TENANT_ID = 'tenant-1';
@@ -206,7 +296,17 @@ export async function POST(request: NextRequest) {
       message: addOk ? 'Route added via nmcli' : 'Failed to add route at OS level',
     });
 
-    // 2. Save to DB (StaticRoute)
+    // 2. Persist route to /etc/route file for cross-boot persistence
+    if (addOk) {
+      const persistOk = persistRouteToFile(routeDest, gateway, interfaceName, routeMetric, routeName || undefined);
+      results.push({
+        step: 'persist-file',
+        success: persistOk,
+        message: persistOk ? 'Route persisted to /etc/route' : 'Failed to persist route to /etc/route',
+      });
+    }
+
+    // 3. Save to DB (StaticRoute)
     if (addOk) {
       try {
         await db.staticRoute.create({
@@ -308,7 +408,17 @@ export async function DELETE(request: NextRequest) {
       message: delOk ? 'Route removed via nmcli' : 'Failed to remove route at OS level',
     });
 
-    // 2. Remove from DB
+    // 2. Remove route from /etc/route persistence file
+    if (delOk) {
+      const persistOk = removeRouteFromFile(destination, gateway, interfaceName || undefined);
+      results.push({
+        step: 'persist-file',
+        success: persistOk,
+        message: persistOk ? 'Route removed from /etc/route' : 'Failed to remove route from /etc/route',
+      });
+    }
+
+    // 3. Remove from DB
     try {
       const dbDest = destination === 'default' ? '0.0.0.0/0' : destination;
       await db.staticRoute.deleteMany({

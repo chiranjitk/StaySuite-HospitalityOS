@@ -2034,6 +2034,7 @@ export default function NetworkPage() {
                   <TableHeader>
                     <TableRow className="bg-muted/30">
                       <TableHead className="font-semibold">Interface</TableHead>
+                      <TableHead className="font-semibold">Description</TableHead>
                       <TableHead className="font-semibold">IP Address</TableHead>
                       <TableHead className="font-semibold">Subnet</TableHead>
                       <TableHead className="font-semibold">MAC</TableHead>
@@ -2077,6 +2078,9 @@ export default function NetworkPage() {
                                 </div>
                               </div>
                             </div>
+                          </TableCell>
+                          <TableCell className="text-sm text-muted-foreground max-w-[180px] truncate">
+                            {iface.description || '—'}
                           </TableCell>
                           <TableCell className="font-mono text-sm">
                             {iface.allIps.map((ip, idx) => (

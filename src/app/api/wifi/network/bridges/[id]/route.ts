@@ -5,9 +5,10 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
+import { execSync } from 'child_process';
 import { db } from '@/lib/db';
 import { getTenantIdFromSession } from '@/lib/auth/tenant-context';
-import { deleteBridge, removePersistedBridge } from '@/lib/network';
+import { deleteBridge as nmcliDeleteBridge } from '@/lib/network/nmcli';
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -73,6 +74,22 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
   }
 }
 
+/** Inline fallback: delete bridge via raw nmcli commands */
+function fallbackDeleteBridge(name: string): void {
+  // Remove all port connections first
+  try {
+    const stdout = execSync(`nmcli -t -f NAME,TYPE con show 2>/dev/null`, { encoding: 'utf-8', timeout: 5000 });
+    for (const line of stdout.split('\n').filter(Boolean)) {
+      const [conName, conType] = line.split(':');
+      if (conName.startsWith(`${name}-port-`) && conType === '802-3-ethernet') {
+        execSync(`sudo nmcli con delete "${conName}" 2>/dev/null || true`, { encoding: 'utf-8', timeout: 10000 });
+      }
+    }
+  } catch { /* ignore */ }
+  execSync(`sudo nmcli con down "${name}" 2>/dev/null || true`, { encoding: 'utf-8', timeout: 10000 });
+  execSync(`sudo nmcli con delete "${name}" 2>/dev/null`, { encoding: 'utf-8', timeout: 10000 });
+}
+
 // DELETE /api/wifi/network/bridges/[id] - Delete bridge config
 export async function DELETE(request: NextRequest, { params }: RouteParams) {
   const tenantId = await getTenantIdFromSession(request);
@@ -94,21 +111,17 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
       );
     }
 
-    // Execute OS-level bridge deletion via shell script
+    // Execute OS-level bridge deletion via nmcli wrapper (with inline fallback)
     try {
-      const osResult = deleteBridge(existing.name);
-      if (!osResult.success) {
-        console.warn(`OS bridge removal failed for ${existing.name}:`, osResult.error);
+      nmcliDeleteBridge(existing.name);
+    } catch (err) {
+      console.warn(`OS bridge removal failed for ${existing.name} via nmcli wrapper:`, err instanceof Error ? err.message : err);
+      // Inline fallback
+      try {
+        fallbackDeleteBridge(existing.name);
+      } catch (fbErr) {
+        console.error(`Failed to delete bridge ${existing.name} via fallback:`, fbErr);
       }
-    } catch (err) {
-      console.warn(`OS bridge removal error for ${existing.name}:`, err instanceof Error ? err.message : err);
-    }
-
-    // Remove persisted bridge config from /etc/network/interfaces
-    try {
-      removePersistedBridge(existing.name);
-    } catch (err) {
-      console.warn(`Remove persisted bridge error for ${existing.name}:`, err instanceof Error ? err.message : err);
     }
 
     await db.bridgeConfig.delete({ where: { id } });

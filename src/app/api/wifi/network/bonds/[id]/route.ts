@@ -5,9 +5,10 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
+import { execSync } from 'child_process';
 import { db } from '@/lib/db';
 import { getTenantIdFromSession } from '@/lib/auth/tenant-context';
-import { deleteBond, removePersistedBond } from '@/lib/network';
+import { deleteBond as nmcliDeleteBond } from '@/lib/network/nmcli';
 
 interface RouteParams {
   params: Promise<{ id: string }>;
@@ -86,6 +87,22 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
   }
 }
 
+/** Inline fallback: delete bond via raw nmcli commands */
+function fallbackDeleteBond(name: string): void {
+  // Remove all slave connections first
+  try {
+    const stdout = execSync(`nmcli -t -f NAME,TYPE con show 2>/dev/null`, { encoding: 'utf-8', timeout: 5000 });
+    for (const line of stdout.split('\n').filter(Boolean)) {
+      const [conName, conType] = line.split(':');
+      if (conName.startsWith(`${name}-slave-`) && conType === '802-3-ethernet') {
+        execSync(`sudo nmcli con delete "${conName}" 2>/dev/null || true`, { encoding: 'utf-8', timeout: 10000 });
+      }
+    }
+  } catch { /* ignore */ }
+  execSync(`sudo nmcli con down "${name}" 2>/dev/null || true`, { encoding: 'utf-8', timeout: 10000 });
+  execSync(`sudo nmcli con delete "${name}" 2>/dev/null`, { encoding: 'utf-8', timeout: 10000 });
+}
+
 // DELETE /api/wifi/network/bonds/[id] - Delete bond config
 export async function DELETE(request: NextRequest, { params }: RouteParams) {
   const tenantId = await getTenantIdFromSession(request);
@@ -107,21 +124,17 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
       );
     }
 
-    // Execute OS-level bond deletion via shell script
+    // Execute OS-level bond deletion via nmcli wrapper (with inline fallback)
     try {
-      const osResult = deleteBond(existing.name);
-      if (!osResult.success) {
-        console.warn(`OS bond removal failed for ${existing.name}:`, osResult.error);
+      nmcliDeleteBond(existing.name);
+    } catch (err) {
+      console.warn(`OS bond removal failed for ${existing.name} via nmcli wrapper:`, err instanceof Error ? err.message : err);
+      // Inline fallback
+      try {
+        fallbackDeleteBond(existing.name);
+      } catch (fbErr) {
+        console.error(`Failed to delete bond ${existing.name} via fallback:`, fbErr);
       }
-    } catch (err) {
-      console.warn(`OS bond removal error for ${existing.name}:`, err instanceof Error ? err.message : err);
-    }
-
-    // Remove persisted bond config from /etc/network/interfaces
-    try {
-      removePersistedBond(existing.name);
-    } catch (err) {
-      console.warn(`Remove persisted bond error for ${existing.name}:`, err instanceof Error ? err.message : err);
     }
 
     // Members will be cascade-deleted
