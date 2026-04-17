@@ -815,15 +815,29 @@ export default function NetworkPage() {
       }
 
       // If role changed, call role API
-      if (matchedRole && editInterfaceData.role !== matchedRole.role) {
-        await fetch(`/api/network/os/interfaces/${selectedInterface.name}/role`, {
+      if (editInterfaceData.role !== (matchedRole?.role || 'unused') || editInterfaceData.priority !== (matchedRole?.priority || 0)) {
+        const roleRes = await fetch(`/api/network/os/interfaces/${selectedInterface.name}/role`, {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ role: editInterfaceData.role, priority: editInterfaceData.priority }),
         });
+        const roleResult = await roleRes.json();
+        if (roleResult.success) {
+          toast({ title: 'Role Updated', description: `${selectedInterface.name} set to ${editInterfaceData.role.toUpperCase()}` });
+        } else if (roleResult.warning) {
+          toast({ title: 'Role Updated (partial)', description: roleResult.warning, variant: 'default' });
+        }
       }
 
-      // Also save to DB for metadata
+      // When using OS data, the OS API calls above handle everything — no DB metadata call needed
+      if (osDataLoaded) {
+        toast({ title: 'Interface Updated', description: `${editInterfaceData.name} configuration saved.` });
+        setEditInterfaceOpen(false);
+        fetchInterfaces();
+        return;
+      }
+
+      // Fallback: save to DB for metadata (only when NOT using OS data)
       const res = await fetch(`/api/wifi/network/interfaces/${selectedInterface.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
