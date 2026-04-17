@@ -593,6 +593,11 @@ function startKeaServer(): { success: boolean; message: string; pid?: number } {
 
   try {
     const ldPrefix = LD_LIB ? `LD_LIBRARY_PATH=${LD_LIB} ` : '';
+    // Ensure /run/kea exists (kea-dhcp4 needs it for PID file and sockets)
+    try {
+      execSync('mkdir -p /run/kea && chmod 755 /run/kea');
+    } catch {}
+
     const cmd = `${ldPrefix}${KEA_BINARY_PATH} -c ${KEA_CONFIG_PATH}`;
     const proc = Bun.spawn(['sh', '-c', cmd], {
       detached: true,
