@@ -95,7 +95,7 @@ export async function POST(request: NextRequest) {
       enabled = true,
     } = body;
 
-    if (!propertyId || !vlanId === undefined || !subInterface) {
+    if (!propertyId || vlanId === undefined || !subInterface) {
       return NextResponse.json(
         {
           success: false,
@@ -108,48 +108,42 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Resolve parent interface: try by CUID id first, then by name, then auto-create
-    let parentId = parentInterfaceId;
-    if (!parentId && parentInterfaceName) {
-      const byName = await db.networkInterface.findFirst({
-        where: { name: parentInterfaceName, tenantId },
-      });
-      parentId = byName?.id || null;
-    }
+    // Resolve parent interface: try CUID, then by name
+    let parentRecord = await db.networkInterface.findFirst({
+      where: { id: parentInterfaceId || '', tenantId },
+    });
 
-    // If still no parent found, try the id field as a name (frontend may send interface name as id)
-    if (!parentId && parentInterfaceId) {
-      const byName = await db.networkInterface.findFirst({
+    if (!parentRecord && parentInterfaceId) {
+      // The frontend may send the interface name as parentInterfaceId
+      parentRecord = await db.networkInterface.findFirst({
         where: { name: parentInterfaceId, tenantId },
       });
-      if (byName) {
-        parentId = byName.id;
-      }
     }
 
-    // Auto-create parent NetworkInterface if it doesn't exist in DB yet
-    if (!parentId) {
-      const ifaceName = parentInterfaceName || parentInterfaceId || subInterface.split('.')[0];
-      if (ifaceName) {
-        const created = await db.networkInterface.create({
-          data: {
-            tenantId,
-            propertyId,
-            name: ifaceName,
-            type: 'ethernet',
-            status: 'up',
-            hwAddress: '',
-            mtu: 1500,
-          },
-        });
-        parentId = created.id;
-      }
+    if (!parentRecord && parentInterfaceName) {
+      parentRecord = await db.networkInterface.findFirst({
+        where: { name: parentInterfaceName, tenantId },
+      });
     }
 
-    if (!parentId) {
+    // If still not found, try extracting name from subInterface (e.g. "eth1.100" → "eth1")
+    if (!parentRecord) {
+      const ifaceName = subInterface.split('.')[0];
+      parentRecord = await db.networkInterface.findFirst({
+        where: { name: ifaceName, tenantId },
+      });
+    }
+
+    // Use connectOrCreate to safely link or auto-create the parent interface
+    const parentIfaceName = parentRecord?.name
+      || parentInterfaceName
+      || (subInterface.includes('.') ? subInterface.split('.')[0] : null)
+      || parentInterfaceId;
+
+    if (!parentIfaceName) {
       return NextResponse.json(
-        { success: false, error: { code: 'NOT_FOUND', message: 'Parent interface not found and could not be created' } },
-        { status: 404 },
+        { success: false, error: { code: 'VALIDATION_ERROR', message: 'Cannot determine parent interface name' } },
+        { status: 400 },
       );
     }
 
@@ -180,11 +174,30 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Create VLAN with connectOrCreate for parent interface
     const vlan = await db.vlanConfig.create({
       data: {
         tenantId,
         propertyId,
-        parentInterfaceId: parentId,
+        parentInterface: {
+          connectOrCreate: {
+            where: {
+              propertyId_name: {
+                propertyId,
+                name: parentIfaceName,
+              },
+            },
+            create: {
+              tenantId,
+              propertyId,
+              name: parentIfaceName,
+              type: 'ethernet',
+              status: 'up',
+              hwAddress: '',
+              mtu: 1500,
+            },
+          },
+        },
         vlanId: parseInt(vlanId, 10),
         subInterface,
         description,
