@@ -2,14 +2,33 @@
  * VLAN by ID API Route
  *
  * GET, PUT, DELETE for individual VLAN configurations.
+ * [id] can be a DB CUID or a subInterface name (e.g. eth1.100).
  */
 
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { getTenantIdFromSession } from '@/lib/auth/tenant-context';
+import { execSync } from 'child_process';
 
 interface RouteParams {
   params: Promise<{ id: string }>;
+}
+
+// Helper: resolve [id] — could be CUID or subInterface name
+async function resolveVlan(id: string, tenantId: string) {
+  // Try by CUID first
+  let vlan = await db.vlanConfig.findFirst({
+    where: { id, tenantId },
+    include: { parentInterface: true, _count: { select: { dhcpSubnets: true } } },
+  });
+  // If not found, try by subInterface name
+  if (!vlan) {
+    vlan = await db.vlanConfig.findFirst({
+      where: { subInterface: id, tenantId },
+      include: { parentInterface: true, _count: { select: { dhcpSubnets: true } } },
+    });
+  }
+  return vlan;
 }
 
 // GET /api/wifi/network/vlans/[id] - Get single VLAN
@@ -21,23 +40,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
 
   try {
     const { id } = await params;
-
-    const vlan = await db.vlanConfig.findFirst({
-      where: { id, tenantId },
-      include: {
-        parentInterface: true,
-        dhcpSubnets: {
-          include: {
-            _count: {
-              select: {
-                reservations: true,
-                leases: true,
-              },
-            },
-          },
-        },
-      },
-    });
+    const vlan = await resolveVlan(id, tenantId);
 
     if (!vlan) {
       return NextResponse.json(
@@ -66,10 +69,7 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
   try {
     const { id } = await params;
     const body = await request.json();
-
-    const existing = await db.vlanConfig.findFirst({
-      where: { id, tenantId },
-    });
+    const existing = await resolveVlan(id, tenantId);
 
     if (!existing) {
       return NextResponse.json(
@@ -83,7 +83,7 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
     // Check for duplicate VLAN ID if changing
     if (vlanId !== undefined && vlanId !== existing.vlanId) {
       const duplicate = await db.vlanConfig.findFirst({
-        where: { propertyId: existing.propertyId, vlanId: parseInt(vlanId, 10), tenantId, id: { not: id } },
+        where: { propertyId: existing.propertyId, vlanId: parseInt(vlanId, 10), tenantId, id: { not: existing.id } },
       });
       if (duplicate) {
         return NextResponse.json(
@@ -96,21 +96,18 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
     // Check for duplicate sub-interface name if changing
     if (subInterface && subInterface !== existing.subInterface) {
       const duplicate = await db.vlanConfig.findFirst({
-        where: { propertyId: existing.propertyId, subInterface, tenantId, id: { not: id } },
+        where: { propertyId: existing.propertyId, subInterface, tenantId, id: { not: existing.id } },
       });
       if (duplicate) {
         return NextResponse.json(
-          {
-            success: false,
-            error: { code: 'DUPLICATE_SUBIF', message: 'A sub-interface with this name already exists on this property' },
-          },
+          { success: false, error: { code: 'DUPLICATE_SUBIF', message: 'A sub-interface with this name already exists on this property' } },
           { status: 400 },
         );
       }
     }
 
     const vlan = await db.vlanConfig.update({
-      where: { id },
+      where: { id: existing.id },
       data: {
         ...(vlanId !== undefined && { vlanId: parseInt(vlanId, 10) }),
         ...(subInterface && { subInterface }),
@@ -131,6 +128,7 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
 }
 
 // DELETE /api/wifi/network/vlans/[id] - Delete VLAN
+// [id] can be a DB CUID or a subInterface name (e.g. eth1.100)
 export async function DELETE(request: NextRequest, { params }: RouteParams) {
   const tenantId = await getTenantIdFromSession(request);
   if (!tenantId) {
@@ -139,23 +137,19 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
 
   try {
     const { id } = await params;
-
-    const existing = await db.vlanConfig.findFirst({
-      where: { id, tenantId },
-      include: {
-        _count: {
-          select: {
-            dhcpSubnets: true,
-          },
-        },
-      },
-    });
+    const existing = await resolveVlan(id, tenantId);
 
     if (!existing) {
-      return NextResponse.json(
-        { success: false, error: { code: 'NOT_FOUND', message: 'VLAN not found' } },
-        { status: 404 },
-      );
+      // Even if not in DB, try to remove the OS-level VLAN interface
+      try {
+        execSync(`ip link del ${id} 2>/dev/null`, { timeout: 5000 });
+        return NextResponse.json({ success: true, message: `VLAN interface ${id} removed from OS.` });
+      } catch {
+        return NextResponse.json(
+          { success: false, error: { code: 'NOT_FOUND', message: 'VLAN not found in DB or OS' } },
+          { status: 404 },
+        );
+      }
     }
 
     if (existing._count.dhcpSubnets > 0) {
@@ -171,9 +165,17 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
       );
     }
 
-    await db.vlanConfig.delete({ where: { id } });
+    // Remove from OS first
+    const ifaceName = existing.subInterface;
+    try {
+      execSync(`ip link del ${ifaceName} 2>/dev/null`, { timeout: 5000 });
+    } catch {
+      // OS removal failed — might not exist at OS level, continue with DB removal
+    }
 
-    return NextResponse.json({ success: true, message: 'VLAN deleted successfully' });
+    await db.vlanConfig.delete({ where: { id: existing.id } });
+
+    return NextResponse.json({ success: true, message: `VLAN ${ifaceName} deleted from DB and OS.` });
   } catch (error) {
     console.error('Error deleting VLAN:', error);
     return NextResponse.json(
