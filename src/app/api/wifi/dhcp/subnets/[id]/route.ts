@@ -166,7 +166,9 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
     // Delete associated leases first
     await db.dhcpLease.deleteMany({ where: { subnetId: id } });
 
-    await db.dhcpSubnet.delete({ where: { id } });
+    await db.dhcpSubnet.delete({ where: { id } }).catch(() => {
+      // Record may not exist in DB (e.g., managed only by Kea, not our DB)
+    });
 
     return NextResponse.json({ success: true, message: 'DHCP subnet deleted successfully' });
   } catch (error) {
