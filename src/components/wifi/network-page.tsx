@@ -1070,23 +1070,28 @@ export default function NetworkPage() {
     }
     console.log('[VLAN ADD] Validation passed, calling APIs...');
     try {
-      // Create VLAN via OS API first (real ip link command)
+      // Create VLAN via OS API first (L3: interface + IP in one step)
       if (osDataLoaded) {
+        const osBody: Record<string, unknown> = {
+          parentInterface: newVlan.parentInterface,
+          vlanId: parseInt(newVlan.vlanId),
+          mtu: newVlan.mtu,
+        };
+        // Pass IP directly for L3 VLAN creation (single step)
+        if (newVlan.ipAddress && newVlan.netmask) {
+          osBody.ipAddress = newVlan.ipAddress;
+          osBody.netmask = newVlan.netmask;
+        }
         const osRes = await fetch('/api/network/os/vlans', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            parentInterface: newVlan.parentInterface,
-            vlanId: parseInt(newVlan.vlanId),
-            description: newVlan.description,
-            mtu: newVlan.mtu,
-          }),
+          body: JSON.stringify(osBody),
         });
         const osResult = await osRes.json();
         if (osResult.success) {
           toast({ title: 'VLAN Created on OS', description: osResult.message });
         } else {
-          toast({ title: 'OS VLAN Error', description: osResult.output || 'Failed to create VLAN on OS', variant: 'destructive' });
+          toast({ title: 'OS VLAN Error', description: osResult.error?.message || osResult.output || 'Failed to create VLAN on OS', variant: 'destructive' });
         }
       }
       // Also save to DB
@@ -1107,14 +1112,7 @@ export default function NetworkPage() {
       });
       const result = await res.json();
       if (result.success) {
-        // Apply IP address if provided
-        if (newVlan.ipAddress && newVlan.netmask) {
-          await fetch(`/api/network/os/interfaces/${subIfaceName}`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ mode: 'static', ipAddress: newVlan.ipAddress, netmask: newVlan.netmask }),
-          });
-        }
-        toast({ title: 'VLAN Created', description: `VLAN ${newVlan.vlanId} has been added.${newVlan.ipAddress ? ` IP ${newVlan.ipAddress} assigned.` : ''}` });
+        toast({ title: 'VLAN Created', description: `VLAN ${newVlan.vlanId} has been added.${newVlan.ipAddress ? ` IP ${newVlan.ipAddress}/${newVlan.netmask || '24'} assigned.` : ''}` });
         setAddVlanOpen(false);
         setNewVlan({ vlanId: '', parentInterface: 'eth1', description: '', mtu: 1500, subnet: '', ipAddress: '', netmask: '' });
         fetchVlans();
