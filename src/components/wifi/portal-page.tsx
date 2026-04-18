@@ -40,8 +40,6 @@ import {
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
-  Globe,
-  Shield,
   Palette,
   Layout,
   Plus,
@@ -66,10 +64,10 @@ import {
   Monitor,
   CheckCircle2,
   XCircle,
-  Search,
   ArrowUpDown,
   Layers,
 } from 'lucide-react';
+// Note: Globe, Shield, Search, ChevronRight, ChevronDown removed — DNS tabs moved to DNS Server page
 import { cn } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
 import { usePropertyId } from '@/hooks/use-property';
@@ -77,7 +75,6 @@ import { usePropertyId } from '@/hooks/use-property';
 // ── Static Config ─────────────────────────────────────────────────────────────
 
 const VLAN_OPTIONS = ['VLAN 10', 'VLAN 20', 'VLAN 30', 'VLAN 40', 'VLAN 50'];
-const RECORD_TYPES = ['A', 'AAAA', 'CNAME', 'MX', 'TXT', 'SRV', 'PTR'];
 const LANGUAGES = ['English', 'Spanish', 'French', 'German', 'Japanese', 'Hindi', 'Arabic', 'Portuguese', 'Chinese'];
 
 const AUTH_METHOD_META: Record<string, { icon: typeof Ticket; color: string; displayName: string }> = {
@@ -116,22 +113,6 @@ const DEFAULT_GRADIENTS = [
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-const recordTypeColors: Record<string, string> = {
-  A: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300',
-  AAAA: 'bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-300',
-  CNAME: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
-  MX: 'bg-teal-100 text-teal-700 dark:bg-teal-900/40 dark:text-teal-300',
-  TXT: 'bg-gray-100 text-gray-700 dark:bg-gray-900/40 dark:text-gray-300',
-  SRV: 'bg-pink-100 text-pink-700 dark:bg-pink-900/40 dark:text-pink-300',
-  PTR: 'bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300',
-};
-
-const applyToBadge: Record<string, { label: string; cls: string }> = {
-  unauthenticated: { label: 'Unauthenticated', cls: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300' },
-  all: { label: 'All Users', cls: 'bg-teal-100 text-teal-700 dark:bg-teal-900/40 dark:text-teal-300' },
-  authenticated: { label: 'Authenticated', cls: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300' },
-};
-
 const categoryColors: Record<string, string> = {
   'Hotel Luxury': 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
   'Resort Casual': 'bg-teal-100 text-teal-700 dark:bg-teal-900/40 dark:text-teal-300',
@@ -153,8 +134,6 @@ const categoryColors: Record<string, string> = {
 // ── Tab Definitions ──────────────────────────────────────────────────────────
 
 const TABS = [
-  { id: 'zones', label: 'DNS Zones', icon: Globe },
-  { id: 'redirects', label: 'DNS Redirects', icon: Shield },
   { id: 'portals', label: 'Portal List', icon: Monitor },
   { id: 'designer', label: 'Portal Designer', icon: Palette },
   { id: 'mapping', label: 'Portal Mapping', icon: Layers },
@@ -195,7 +174,7 @@ async function apiMutate<T>(url: string, options?: RequestInit): Promise<{ data:
 // ═══════════════════════════════════════════════════════════════════════════════
 
 export default function PortalPage() {
-  const [activeTab, setActiveTab] = useState<TabId>('zones');
+  const [activeTab, setActiveTab] = useState<TabId>('portals');
   const [portalOptions, setPortalOptions] = useState<string[]>([]);
 
   const fetchPortalOptions = useCallback(async () => {
@@ -217,9 +196,9 @@ export default function PortalPage() {
     <div className="space-y-6">
       {/* Page Header */}
       <div>
-        <h2 className="text-2xl font-bold tracking-tight">DNS &amp; Captive Portal</h2>
+        <h2 className="text-2xl font-bold tracking-tight">Captive Portal</h2>
         <p className="text-sm text-muted-foreground mt-1">
-          Manage DNS zones, captive portal instances, and guest authentication
+          Manage captive portal instances, guest authentication, and portal design
         </p>
       </div>
 
@@ -252,8 +231,6 @@ export default function PortalPage() {
 
       {/* Tab Content */}
       <div className="mt-4">
-        {activeTab === 'zones' && <DnsZonesTab />}
-        {activeTab === 'redirects' && <DnsRedirectsTab />}
         {activeTab === 'portals' && <PortalListTab onPortalsChanged={fetchPortalOptions} />}
         {activeTab === 'designer' && <PortalDesignerTab portalOptions={portalOptions} />}
         {activeTab === 'mapping' && <PortalMappingTab portalOptions={portalOptions} />}
@@ -265,693 +242,9 @@ export default function PortalPage() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Tab 1: DNS Zones
+// Tab 1: Portal List
 // ═══════════════════════════════════════════════════════════════════════════════
-
-interface DnsZone {
-  id: string;
-  domain: string;
-  records: number;
-  vlan: string;
-  status: boolean;
-  description: string;
-  recordsList: { id: string; type: string; name: string; value: string; ttl: number; priority: number | null }[];
-}
-
-function DnsZonesTab() {
-  const [zones, setZones] = useState<DnsZone[]>([]);
-  const [expandedZone, setExpandedZone] = useState<string | null>(null);
-  const [zoneRecords, setZoneRecords] = useState<Record<string, DnsZone['recordsList']>>({});
-  const [loading, setLoading] = useState(true);
-  const [recordsLoading, setRecordsLoading] = useState(false);
-  const [search, setSearch] = useState('');
-  const [addZoneOpen, setAddZoneOpen] = useState(false);
-  const [addRecordOpen, setAddRecordOpen] = useState(false);
-  const [editZoneOpen, setEditZoneOpen] = useState(false);
-  const [selectedZoneId, setSelectedZoneId] = useState<string | null>(null);
-  const [newZone, setNewZone] = useState({ domain: '', vlan: 'VLAN 10', description: '' });
-  const [newRecord, setNewRecord] = useState({ type: 'A', name: '', value: '', ttl: 300, priority: '' });
-  const { toast } = useToast();
-  const { propertyId } = usePropertyId();
-
-  const fetchZones = useCallback(async () => {
-    setLoading(true);
-    const data = await apiFetch<any[]>('/api/wifi/portal/dns-zones');
-    if (data) {
-      setZones(data.map((z: any) => ({
-        id: z.id,
-        domain: z.domain,
-        records: z._count?.records || 0,
-        vlan: z.vlanId ? `VLAN ${z.vlanId}` : VLAN_OPTIONS[0],
-        status: z.enabled ?? true,
-        description: z.description || '',
-        recordsList: [],
-      })));
-    }
-    setLoading(false);
-  }, []);
-
-  const fetchZoneRecords = useCallback(async (zoneId: string) => {
-    if (zoneRecords[zoneId]) return;
-    setRecordsLoading(true);
-    const data = await apiFetch<any[]>(`/api/wifi/portal/dns-records?zoneId=${zoneId}`);
-    if (data) {
-      setZoneRecords((prev) => ({
-        ...prev,
-        [zoneId]: data.map((r: any) => ({
-          id: r.id,
-          type: r.type,
-          name: r.name,
-          value: r.value,
-          ttl: r.ttl,
-          priority: r.priority,
-        })),
-      }));
-    }
-    setRecordsLoading(false);
-  }, [zoneRecords]);
-
-  useEffect(() => {
-    fetchZones();
-  }, [fetchZones]);
-
-  useEffect(() => {
-    if (expandedZone) {
-      fetchZoneRecords(expandedZone);
-    }
-  }, [expandedZone, fetchZoneRecords]);
-
-  const filteredZones = zones.filter(
-    (z) =>
-      z.domain.toLowerCase().includes(search.toLowerCase()) ||
-      z.description.toLowerCase().includes(search.toLowerCase())
-  );
-
-  const toggleZoneStatus = async (id: string) => {
-    const zone = zones.find((z) => z.id === id);
-    if (!zone) return;
-    const { error } = await apiMutate(`/api/wifi/portal/dns-zones/${id}`, {
-      method: 'PUT',
-      body: JSON.stringify({ enabled: !zone.status }),
-    });
-    if (!error) {
-      setZones((prev) => prev.map((z) => (z.id === id ? { ...z, status: !z.status } : z)));
-      toast({ title: 'Zone updated', description: `Zone ${zone.domain} ${!zone.status ? 'enabled' : 'disabled'}` });
-    } else {
-      toast({ title: 'Error', description: error, variant: 'destructive' });
-    }
-  };
-
-  const addZone = async () => {
-    if (!newZone.domain) return;
-    const { data, error } = await apiMutate<any>('/api/wifi/portal/dns-zones', {
-      method: 'POST',
-      body: JSON.stringify({
-        propertyId: propertyId || 'default',
-        domain: newZone.domain,
-        vlanId: parseInt(newZone.vlan.replace('VLAN ', ''), 10),
-        description: newZone.description,
-        enabled: true,
-      }),
-    });
-    if (data) {
-      toast({ title: 'Zone created', description: `DNS zone ${newZone.domain} created` });
-      await fetchZones();
-      setAddZoneOpen(false);
-      setNewZone({ domain: '', vlan: 'VLAN 10', description: '' });
-    } else {
-      toast({ title: 'Error creating zone', description: error || 'Failed to create zone', variant: 'destructive' });
-    }
-  };
-
-  const addRecord = async () => {
-    if (!newRecord.name || !newRecord.value || !selectedZoneId) return;
-    const priorityVal = (newRecord.type === 'MX' || newRecord.type === 'SRV') && newRecord.priority ? parseInt(newRecord.priority) : null;
-    const { error } = await apiMutate('/api/wifi/portal/dns-records', {
-      method: 'POST',
-      body: JSON.stringify({
-        zoneId: selectedZoneId,
-        type: newRecord.type,
-        name: newRecord.name,
-        value: newRecord.value,
-        ttl: newRecord.ttl,
-        priority: priorityVal,
-      }),
-    });
-    if (!error) {
-      toast({ title: 'Record added', description: `DNS record added to zone` });
-      const { [selectedZoneId]: _removed, ...rest } = zoneRecords;
-      setZoneRecords(rest);
-      await fetchZoneRecords(selectedZoneId);
-      await fetchZones();
-      setAddRecordOpen(false);
-      setNewRecord({ type: 'A', name: '', value: '', ttl: 300, priority: '' });
-    } else {
-      toast({ title: 'Error adding record', description: error || 'Failed to add record', variant: 'destructive' });
-    }
-  };
-
-  const openAddRecord = (zoneId: string) => {
-    setSelectedZoneId(zoneId);
-    setAddRecordOpen(true);
-  };
-
-  const openEditZone = (zoneId: string) => {
-    setSelectedZoneId(zoneId);
-    const z = zones.find((z) => z.id === zoneId);
-    if (z) setNewZone({ domain: z.domain, vlan: z.vlan, description: z.description });
-    setEditZoneOpen(true);
-  };
-
-  const saveEditZone = async () => {
-    if (!newZone.domain || !selectedZoneId) return;
-    const { error } = await apiMutate(`/api/wifi/portal/dns-zones/${selectedZoneId}`, {
-      method: 'PUT',
-      body: JSON.stringify({
-        domain: newZone.domain,
-        vlanId: parseInt(newZone.vlan.replace('VLAN ', ''), 10),
-        description: newZone.description,
-      }),
-    });
-    if (!error) {
-      toast({ title: 'Zone updated', description: `DNS zone updated` });
-      await fetchZones();
-      setEditZoneOpen(false);
-    } else {
-      toast({ title: 'Error updating zone', description: error || 'Failed to update zone', variant: 'destructive' });
-    }
-  };
-
-  const deleteZone = async (id: string) => {
-    const { error } = await apiMutate(`/api/wifi/portal/dns-zones/${id}`, { method: 'DELETE' });
-    if (!error) {
-      toast({ title: 'Zone deleted', description: 'DNS zone deleted' });
-      setZones((prev) => prev.filter((z) => z.id !== id));
-      if (expandedZone === id) setExpandedZone(null);
-    } else {
-      toast({ title: 'Error deleting zone', description: error || 'Failed to delete zone', variant: 'destructive' });
-    }
-  };
-
-  if (loading) {
-    return (
-      <div className="space-y-4">
-        <Skeleton className="h-10 w-full max-w-sm" />
-        <Skeleton className="h-6 w-full" />
-        <Card><CardContent className="p-6 space-y-4"><Skeleton className="h-12 w-full" /><Skeleton className="h-12 w-full" /><Skeleton className="h-12 w-full" /></CardContent></Card>
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-4">
-      {/* Toolbar */}
-      <div className="flex flex-col sm:flex-row gap-3 items-start sm:items-center justify-between">
-        <div className="relative flex-1 max-w-sm">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-          <Input placeholder="Search zones..." value={search} onChange={(e) => setSearch(e.target.value)} className="pl-9" />
-        </div>
-        <Button onClick={() => setAddZoneOpen(true)} className="bg-teal-600 hover:bg-teal-700">
-          <Plus className="h-4 w-4 mr-2" />
-          Add Zone
-        </Button>
-      </div>
-
-      {/* Auto-records Info */}
-      <div className="flex items-center gap-2 rounded-lg border border-teal-200 dark:border-teal-800 bg-teal-50 dark:bg-teal-950/30 p-3 text-sm">
-        <Zap className="h-4 w-4 text-teal-600 shrink-0" />
-        <span className="text-teal-700 dark:text-teal-300">
-          Built-in auto-records: <code className="font-mono bg-teal-100 dark:bg-teal-900 px-1 rounded">portal.staysuite.local</code> → portal IP,{' '}
-          <code className="font-mono bg-teal-100 dark:bg-teal-900 px-1 rounded">dns.staysuite.local</code> → server IP
-        </span>
-      </div>
-
-      {/* Zones Table */}
-      <Card>
-        <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead className="w-8" />
-                <TableHead>Domain</TableHead>
-                <TableHead>Records</TableHead>
-                <TableHead>VLAN</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead className="text-right">Actions</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {filteredZones.map((zone) => (
-                <React.Fragment key={zone.id}>
-                  <TableRow className={cn('cursor-pointer hover:bg-muted/50', expandedZone === zone.id && 'bg-muted/30')} onClick={() => setExpandedZone(expandedZone === zone.id ? null : zone.id)}>
-                    <TableCell className="w-8">
-                      {expandedZone === zone.id ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex items-center gap-2">
-                        <Globe className="h-4 w-4 text-teal-500" />
-                        <span className="font-mono font-medium text-sm">{zone.domain}</span>
-                      </div>
-                      <p className="text-xs text-muted-foreground mt-0.5 ml-6">{zone.description}</p>
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant="secondary">{zone.records}</Badge>
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant="outline">{zone.vlan}</Badge>
-                    </TableCell>
-                    <TableCell>
-                      <Switch checked={zone.status} onCheckedChange={() => toggleZoneStatus(zone.id)} onClick={(e) => e.stopPropagation()} />
-                    </TableCell>
-                    <TableCell className="text-right" onClick={(e) => e.stopPropagation()}>
-                      <div className="flex justify-end gap-1">
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => openEditZone(zone.id)}>
-                              <Edit2 className="h-3.5 w-3.5" />
-                            </Button>
-                          </TooltipTrigger>
-                          <TooltipContent>Edit zone</TooltipContent>
-                        </Tooltip>
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => openAddRecord(zone.id)}>
-                              <Plus className="h-3.5 w-3.5" />
-                            </Button>
-                          </TooltipTrigger>
-                          <TooltipContent>Add record</TooltipContent>
-                        </Tooltip>
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Button variant="ghost" size="icon" className="h-8 w-8 text-red-500 hover:text-red-600" onClick={() => deleteZone(zone.id)}>
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </Button>
-                          </TooltipTrigger>
-                          <TooltipContent>Delete zone</TooltipContent>
-                        </Tooltip>
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                  {/* Expanded records sub-table */}
-                  {expandedZone === zone.id && (
-                    <TableRow>
-                      <TableCell colSpan={6} className="bg-muted/20 p-0">
-                        <div className="p-4 ml-8">
-                          <p className="text-xs font-medium text-muted-foreground mb-2 uppercase tracking-wider">DNS Records</p>
-                          {recordsLoading && !zoneRecords[zone.id] ? (
-                            <div className="space-y-2"><Skeleton className="h-8 w-full" /><Skeleton className="h-8 w-full" /><Skeleton className="h-8 w-full" /></div>
-                          ) : (
-                            <Table>
-                              <TableHeader>
-                                <TableRow>
-                                  <TableHead className="text-xs">Type</TableHead>
-                                  <TableHead className="text-xs">Name</TableHead>
-                                  <TableHead className="text-xs">Value</TableHead>
-                                  <TableHead className="text-xs">TTL</TableHead>
-                                  <TableHead className="text-xs">Priority</TableHead>
-                                </TableRow>
-                              </TableHeader>
-                              <TableBody>
-                                {(zoneRecords[zone.id] || []).map((rec) => (
-                                  <TableRow key={rec.id}>
-                                    <TableCell>
-                                      <Badge className={cn('text-xs font-mono', recordTypeColors[rec.type])} variant="secondary">
-                                        {rec.type}
-                                      </Badge>
-                                    </TableCell>
-                                    <TableCell className="font-mono text-sm">{rec.name}</TableCell>
-                                    <TableCell className="font-mono text-sm">{rec.value}</TableCell>
-                                    <TableCell className="text-sm text-muted-foreground">{rec.ttl}s</TableCell>
-                                    <TableCell className="text-sm text-muted-foreground">{rec.priority ?? '—'}</TableCell>
-                                  </TableRow>
-                                ))}
-                              </TableBody>
-                            </Table>
-                          )}
-                        </div>
-                      </TableCell>
-                    </TableRow>
-                  )}
-                </React.Fragment>
-              ))}
-              {filteredZones.length === 0 && (
-                <TableRow>
-                  <TableCell colSpan={6} className="text-center py-8 text-muted-foreground">No DNS zones found</TableCell>
-                </TableRow>
-              )}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
-
-      {/* Add Zone Dialog */}
-      <Dialog open={addZoneOpen} onOpenChange={setAddZoneOpen}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>Add DNS Zone</DialogTitle>
-            <DialogDescription>Create a new local DNS zone for internal resolution</DialogDescription>
-          </DialogHeader>
-          <div className="grid gap-4 py-4">
-            <div className="space-y-2">
-              <Label>Domain *</Label>
-              <Input placeholder="example.staysuite.local" value={newZone.domain} onChange={(e) => setNewZone({ ...newZone, domain: e.target.value })} />
-            </div>
-            <div className="space-y-2">
-              <Label>VLAN</Label>
-              <Select value={newZone.vlan} onValueChange={(v) => setNewZone({ ...newZone, vlan: v })}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>{VLAN_OPTIONS.map((v) => <SelectItem key={v} value={v}>{v}</SelectItem>)}</SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-2">
-              <Label>Description</Label>
-              <Input placeholder="Zone description" value={newZone.description} onChange={(e) => setNewZone({ ...newZone, description: e.target.value })} />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setAddZoneOpen(false)}>Cancel</Button>
-            <Button onClick={addZone} className="bg-teal-600 hover:bg-teal-700">Add Zone</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Edit Zone Dialog */}
-      <Dialog open={editZoneOpen} onOpenChange={setEditZoneOpen}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>Edit DNS Zone</DialogTitle>
-            <DialogDescription>Update zone configuration</DialogDescription>
-          </DialogHeader>
-          <div className="grid gap-4 py-4">
-            <div className="space-y-2">
-              <Label>Domain *</Label>
-              <Input value={newZone.domain} onChange={(e) => setNewZone({ ...newZone, domain: e.target.value })} />
-            </div>
-            <div className="space-y-2">
-              <Label>VLAN</Label>
-              <Select value={newZone.vlan} onValueChange={(v) => setNewZone({ ...newZone, vlan: v })}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>{VLAN_OPTIONS.map((v) => <SelectItem key={v} value={v}>{v}</SelectItem>)}</SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-2">
-              <Label>Description</Label>
-              <Input value={newZone.description} onChange={(e) => setNewZone({ ...newZone, description: e.target.value })} />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setEditZoneOpen(false)}>Cancel</Button>
-            <Button onClick={saveEditZone} className="bg-teal-600 hover:bg-teal-700">Save Changes</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Add Record Dialog */}
-      <Dialog open={addRecordOpen} onOpenChange={setAddRecordOpen}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>Add DNS Record</DialogTitle>
-            <DialogDescription>Add a new record to the selected zone</DialogDescription>
-          </DialogHeader>
-          <div className="grid gap-4 py-4">
-            <div className="space-y-2">
-              <Label>Record Type</Label>
-              <Select value={newRecord.type} onValueChange={(v) => setNewRecord({ ...newRecord, type: v })}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>{RECORD_TYPES.map((t) => <SelectItem key={t} value={t}>{t}</SelectItem>)}</SelectContent>
-              </Select>
-            </div>
-            <div className="space-y-2">
-              <Label>Name *</Label>
-              <Input placeholder="subdomain or @" value={newRecord.name} onChange={(e) => setNewRecord({ ...newRecord, name: e.target.value })} />
-            </div>
-            <div className="space-y-2">
-              <Label>Value *</Label>
-              <Input placeholder="IP address or hostname" value={newRecord.value} onChange={(e) => setNewRecord({ ...newRecord, value: e.target.value })} />
-            </div>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label>TTL (seconds)</Label>
-                <Input type="number" value={newRecord.ttl} onChange={(e) => setNewRecord({ ...newRecord, ttl: parseInt(e.target.value) || 300 })} />
-              </div>
-              {(newRecord.type === 'MX' || newRecord.type === 'SRV') && (
-                <div className="space-y-2">
-                  <Label>Priority</Label>
-                  <Input placeholder="10" value={newRecord.priority} onChange={(e) => setNewRecord({ ...newRecord, priority: e.target.value })} />
-                </div>
-              )}
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setAddRecordOpen(false)}>Cancel</Button>
-            <Button onClick={addRecord} className="bg-teal-600 hover:bg-teal-700">Add Record</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </div>
-  );
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Tab 2: DNS Redirect Rules
-// ═══════════════════════════════════════════════════════════════════════════════
-
-interface DnsRedirectRule {
-  id: string;
-  name: string;
-  match: string;
-  targetIP: string;
-  applyTo: string;
-  priority: number;
-  status: boolean;
-}
-
-function DnsRedirectsTab() {
-  const [rules, setRules] = useState<DnsRedirectRule[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [addOpen, setAddOpen] = useState(false);
-  const [newRule, setNewRule] = useState({ name: '', match: '', targetIP: '192.168.1.1', applyTo: 'unauthenticated' });
-  const { toast } = useToast();
-  const { propertyId } = usePropertyId();
-
-  const fetchRules = useCallback(async () => {
-    setLoading(true);
-    const data = await apiFetch<any[]>('/api/wifi/portal/dns-redirects');
-    if (data) {
-      setRules(data.map((r: any) => ({
-        id: r.id,
-        name: r.name,
-        match: r.matchPattern,
-        targetIP: r.targetIp,
-        applyTo: r.applyTo,
-        priority: r.priority,
-        status: r.enabled ?? true,
-      })).sort((a: DnsRedirectRule, b: DnsRedirectRule) => a.priority - b.priority));
-    }
-    setLoading(false);
-  }, []);
-
-  useEffect(() => {
-    fetchRules(); // eslint-disable-line react-hooks/set-state-in-effect -- standard data-fetching pattern
-  }, [fetchRules]);
-
-  const toggleStatus = async (id: string) => {
-    const rule = rules.find((r) => r.id === id);
-    if (!rule) return;
-    const { error } = await apiMutate(`/api/wifi/portal/dns-redirects/${id}`, {
-      method: 'PUT',
-      body: JSON.stringify({ enabled: !rule.status }),
-    });
-    if (!error) {
-      setRules((prev) => prev.map((r) => (r.id === id ? { ...r, status: !r.status } : r)));
-      toast({ title: 'Rule updated', description: `Redirect rule ${rule.name} ${!rule.status ? 'enabled' : 'disabled'}` });
-    } else {
-      toast({ title: 'Error', description: error, variant: 'destructive' });
-    }
-  };
-
-  const moveUp = async (index: number) => {
-    if (index === 0) return;
-    const arr = [...rules];
-    [arr[index - 1], arr[index]] = [arr[index], arr[index - 1]];
-    const updated = arr.map((r, i) => ({ ...r, priority: i + 1 }));
-    setRules(updated);
-    // Persist new priorities
-    for (const r of updated) {
-      await apiMutate(`/api/wifi/portal/dns-redirects/${r.id}`, {
-        method: 'PUT',
-        body: JSON.stringify({ priority: r.priority }),
-      });
-    }
-  };
-
-  const moveDown = async (index: number) => {
-    if (index === rules.length - 1) return;
-    const arr = [...rules];
-    [arr[index], arr[index + 1]] = [arr[index + 1], arr[index]];
-    const updated = arr.map((r, i) => ({ ...r, priority: i + 1 }));
-    setRules(updated);
-    for (const r of updated) {
-      await apiMutate(`/api/wifi/portal/dns-redirects/${r.id}`, {
-        method: 'PUT',
-        body: JSON.stringify({ priority: r.priority }),
-      });
-    }
-  };
-
-  const addRule = async () => {
-    if (!newRule.name || !newRule.match) return;
-    const { data, error } = await apiMutate<any>('/api/wifi/portal/dns-redirects', {
-      method: 'POST',
-      body: JSON.stringify({
-        propertyId: propertyId || 'default',
-        name: newRule.name,
-        matchPattern: newRule.match,
-        targetIp: newRule.targetIP,
-        applyTo: newRule.applyTo,
-        priority: rules.length + 1,
-        enabled: true,
-      }),
-    });
-    if (data) {
-      toast({ title: 'Rule created', description: `Redirect rule ${newRule.name} created` });
-      await fetchRules();
-      setAddOpen(false);
-      setNewRule({ name: '', match: '', targetIP: '192.168.1.1', applyTo: 'unauthenticated' });
-    } else {
-      toast({ title: 'Error creating rule', description: error || 'Failed to create rule', variant: 'destructive' });
-    }
-  };
-
-  const deleteRule = async (id: string) => {
-    const { error } = await apiMutate(`/api/wifi/portal/dns-redirects/${id}`, { method: 'DELETE' });
-    if (!error) {
-      toast({ title: 'Rule deleted', description: 'Redirect rule deleted' });
-      await fetchRules();
-    } else {
-      toast({ title: 'Error deleting rule', description: error || 'Failed to delete rule', variant: 'destructive' });
-    }
-  };
-
-  if (loading) {
-    return (
-      <div className="space-y-4">
-        <Skeleton className="h-10 w-48" />
-        <Card><CardContent className="p-6 space-y-4"><Skeleton className="h-12 w-full" /><Skeleton className="h-12 w-full" /><Skeleton className="h-12 w-full" /></CardContent></Card>
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <p className="text-sm text-muted-foreground">
-          {rules.filter((r) => r.status).length} of {rules.length} rules active
-        </p>
-        <Button onClick={() => setAddOpen(true)} className="bg-teal-600 hover:bg-teal-700">
-          <Plus className="h-4 w-4 mr-2" />
-          Add Rule
-        </Button>
-      </div>
-
-      <Card>
-        <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead className="w-10">#</TableHead>
-                <TableHead>Name</TableHead>
-                <TableHead>Match Pattern</TableHead>
-                <TableHead>Target IP</TableHead>
-                <TableHead>Apply To</TableHead>
-                <TableHead>Priority</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead className="text-right">Actions</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {rules.map((rule, index) => (
-                <TableRow key={rule.id} className={cn(!rule.status && 'opacity-50')}>
-                  <TableCell className="font-mono text-xs text-muted-foreground">{rule.priority}</TableCell>
-                  <TableCell className="font-medium text-sm">{rule.name}</TableCell>
-                  <TableCell>
-                    <code className="font-mono text-xs bg-muted px-2 py-1 rounded">{rule.match}</code>
-                  </TableCell>
-                  <TableCell className="font-mono text-sm">{rule.targetIP}</TableCell>
-                  <TableCell>
-                    <Badge className={cn('text-xs', applyToBadge[rule.applyTo]?.cls)} variant="secondary">
-                      {applyToBadge[rule.applyTo]?.label}
-                    </Badge>
-                  </TableCell>
-                  <TableCell className="font-mono text-sm">{rule.priority}</TableCell>
-                  <TableCell>
-                    <Switch checked={rule.status} onCheckedChange={() => toggleStatus(rule.id)} />
-                  </TableCell>
-                  <TableCell className="text-right">
-                    <div className="flex justify-end gap-0.5">
-                      <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => moveUp(index)} disabled={index === 0}>
-                        <ArrowUpDown className="h-3 w-3 rotate-180" />
-                      </Button>
-                      <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => moveDown(index)} disabled={index === rules.length - 1}>
-                        <ArrowUpDown className="h-3 w-3" />
-                      </Button>
-                      <Button variant="ghost" size="icon" className="h-7 w-7 text-red-500 hover:text-red-600" onClick={() => deleteRule(rule.id)}>
-                        <Trash2 className="h-3 w-3" />
-                      </Button>
-                    </div>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
-
-      {/* Add Rule Dialog */}
-      <Dialog open={addOpen} onOpenChange={setAddOpen}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>Add Redirect Rule</DialogTitle>
-            <DialogDescription>Define a DNS redirect rule for captive portal</DialogDescription>
-          </DialogHeader>
-          <div className="grid gap-4 py-4">
-            <div className="space-y-2">
-              <Label>Rule Name *</Label>
-              <Input placeholder="e.g. Google Captive Detect" value={newRule.name} onChange={(e) => setNewRule({ ...newRule, name: e.target.value })} />
-            </div>
-            <div className="space-y-2">
-              <Label>Match Pattern *</Label>
-              <Input placeholder="* or hostname" value={newRule.match} onChange={(e) => setNewRule({ ...newRule, match: e.target.value })} className="font-mono" />
-            </div>
-            <div className="space-y-2">
-              <Label>Target IP</Label>
-              <Input placeholder="192.168.1.1" value={newRule.targetIP} onChange={(e) => setNewRule({ ...newRule, targetIP: e.target.value })} className="font-mono" />
-            </div>
-            <div className="space-y-2">
-              <Label>Apply To</Label>
-              <Select value={newRule.applyTo} onValueChange={(v) => setNewRule({ ...newRule, applyTo: v })}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="unauthenticated">Unauthenticated</SelectItem>
-                  <SelectItem value="all">All Users</SelectItem>
-                  <SelectItem value="authenticated">Authenticated</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setAddOpen(false)}>Cancel</Button>
-            <Button onClick={addRule} className="bg-teal-600 hover:bg-teal-700">Add Rule</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </div>
-  );
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Tab 3: Portal List
-// ═══════════════════════════════════════════════════════════════════════════════
+// Note: DNS Zones and DNS Redirects tabs were moved to the DNS Server page.
 
 interface PortalInstance {
   id: string;
@@ -1276,7 +569,7 @@ function PortalListTab({ onPortalsChanged }: { onPortalsChanged?: () => void }) 
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Tab 4: Portal Designer
+// Tab 2: Portal Designer
 // ═══════════════════════════════════════════════════════════════════════════════
 
 function PortalDesignerTab({ portalOptions }: { portalOptions: string[] }) {
@@ -1606,7 +899,7 @@ function PortalDesignerTab({ portalOptions }: { portalOptions: string[] }) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Tab 5: Portal Mapping
+// Tab 3: Portal Mapping
 // ═══════════════════════════════════════════════════════════════════════════════
 
 interface PortalMapping {
@@ -1841,7 +1134,7 @@ function PortalMappingTab({ portalOptions }: { portalOptions: string[] }) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Tab 6: Auth Methods
+// Tab 4: Auth Methods
 // ═══════════════════════════════════════════════════════════════════════════════
 
 interface AuthMethod {
@@ -2051,7 +1344,7 @@ function AuthMethodsTab({ portalOptions }: { portalOptions: string[] }) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Tab 7: Templates
+// Tab 5: Templates
 // ═══════════════════════════════════════════════════════════════════════════════
 
 interface Template {

@@ -133,7 +133,7 @@ const defaultTranslations: Translations = {
     'wifi-plans': 'Plans / Bandwidth', 'wifi-logs': 'Usage Logs',
     'wifi-gateway': 'Gateway Integration', 'wifi-aaa': 'AAA Configuration',
     'wifi-users': 'WiFi Users', 'wifi-network': 'Network',
-    'wifi-dhcp': 'DHCP Server', 'wifi-portal': 'DNS & Captive Portal',
+    'wifi-dhcp': 'DHCP Server', 'wifi-portal': 'Captive Portal',
     'wifi-firewall': 'Firewall & Bandwidth', 'wifi-reports': 'WiFi Reports',
     
     // Revenue items
