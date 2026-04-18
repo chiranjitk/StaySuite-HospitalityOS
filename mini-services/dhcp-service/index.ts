@@ -270,7 +270,7 @@ function reloadDnsmasq(): { success: boolean; message: string } {
 function generateConfig(): { success: boolean; message: string; lines: number } {
   try {
     const subnets = db.query('SELECT * FROM DhcpSubnet WHERE enabled = 1 ORDER BY vlanId ASC, name ASC').all() as any[];
-    const reservations = db.query('SELECT r.*, s.tag as subnetTag, s.name as subnetName FROM DhcpReservation r LEFT JOIN DhcpSubnet s ON r.subnetId = s.id WHERE r.enabled = 1').all() as any[];
+    const reservations = db.query('SELECT r.*, s.name as subnetName FROM DhcpReservation r LEFT JOIN DhcpSubnet s ON r.subnetId = s.id WHERE r.enabled = 1').all() as any[];
 
     let config = `# StaySuite DHCP Configuration - Auto-generated\n`;
     config += `# Last updated: ${new Date().toISOString()}\n`;
