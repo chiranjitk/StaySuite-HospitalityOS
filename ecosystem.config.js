@@ -101,7 +101,8 @@ module.exports = {
       env: {
         PORT: 3012,
         PROJECT_ROOT: PROJECT_ROOT,
-        DATABASE_PATH: path.join(PROJECT_ROOT, 'db', 'custom.db'),
+        // NOTE: Do NOT set DATABASE_PATH here — dns-service uses its own db/dns-service.db
+        // The Prisma DB is accessed separately via PRISMA_DATABASE_PATH (defaults to db/custom.db)
         NODE_PATH: path.join(PROJECT_ROOT, 'mini-services', 'dns-service', 'node_modules'),
       },
       ...MINI_SERVICE_DEFAULTS,
