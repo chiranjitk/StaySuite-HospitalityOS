@@ -663,7 +663,7 @@ app.post('/api/subnets', async (c) => {
     const leaseSec = displayToLeaseSeconds(body.leaseTime ?? 3600);
 
     db.run(`INSERT INTO DhcpSubnet (id, tenantId, propertyId, name, subnet, gateway, poolStart, poolEnd, leaseTime, dnsServers, domainName, vlanId, enabled, createdAt, updatedAt)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
       id,
       body.tenantId || 'tenant-1',
       body.propertyId || 'property-1',
@@ -696,7 +696,7 @@ app.put('/api/subnets/:id', async (c) => {
     if (body.gateway !== undefined) { fields.push('gateway = ?'); values.push(body.gateway); }
     if (body.poolStart !== undefined) { fields.push('poolStart = ?'); values.push(body.poolStart); }
     if (body.poolEnd !== undefined) { fields.push('poolEnd = ?'); values.push(body.poolEnd); }
-    if (body.netmask !== undefined) { fields.push('netmask = ?'); values.push(body.netmask); }
+    // netmask is derived from CIDR prefix — no dedicated column in Prisma schema
     if (body.leaseTime !== undefined) { fields.push('leaseTime = ?'); values.push(displayToLeaseSeconds(body.leaseTime)); }
     if (body.dnsServers !== undefined) {
       fields.push('dnsServers = ?');
