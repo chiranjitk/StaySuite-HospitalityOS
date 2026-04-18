@@ -29,7 +29,7 @@ const log = createLogger('dhcp-service');
 const startTime = Date.now();
 
 const PROJECT_ROOT = process.env.PROJECT_ROOT || path.resolve(__dirname, '..', '..');
-const DB_PATH = process.env.DATABASE_PATH || path.join(PROJECT_ROOT, 'db', 'dhcp-service.db');
+const DB_PATH = process.env.DATABASE_PATH || path.join(PROJECT_ROOT, 'db', 'custom.db');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Paths — detect Rocky Linux vs Debian
@@ -71,40 +71,11 @@ try {
   process.exit(1);
 }
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS DhcpSubnet (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    interface TEXT NOT NULL DEFAULT 'eth0',
-    tag TEXT NOT NULL,
-    cidr TEXT NOT NULL,
-    gateway TEXT DEFAULT '',
-    poolStart TEXT NOT NULL,
-    poolEnd TEXT NOT NULL,
-    netmask TEXT NOT NULL DEFAULT '255.255.255.0',
-    leaseTime INTEGER NOT NULL DEFAULT 14400,
-    dnsServers TEXT DEFAULT '[]',
-    domainName TEXT DEFAULT '',
-    vlanId INTEGER,
-    enabled INTEGER NOT NULL DEFAULT 1,
-    createdAt TEXT NOT NULL DEFAULT (datetime('now')),
-    updatedAt TEXT NOT NULL DEFAULT (datetime('now'))
-  );
-
-  CREATE TABLE IF NOT EXISTS DhcpReservation (
-    id TEXT PRIMARY KEY,
-    subnetId TEXT NOT NULL,
-    macAddress TEXT NOT NULL,
-    ipAddress TEXT NOT NULL,
-    hostname TEXT DEFAULT '',
-    leaseTime TEXT DEFAULT '',
-    description TEXT DEFAULT '',
-    enabled INTEGER NOT NULL DEFAULT 1,
-    createdAt TEXT NOT NULL DEFAULT (datetime('now')),
-    updatedAt TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE(macAddress, subnetId)
-  );
-`);
+// The service reads from the shared Prisma-managed database (custom.db).
+// DhcpSubnet / DhcpReservation tables are managed by Prisma schema.
+// Column mapping (Prisma → dnsmasq):
+//   subnet → cidr,  no 'interface' (per-VLAN),  no 'tag' (generated from id/name)
+// We do NOT create tables here — Prisma schema owns them.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
@@ -159,12 +130,36 @@ function computePoolSize(start: string, end: string): number {
   } catch { return 0; }
 }
 
+function subnetToCidr(subnet: string): string {
+  // Prisma stores '192.168.1.0/24' format
+  return subnet || '192.168.1.0/24';
+}
+
+function subnetToNetwork(subnet: string): string {
+  return (subnet || '192.168.1.0/24').split('/')[0];
+}
+
+function subnetToPrefix(subnet: string): number {
+  return parseInt((subnet || '192.168.1.0/24').split('/')[1]) || 24;
+}
+
+function prefixToNetmask(prefix: number): string {
+  if (prefix === 16) return '255.255.0.0';
+  if (prefix === 24) return '255.255.255.0';
+  if (prefix === 8) return '255.0.0.0';
+  return '255.255.255.0';
+}
+
+function generateTag(name: string, id: string): string {
+  return (name || id).toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 16) || 'default';
+}
+
 function ipToSubnetId(ip: string, subnets: any[]): string {
   // Find which subnet an IP belongs to
   for (const sub of subnets) {
-    const network = sub.cidr.split('/')[0];
-    const prefix = sub.cidr.split('/')[1] || '24';
-    const mask = prefix === '24' ? '255.255.255.0' : prefix === '16' ? '255.255.0.0' : '255.255.255.0';
+    const network = subnetToNetwork(sub.subnet);
+    const prefix = subnetToPrefix(sub.subnet);
+    const mask = prefixToNetmask(prefix);
     if (ipInSubnet(ip, network, mask)) return sub.id;
   }
   return 'unknown';
@@ -269,8 +264,8 @@ function reloadDnsmasq(): { success: boolean; message: string } {
 
 function generateConfig(): { success: boolean; message: string; lines: number } {
   try {
-    const subnets = db.query('SELECT * FROM DhcpSubnet WHERE enabled = 1 ORDER BY vlanId ASC, name ASC').all() as any[];
-    const reservations = db.query('SELECT r.*, s.name as subnetName FROM DhcpReservation r LEFT JOIN DhcpSubnet s ON r.subnetId = s.id WHERE r.enabled = 1').all() as any[];
+    const subnets = db.query('SELECT * FROM DhcpSubnet WHERE enabled = 1 ORDER BY name ASC').all() as any[];
+    const reservations = db.query('SELECT r.*, s.name as subnetName, s.subnet as subnetCidr FROM DhcpReservation r LEFT JOIN DhcpSubnet s ON r.subnetId = s.id WHERE r.enabled = 1').all() as any[];
 
     let config = `# StaySuite DHCP Configuration - Auto-generated\n`;
     config += `# Last updated: ${new Date().toISOString()}\n`;
@@ -283,30 +278,30 @@ function generateConfig(): { success: boolean; message: string; lines: number } 
       config += `# ─────────────────────────────────────────────\n\n`;
 
       for (const sub of subnets) {
-        config += `# Subnet: ${sub.name} (${sub.interface})\n`;
+        const tag = generateTag(sub.name, sub.id);
+        const cidr = subnetToCidr(sub.subnet);
+        const netmask = prefixToNetmask(subnetToPrefix(cidr));
+        config += `# Subnet: ${sub.name} (${cidr})\n`;
         config += `# ID: ${sub.id}\n`;
 
-        // dhcp-range: tag:<tag>,<start>,<end>,<netmask>,<lease>
-        const leaseDisplay = sub.leaseTime > 0 ? sub.leaseTime : 'infinite';
-        config += `dhcp-range=set:${sub.tag},${sub.poolStart},${sub.poolEnd},${sub.netmask},${leaseDisplay}\n`;
-
-        // Interface mapping
-        config += `dhcp-match=set:${sub.tag},${sub.interface}\n`;
+        // dhcp-range: set:<tag>,<start>,<end>,<netmask>,<lease>
+        const leaseDisplay = leaseSecondsToDisplay(sub.leaseTime || 3600);
+        config += `dhcp-range=set:${tag},${sub.poolStart},${sub.poolEnd},${netmask},${leaseDisplay}\n`;
 
         // Gateway (router option)
         if (sub.gateway) {
-          config += `dhcp-option=set:${sub.tag},option:router,${sub.gateway}\n`;
+          config += `dhcp-option=set:${tag},option:router,${sub.gateway}\n`;
         }
 
         // DNS servers
         const dns = parseDnsList(sub.dnsServers);
         if (dns.length > 0) {
-          config += `dhcp-option=set:${sub.tag},option:dns-server,${dns.join(',')}\n`;
+          config += `dhcp-option=set:${tag},option:dns-server,${dns.join(',')}\n`;
         }
 
         // Domain name
         if (sub.domainName) {
-          config += `dhcp-option=set:${sub.tag},option:domain-name,${sub.domainName}\n`;
+          config += `dhcp-option=set:${tag},option:domain-name,${sub.domainName}\n`;
         }
 
         config += `\n`;
@@ -332,17 +327,8 @@ function generateConfig(): { success: boolean; message: string; lines: number } 
       }
     }
 
-    // Bind only to managed interfaces
-    const interfaces = [...new Set(subnets.map((s: any) => s.interface))];
-    if (interfaces.length > 0) {
-      config = `# ─────────────────────────────────────────────\n`;
-      config += `# Interface bindings\n`;
-      config += `# ─────────────────────────────────────────────\n\n`;
-      for (const iface of interfaces) {
-        config += `dhcp-range=${iface}\n`;
-      }
-      config += `\n` + config;
-    }
+    // Interface bindings are managed by NetworkManager / .nmconnection files
+    // dnsmasq listens on all interfaces by default; VLAN interfaces are created by NM
 
     fs.writeFileSync(DNSMASQ_CONF_FILE, config, 'utf-8');
     const lineCount = config.split('\n').filter((l: string) => l.trim() && !l.startsWith('#')).length;
@@ -384,7 +370,7 @@ function parseLeasesFile(): any[] {
       if (lines.length === 0) continue;
 
       // Get subnets for mapping
-      const subnets = db.query('SELECT id, name, cidr, tag FROM DhcpSubnet WHERE enabled = 1').all() as any[];
+      const subnets = db.query('SELECT id, name, subnet FROM DhcpSubnet WHERE enabled = 1').all() as any[];
 
       return lines.map((line: string) => {
         const parts = line.split(/\s+/);
@@ -396,7 +382,11 @@ function parseLeasesFile(): any[] {
         const hostname = parts[4] || '';
         const clientId = parts[5] || '';
 
-        const sub = subnets.find((s: any) => ipInSubnet(ip, s.cidr.split('/')[0], s.cidr.includes('/') ? (parseInt(s.cidr.split('/')[1]) === 16 ? '255.255.0.0' : '255.255.255.0') : '255.255.255.0'));
+        const sub = subnets.find((s: any) => {
+          const network = subnetToNetwork(s.subnet);
+          const mask = prefixToNetmask(subnetToPrefix(s.subnet));
+          return ipInSubnet(ip, network, mask);
+        });
 
         const validLifetime = expiry > 0 ? 14400 : 0; // default 4h
         const cltt = expiry > 0 ? expiry - validLifetime : 0;
@@ -528,8 +518,8 @@ app.get('/api/status', (c) => {
   leaseCount = leases.length;
   activeLeases = leases.filter((l: any) => l.state === 'active').length;
 
-  const subnets = db.query('SELECT id, name, interface, tag, cidr FROM DhcpSubnet WHERE enabled = 1').all() as any[];
-  const currentInterfaces = [...new Set(subnets.map((s: any) => s.interface))];
+  const subnets = db.query('SELECT id, name, subnet FROM DhcpSubnet WHERE enabled = 1').all() as any[];
+  const currentInterfaces: string[] = [];
 
   // System interfaces
   let systemInterfaces: Array<{ name: string; ip: string; status: string }> = [];
@@ -625,20 +615,22 @@ app.get('/api/subnets', (c) => {
     const enriched = subnets.map((sub: any) => {
       const dns = parseDnsList(sub.dnsServers);
       const activeLeases = leases.filter((l: any) => l.subnetId === sub.id && l.state === 'active').length;
+      const cidr = subnetToCidr(sub.subnet);
+      const netmask = prefixToNetmask(subnetToPrefix(cidr));
       return {
         id: sub.id,
         name: sub.name,
-        interface: sub.interface,
-        tag: sub.tag,
-        cidr: sub.cidr,
-        gateway: sub.gateway,
+        interface: '',
+        tag: generateTag(sub.name, sub.id),
+        cidr,
+        gateway: sub.gateway || '',
         poolStart: sub.poolStart,
         poolEnd: sub.poolEnd,
-        netmask: sub.netmask,
+        netmask,
         leaseTime: sub.leaseTime,
         leaseDisplay: leaseSecondsToDisplay(sub.leaseTime),
         dnsServers: dns,
-        domainName: sub.domainName,
+        domainName: sub.domainName || '',
         vlanId: sub.vlanId,
         enabled: !!sub.enabled,
         activeLeases,
@@ -664,22 +656,21 @@ app.post('/api/subnets', async (c) => {
     // Generate tag from name
     const tag = (body.name || 'default').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 16) || 'default';
 
-    // Validate no duplicate interface
-    const existing = db.query('SELECT id FROM DhcpSubnet WHERE interface = ?', [body.interface || 'eth0']).get() as any;
-    if (existing) {
-      return c.json({ success: false, error: `Interface "${body.interface}" already has a subnet (${existing.id})` });
-    }
+    // Validate subnet
+    const subnetCidr = body.subnet || body.cidr || '192.168.1.0/24';
 
     const dnsStr = Array.isArray(body.dnsServers) ? JSON.stringify(body.dnsServers) : (body.dnsServers || '[]');
-    const leaseSec = displayToLeaseSeconds(body.leaseTime ?? 14400);
+    const leaseSec = displayToLeaseSeconds(body.leaseTime ?? 3600);
 
-    db.run(`INSERT INTO DhcpSubnet (id, name, interface, tag, cidr, gateway, poolStart, poolEnd, netmask, leaseTime, dnsServers, domainName, vlanId, enabled, createdAt, updatedAt)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
-      id, body.name || 'Default', body.interface || 'eth0', tag,
-      body.cidr || body.subnet || '192.168.1.0/24',
+    db.run(`INSERT INTO DhcpSubnet (id, tenantId, propertyId, name, subnet, gateway, poolStart, poolEnd, leaseTime, dnsServers, domainName, vlanId, enabled, createdAt, updatedAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+      id,
+      body.tenantId || 'tenant-1',
+      body.propertyId || 'property-1',
+      body.name || 'Default',
+      subnetCidr,
       body.gateway || '',
       body.poolStart || '', body.poolEnd || '',
-      body.netmask || '255.255.255.0',
       leaseSec, dnsStr, body.domainName || '',
       body.vlanId ? parseInt(body.vlanId) : null,
       body.enabled !== false ? 1 : 0, now, now,
@@ -701,8 +692,7 @@ app.put('/api/subnets/:id', async (c) => {
     const fields: string[] = [];
     const values: any[] = [];
     if (body.name !== undefined) { fields.push('name = ?'); values.push(body.name); }
-    if (body.interface !== undefined) { fields.push('interface = ?'); values.push(body.interface); }
-    if (body.cidr !== undefined || body.subnet !== undefined) { fields.push('cidr = ?'); values.push(body.cidr || body.subnet); }
+    if (body.subnet !== undefined || body.cidr !== undefined) { fields.push('subnet = ?'); values.push(body.subnet || body.cidr); }
     if (body.gateway !== undefined) { fields.push('gateway = ?'); values.push(body.gateway); }
     if (body.poolStart !== undefined) { fields.push('poolStart = ?'); values.push(body.poolStart); }
     if (body.poolEnd !== undefined) { fields.push('poolEnd = ?'); values.push(body.poolEnd); }
@@ -744,7 +734,7 @@ app.delete('/api/subnets/:id', (c) => {
 
 app.get('/api/reservations', (c) => {
   try {
-    const reservations = db.query(`SELECT r.*, s.name as subnetName, s.interface as subnetInterface
+    const reservations = db.query(`SELECT r.*, s.name as subnetName, s.subnet as subnetCidr
       FROM DhcpReservation r LEFT JOIN DhcpSubnet s ON r.subnetId = s.id
       ORDER BY r.macAddress ASC`).all() as any[];
 
