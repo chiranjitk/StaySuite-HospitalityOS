@@ -293,7 +293,7 @@ export default function DnsPage() {
                 <h1 className="text-2xl font-bold tracking-tight">DNS Server</h1>
               </div>
               <Badge variant="outline" className="border-white/30 text-white bg-white/10">
-                <Network className="h-3 w-3 mr-1" /> Port {DNS_PORT}
+                <Network className="h-3 w-3 mr-1" /> Port 3012
               </Badge>
             </div>
             <div className="flex items-center gap-2 text-xs text-white/70">
