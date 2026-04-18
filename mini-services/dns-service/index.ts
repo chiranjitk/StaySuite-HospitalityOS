@@ -165,7 +165,7 @@ function getDnsmasqStats(): {
 } {
   const defaultResult = {
     upstreamQueries: 0, upstreamRetried: 0, upstreamFailed: 0,
-    nxdomainReplies: 0, avgLatencyMs: 0, forwarders: [],
+    nxdomainReplies: 0, avgLatencyMs: 0, forwarders: [] as { address: string; port: number; queries: number; retried: number; failed: number; nxdomain: number; latency: number }[],
     dnssecCryptoHwm: 0, dnssecSigFails: 0,
     poolMemoryUsed: 0, poolMemoryMax: 0, poolMemoryAllocated: 0,
     tcpInUse: 0, tcpMaxAllowed: 0,
@@ -191,7 +191,7 @@ function getDnsmasqStats(): {
 
     if (!logOutput) return defaultResult;
 
-    const result = { ...defaultResult };
+    const result = { ...defaultResult, forwardersMap: new Map<string, typeof defaultResult.forwarders[0]>() };
 
     for (const line of logOutput.split('\n')) {
       // "DNSSEC per-query crypto work HWM N"
@@ -222,7 +222,8 @@ function getDnsmasqStats(): {
       // "server 8.8.8.8#53: queries sent N, retried N, failed N, nxdomain replies N, avg. latency Nms"
       const serverMatch = line.match(/server\s+([^#]+)#(\d+):\s*queries sent\s+(\d+),\s*retried\s+(\d+),\s*failed\s+(\d+),\s*nxdomain replies?\s+(\d+),\s*avg\.\s*latency\s+(\d+)ms/);
       if (serverMatch) {
-        result.forwarders.push({
+        const fwKey = `${serverMatch[1]}:${serverMatch[2]}`;
+        result.forwardersMap.set(fwKey, {
           address: serverMatch[1],
           port: parseInt(serverMatch[2]),
           queries: parseInt(serverMatch[3]),
@@ -231,11 +232,6 @@ function getDnsmasqStats(): {
           nxdomain: parseInt(serverMatch[6]),
           latency: parseInt(serverMatch[7]),
         });
-        result.upstreamQueries += parseInt(serverMatch[3]);
-        result.upstreamRetried += parseInt(serverMatch[4]);
-        result.upstreamFailed += parseInt(serverMatch[5]);
-        result.nxdomainReplies += parseInt(serverMatch[6]);
-        result.avgLatencyMs = parseInt(serverMatch[7]);
         continue;
       }
 
@@ -248,7 +244,24 @@ function getDnsmasqStats(): {
       }
     }
 
-    return result;
+    // Convert deduplicated forwarders map to array and compute totals
+    const forwarders = Array.from(result.forwardersMap.values());
+    return {
+      upstreamQueries: forwarders.reduce((s, f) => s + f.queries, 0),
+      upstreamRetried: forwarders.reduce((s, f) => s + f.retried, 0),
+      upstreamFailed: forwarders.reduce((s, f) => s + f.failed, 0),
+      nxdomainReplies: forwarders.reduce((s, f) => s + f.nxdomain, 0),
+      avgLatencyMs: forwarders.length > 0 ? Math.round(forwarders.reduce((s, f) => s + f.latency, 0) / forwarders.length) : 0,
+      forwarders,
+      dnssecCryptoHwm: result.dnssecCryptoHwm,
+      dnssecSigFails: result.dnssecSigFails,
+      poolMemoryUsed: result.poolMemoryUsed,
+      poolMemoryMax: result.poolMemoryMax,
+      poolMemoryAllocated: result.poolMemoryAllocated,
+      tcpInUse: result.tcpInUse,
+      tcpMaxAllowed: result.tcpMaxAllowed,
+      cacheEntriesAvailable: result.cacheEntriesAvailable,
+    };
   } catch {}
   return defaultResult;
 }
