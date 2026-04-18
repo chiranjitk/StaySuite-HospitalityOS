@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 const DNS_SERVICE_PORT = 3012;
+const DNS_SERVICE_HOST = `http://localhost:${DNS_SERVICE_PORT}`;
 
 /**
  * Catch-all proxy route for DNS management service.
@@ -26,7 +27,7 @@ async function proxyRequest(request: NextRequest, method: string) {
       .replace('/api/dns/', '')
       .replace('/api/dns', '');
     const searchParams = request.nextUrl.searchParams.toString();
-    const targetUrl = `/api/${pathSegments}?XTransformPort=${DNS_SERVICE_PORT}${searchParams ? '&' + searchParams : ''}`;
+    const targetUrl = `${DNS_SERVICE_HOST}/api/${pathSegments}${searchParams ? '?' + searchParams : ''}`;
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',

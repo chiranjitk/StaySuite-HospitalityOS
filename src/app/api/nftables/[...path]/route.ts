@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 const NFTABLES_SERVICE_PORT = 3013;
+const NFTABLES_SERVICE_HOST = `http://localhost:${NFTABLES_SERVICE_PORT}`;
 
 /**
  * Catch-all proxy route for nftables firewall service.
@@ -34,7 +35,7 @@ async function proxyRequest(request: NextRequest, method: string) {
       .replace('/api/nftables/', '')
       .replace('/api/nftables', '');
     const searchParams = request.nextUrl.searchParams.toString();
-    const targetUrl = `/api/${pathSegments}?XTransformPort=${NFTABLES_SERVICE_PORT}${searchParams ? '&' + searchParams : ''}`;
+    const targetUrl = `${NFTABLES_SERVICE_HOST}/api/${pathSegments}${searchParams ? '?' + searchParams : ''}`;
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
