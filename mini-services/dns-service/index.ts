@@ -141,8 +141,8 @@ function isDnsmasqRunning(): boolean {
     // Check if dnsmasq process is alive AND listening on port 53
     const psResult = execSync('ps aux | grep -E "[d]nsmasq"', { encoding: 'utf-8' });
     if (!psResult.trim()) return false;
-    // Verify it's actually listening on DNS port 53 (both UDP and TCP)
-    const ssResult = execSync('ss -ulnp | grep ":53 \\|:53\\t"', { encoding: 'utf-8' });
+    // Verify it's actually listening on DNS port 53 (UDP)
+    const ssResult = execSync('ss -ulnp | grep ":53 "', { encoding: 'utf-8' });
     return ssResult.trim().length > 0;
   } catch { return false; }
 }
