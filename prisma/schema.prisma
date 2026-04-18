@@ -127,6 +127,10 @@ model Tenant {
   dhcpReservations    DhcpReservation[]
   dhcpLeases          DhcpLease[]
   dhcpOptions         DhcpOption[]
+  dhcpBlacklists      DhcpBlacklist[]
+  dhcpTagRules        DhcpTagRule[]
+  dhcpHostnameFilters DhcpHostnameFilter[]
+  dhcpLeaseScripts    DhcpLeaseScript[]
   dnsZones            DnsZone[]
   dnsRecords          DnsRecord[]
   dnsRedirectRules    DnsRedirectRule[]
@@ -386,6 +390,10 @@ model Property {
   dhcpReservations      DhcpReservation[]
   dhcpLeases            DhcpLease[]
   dhcpOptions           DhcpOption[]
+  dhcpBlacklists       DhcpBlacklist[]
+  dhcpTagRules         DhcpTagRule[]
+  dhcpHostnameFilters  DhcpHostnameFilter[]
+  dhcpLeaseScripts     DhcpLeaseScript[]
   dnsZones              DnsZone[]
   dnsRedirectRules      DnsRedirectRule[]
   captivePortals        CaptivePortal[]
@@ -4604,6 +4612,12 @@ model DhcpSubnet {
   ntpServers      String    @default("[]") // JSON: ["pool.ntp.org"]
   bootFileName    String?
   nextServer      String?
+  ipv6Enabled     Boolean   @default(false) // Feature flag: enable DHCPv6 dual-stack
+  ipv6Prefix      String?   // e.g. "fd00::/64"
+  ipv6PoolStart   String?   // e.g. "fd00::100"
+  ipv6PoolEnd     String?   // e.g. "fd00::200"
+  ipv6LeaseTime   Int       @default(3600) // seconds, same default as IPv4
+  ipv6RAType      String    @default("slaac") // slaac, stateful, ra-only, ra-stateless
   enabled         Boolean   @default(true)
   description     String?
   createdAt       DateTime  @default(now())
@@ -4614,6 +4628,9 @@ model DhcpSubnet {
   reservations    DhcpReservation[]
   leases          DhcpLease[]
   dhcpOptions     DhcpOption[]
+  blacklists      DhcpBlacklist[]
+  tagRules        DhcpTagRule[]
+  hostnameFilters DhcpHostnameFilter[]
 
   @@index([tenantId])
   @@index([propertyId])
@@ -4696,6 +4713,94 @@ model DhcpOption {
   @@index([propertyId])
   @@index([subnetId])
   @@index([code])
+}
+
+/// DhcpBlacklist - MAC deny list (dnsmasq: dhcp-host=<mac>,ignore)
+model DhcpBlacklist {
+  id              String    @id @default(cuid())
+  tenantId        String
+  propertyId      String
+  subnetId        String?   // null = global, applies to all subnets
+  macAddress      String    // Supports wildcards: "aa:bb:cc:*:*:*"
+  reason          String?   // Why this MAC is blocked
+  enabled         Boolean   @default(true)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  dhcpSubnet      DhcpSubnet? @relation(fields: [subnetId], references: [id], onDelete: Cascade)
+  property        Property    @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  tenant          Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([propertyId])
+  @@index([subnetId])
+  @@index([macAddress])
+}
+
+/// DhcpTagRule - Tag-based classification rules (dnsmasq: dhcp-mac, dhcp-vendorclass, dhcp-userclass)
+model DhcpTagRule {
+  id              String    @id @default(cuid())
+  tenantId        String
+  propertyId      String
+  subnetId        String?   // null = global
+  name            String    // Human-readable name e.g. "HP Printers"
+  matchType       String    // mac, vendor_class, user_class, hostname
+  matchPattern    String    // e.g. "00:1a:dd:*:*:*" or "Hewlett-Packard JetDirect"
+  setTag          String    // e.g. "printers"
+  enabled         Boolean   @default(true)
+  description     String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  dhcpSubnet      DhcpSubnet? @relation(fields: [subnetId], references: [id], onDelete: Cascade)
+  property        Property    @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  tenant          Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([propertyId])
+  @@index([subnetId])
+  @@index([matchType])
+  @@index([setTag])
+}
+
+/// DhcpHostnameFilter - Block/ignore devices by hostname (dnsmasq: dhcp-ignore-names, dhcp-name-match)
+model DhcpHostnameFilter {
+  id              String    @id @default(cuid())
+  tenantId        String
+  propertyId      String
+  subnetId        String?   // null = global
+  pattern         String    // Hostname pattern, supports trailing wildcard: "bad-device*"
+  action          String    @default("ignore") // ignore (block name but allow lease), deny (block entirely)
+  enabled         Boolean   @default(true)
+  description     String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  dhcpSubnet      DhcpSubnet? @relation(fields: [subnetId], references: [id], onDelete: Cascade)
+  property        Property    @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  tenant          Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([propertyId])
+  @@index([subnetId])
+}
+
+/// DhcpLeaseScript - Lease event hook scripts (dnsmasq: dhcp-script)
+model DhcpLeaseScript {
+  id              String    @id @default(cuid())
+  tenantId        String
+  propertyId      String
+  name            String
+  scriptPath      String    // Absolute path to script, e.g. "/usr/local/bin/lease-event.sh"
+  events          String    @default("[\"add\",\"del\",\"old\"]") // JSON: which events trigger the script
+  enabled         Boolean   @default(true)
+  description     String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  property        Property    @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  tenant          Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, scriptPath])
+  @@index([tenantId])
+  @@index([propertyId])
+  @@index([enabled])
 }
 
 // ============================================================

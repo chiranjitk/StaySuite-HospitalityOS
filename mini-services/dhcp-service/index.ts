@@ -331,6 +331,11 @@ function generateConfig(): { success: boolean; message: string; lines: number } 
   try {
     const subnets = db.query('SELECT * FROM DhcpSubnet WHERE enabled = 1 ORDER BY name ASC').all() as any[];
     const reservations = db.query('SELECT r.*, s.name as subnetName, s.subnet as subnetCidr FROM DhcpReservation r LEFT JOIN DhcpSubnet s ON r.subnetId = s.id WHERE r.enabled = 1').all() as any[];
+    const blacklists = db.query('SELECT * FROM DhcpBlacklist WHERE enabled = 1 ORDER BY macAddress ASC').all() as any[];
+    const tagRules = db.query('SELECT * FROM DhcpTagRule WHERE enabled = 1 ORDER BY name ASC').all() as any[];
+    const hostnameFilters = db.query('SELECT * FROM DhcpHostnameFilter WHERE enabled = 1 ORDER BY pattern ASC').all() as any[];
+    const dhcpOptions = db.query('SELECT o.*, s.name as subnetName FROM DhcpOption o LEFT JOIN DhcpSubnet s ON o.subnetId = s.id WHERE o.enabled = 1 ORDER BY o.code ASC').all() as any[];
+    const leaseScripts = db.query('SELECT * FROM DhcpLeaseScript WHERE enabled = 1 ORDER BY name ASC').all() as any[];
 
     let config = `# StaySuite DHCP Configuration - Auto-generated\n`;
     config += `# Last updated: ${new Date().toISOString()}\n`;
@@ -340,7 +345,7 @@ function generateConfig(): { success: boolean; message: string; lines: number } 
     const systemInterfaces = getSystemInterfaces();
     const seenInterfaces = new Set<string>();
 
-    // Interface bindings — only bind to interfaces that have IPs in our subnets
+    // ── 1. Interface Bindings
     if (subnets.length > 0) {
       config += `# ─────────────────────────────────────────────\n`;
       config += `# Interface Bindings\n`;
@@ -358,7 +363,75 @@ function generateConfig(): { success: boolean; message: string; lines: number } 
       config += `\n`;
     }
 
-    // DHCP subnets
+    // ── 2. MAC Blacklist (dhcp-host=<mac>,ignore)
+    if (blacklists.length > 0) {
+      config += `# ─────────────────────────────────────────────\n`;
+      config += `# MAC Blacklist (dhcp-host=<mac>,ignore)\n`;
+      config += `# ─────────────────────────────────────────────\n\n`;
+
+      for (const bl of blacklists) {
+        config += `# ID: ${bl.id}`;
+        if (bl.reason) config += ` | ${bl.reason}`;
+        config += `\n`;
+        config += `dhcp-host=${bl.macAddress},ignore\n`;
+      }
+      config += `\n`;
+    }
+
+    // ── 3. Tag Rules (dhcp-mac, dhcp-vendorclass, dhcp-userclass, dhcp-name-match)
+    if (tagRules.length > 0) {
+      config += `# ─────────────────────────────────────────────\n`;
+      config += `# Tag Rules\n`;
+      config += `# ─────────────────────────────────────────────\n\n`;
+
+      for (const rule of tagRules) {
+        const tag = generateTag(rule.setTag || rule.name, rule.id);
+        config += `# ID: ${rule.id} | ${rule.description || rule.name}\n`;
+        switch (rule.matchType) {
+          case 'mac':
+            config += `dhcp-mac=set:${tag},${rule.matchPattern}\n`;
+            break;
+          case 'vendor_class':
+            config += `dhcp-vendorclass=set:${tag},${rule.matchPattern}\n`;
+            break;
+          case 'user_class':
+            config += `dhcp-userclass=set:${tag},${rule.matchPattern}\n`;
+            break;
+          case 'hostname':
+            config += `dhcp-name-match=set:${tag},${rule.matchPattern}\n`;
+            break;
+        }
+      }
+      config += `\n`;
+    }
+
+    // ── 4. Hostname Filters (dhcp-ignore-names, dhcp-name-match, dhcp-ignore)
+    if (hostnameFilters.length > 0) {
+      config += `# ─────────────────────────────────────────────\n`;
+      config += `# Hostname Filters\n`;
+      config += `# ─────────────────────────────────────────────\n\n`;
+
+      const hasIgnore = hostnameFilters.some((f: any) => f.action === 'ignore');
+      if (hasIgnore) {
+        config += `dhcp-ignore-names\n`;
+      }
+
+      for (const hf of hostnameFilters) {
+        if (hf.action === 'deny') {
+          config += `# ID: ${hf.id}`;
+          if (hf.description) config += ` | ${hf.description}`;
+          config += `\n`;
+          config += `dhcp-name-match=set:deny-list,${hf.pattern}\n`;
+        }
+      }
+
+      if (hostnameFilters.some((f: any) => f.action === 'deny')) {
+        config += `dhcp-ignore=tag:deny-list\n`;
+      }
+      config += `\n`;
+    }
+
+    // ── 5. DHCP Subnets (existing)
     if (subnets.length > 0) {
       config += `# ─────────────────────────────────────────────\n`;
       config += `# DHCP Subnets\n`;
@@ -390,11 +463,63 @@ function generateConfig(): { success: boolean; message: string; lines: number } 
           config += `dhcp-option=option:domain-name,${sub.domainName}\n`;
         }
 
+        // Per-subnet custom DHCP options
+        const subnetOpts = dhcpOptions.filter((o: any) => o.subnetId === sub.id);
+        for (const opt of subnetOpts) {
+          config += `dhcp-option=option:${opt.name},${opt.value}\n`;
+        }
+
         config += `\n`;
       }
     }
 
-    // Reservations grouped by subnet
+    // ── 6. Global Custom DHCP Options (not tied to a specific subnet)
+    const globalOpts = dhcpOptions.filter((o: any) => !o.subnetId);
+    if (globalOpts.length > 0) {
+      config += `# ─────────────────────────────────────────────\n`;
+      config += `# Custom DHCP Options\n`;
+      config += `# ─────────────────────────────────────────────\n\n`;
+
+      for (const opt of globalOpts) {
+        config += `# ID: ${opt.id}`;
+        if (opt.description) config += ` | ${opt.description}`;
+        config += `\n`;
+        config += `dhcp-option=option:${opt.name},${opt.value}\n`;
+      }
+      config += `\n`;
+    }
+
+    // ── 7. IPv6 (only when ipv6Enabled = true on a subnet)
+    const v6Subnets = subnets.filter((s: any) => s.ipv6Enabled);
+    if (v6Subnets.length > 0) {
+      config += `# ─────────────────────────────────────────────\n`;
+      config += `# IPv6\n`;
+      config += `# ─────────────────────────────────────────────\n\n`;
+
+      for (const sub of v6Subnets) {
+        config += `# Subnet: ${sub.name} (IPv6)\n`;
+        config += `# ID: ${sub.id}\n`;
+
+        const raType = sub.ipv6RAType || 'slaac';
+
+        if (raType === 'slaac') {
+          const ifaceName = findInterfaceForSubnet(subnetToCidr(sub.subnet), systemInterfaces);
+          config += `dhcp-range=::,constructor:${ifaceName || 'eth0'}\n`;
+        } else if (raType === 'stateful') {
+          const v6Lease = leaseSecondsToDisplay(sub.ipv6LeaseTime || 3600);
+          config += `dhcp-range=${sub.ipv6PoolStart || 'fd00::100'},${sub.ipv6PoolEnd || 'fd00::200'},64,${v6Lease}\n`;
+        } else if (raType === 'ra-only' || raType === 'ra-stateless') {
+          const ifaceName = findInterfaceForSubnet(subnetToCidr(sub.subnet), systemInterfaces);
+          config += `dhcp-range=::,constructor:${ifaceName || 'eth0'},ra-only\n`;
+        }
+
+        // enable-ra for all IPv6 subnets
+        config += `enable-ra\n`;
+        config += `\n`;
+      }
+    }
+
+    // ── 8. Reservations
     if (reservations.length > 0) {
       config += `# ─────────────────────────────────────────────\n`;
       config += `# MAC Reservations\n`;
@@ -413,11 +538,21 @@ function generateConfig(): { success: boolean; message: string; lines: number } 
       }
     }
 
-    // Interface auto-detected above — no manual interface management needed
+    // ── 9. Lease Script (dhcp-script)
+    if (leaseScripts.length > 0) {
+      config += `# ─────────────────────────────────────────────\n`;
+      config += `# Lease Script\n`;
+      config += `# ─────────────────────────────────────────────\n\n`;
+
+      // Only one dhcp-script can be active — use the first enabled one
+      const script = leaseScripts[0];
+      config += `# ID: ${script.id} | ${script.description || script.name}\n`;
+      config += `dhcp-script=${script.scriptPath}\n`;
+    }
 
     fs.writeFileSync(DNSMASQ_CONF_FILE, config, 'utf-8');
     const lineCount = config.split('\n').filter((l: string) => l.trim() && !l.startsWith('#')).length;
-    log.info(`Config generated: ${DNSMASQ_CONF_FILE} (${lineCount} directives, ${subnets.length} subnets, ${reservations.length} reservations)`);
+    log.info(`Config generated: ${DNSMASQ_CONF_FILE} (${lineCount} directives, ${subnets.length} subnets, ${reservations.length} reservations, ${blacklists.length} blacklist, ${tagRules.length} tag rules, ${hostnameFilters.length} hostname filters, ${dhcpOptions.length} options, ${leaseScripts.length} lease scripts)`);
     return { success: true, message: 'Config generated', lines: lineCount };
   } catch (error) {
     const msg = `Failed to generate config: ${error}`;
@@ -602,8 +737,14 @@ app.get('/api/status', (c) => {
   const version = running ? getDnsmasqVersion() : 'Not running';
 
   let subnetCount = 0, reservationCount = 0, leaseCount = 0, activeLeases = 0;
+  let blacklistCount = 0, optionsCount = 0, tagRulesCount = 0, hostnameFiltersCount = 0, leaseScriptsCount = 0;
   try { subnetCount = (db.query('SELECT COUNT(*) as c FROM DhcpSubnet WHERE enabled = 1').get() as any)?.c || 0; } catch {}
   try { reservationCount = (db.query('SELECT COUNT(*) as c FROM DhcpReservation WHERE enabled = 1').get() as any)?.c || 0; } catch {}
+  try { blacklistCount = (db.query('SELECT COUNT(*) as c FROM DhcpBlacklist WHERE enabled = 1').get() as any)?.c || 0; } catch {}
+  try { optionsCount = (db.query('SELECT COUNT(*) as c FROM DhcpOption WHERE enabled = 1').get() as any)?.c || 0; } catch {}
+  try { tagRulesCount = (db.query('SELECT COUNT(*) as c FROM DhcpTagRule WHERE enabled = 1').get() as any)?.c || 0; } catch {}
+  try { hostnameFiltersCount = (db.query('SELECT COUNT(*) as c FROM DhcpHostnameFilter WHERE enabled = 1').get() as any)?.c || 0; } catch {}
+  try { leaseScriptsCount = (db.query('SELECT COUNT(*) as c FROM DhcpLeaseScript WHERE enabled = 1').get() as any)?.c || 0; } catch {}
 
   const leases = parseLeasesFile();
   leaseCount = leases.length;
@@ -637,6 +778,11 @@ app.get('/api/status', (c) => {
       leaseCount,
       activeLeases,
       reservationCount,
+      blacklistCount,
+      optionsCount,
+      tagRulesCount,
+      hostnameFiltersCount,
+      leaseScriptsCount,
       currentInterfaces,
       systemInterfaces,
     }
@@ -731,6 +877,12 @@ app.get('/api/subnets', (c) => {
         utilization: computePoolSize(sub.poolStart, sub.poolEnd) > 0
           ? Math.round((activeLeases / computePoolSize(sub.poolStart, sub.poolEnd)) * 100)
           : 0,
+        ipv6Enabled: !!sub.ipv6Enabled,
+        ipv6Prefix: sub.ipv6Prefix || '',
+        ipv6PoolStart: sub.ipv6PoolStart || '',
+        ipv6PoolEnd: sub.ipv6PoolEnd || '',
+        ipv6LeaseTime: sub.ipv6LeaseTime || 0,
+        ipv6RAType: sub.ipv6RAType || 'slaac',
       };
     });
 
@@ -755,8 +907,8 @@ app.post('/api/subnets', async (c) => {
     const dnsStr = Array.isArray(body.dnsServers) ? JSON.stringify(body.dnsServers) : (body.dnsServers || '[]');
     const leaseSec = displayToLeaseSeconds(body.leaseTime ?? 3600);
 
-    db.run(`INSERT INTO DhcpSubnet (id, tenantId, propertyId, name, subnet, gateway, poolStart, poolEnd, leaseTime, dnsServers, domainName, vlanId, enabled, createdAt, updatedAt)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+    db.run(`INSERT INTO DhcpSubnet (id, tenantId, propertyId, name, subnet, gateway, poolStart, poolEnd, leaseTime, dnsServers, domainName, vlanId, enabled, ipv6Enabled, ipv6Prefix, ipv6PoolStart, ipv6PoolEnd, ipv6LeaseTime, ipv6RAType, createdAt, updatedAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
       id,
       body.tenantId || 'tenant-1',
       body.propertyId || 'property-1',
@@ -766,7 +918,14 @@ app.post('/api/subnets', async (c) => {
       body.poolStart || '', body.poolEnd || '',
       leaseSec, dnsStr, body.domainName || '',
       body.vlanId ? parseInt(body.vlanId) : null,
-      body.enabled !== false ? 1 : 0, now, now,
+      body.enabled !== false ? 1 : 0,
+      body.ipv6Enabled ? 1 : 0,
+      body.ipv6Prefix || '',
+      body.ipv6PoolStart || '',
+      body.ipv6PoolEnd || '',
+      body.ipv6LeaseTime ? displayToLeaseSeconds(body.ipv6LeaseTime) : 0,
+      body.ipv6RAType || 'slaac',
+      now, now,
     ]);
 
     fullSync();
@@ -798,6 +957,12 @@ app.put('/api/subnets/:id', async (c) => {
     if (body.domainName !== undefined) { fields.push('domainName = ?'); values.push(body.domainName); }
     if (body.vlanId !== undefined) { fields.push('vlanId = ?'); values.push(body.vlanId ? parseInt(body.vlanId) : null); }
     if (body.enabled !== undefined) { fields.push('enabled = ?'); values.push(body.enabled ? 1 : 0); }
+    if (body.ipv6Enabled !== undefined) { fields.push('ipv6Enabled = ?'); values.push(body.ipv6Enabled ? 1 : 0); }
+    if (body.ipv6Prefix !== undefined) { fields.push('ipv6Prefix = ?'); values.push(body.ipv6Prefix); }
+    if (body.ipv6PoolStart !== undefined) { fields.push('ipv6PoolStart = ?'); values.push(body.ipv6PoolStart); }
+    if (body.ipv6PoolEnd !== undefined) { fields.push('ipv6PoolEnd = ?'); values.push(body.ipv6PoolEnd); }
+    if (body.ipv6LeaseTime !== undefined) { fields.push('ipv6LeaseTime = ?'); values.push(displayToLeaseSeconds(body.ipv6LeaseTime)); }
+    if (body.ipv6RAType !== undefined) { fields.push('ipv6RAType = ?'); values.push(body.ipv6RAType); }
     fields.push('updatedAt = ?'); values.push(now); values.push(id);
 
     db.run(`UPDATE DhcpSubnet SET ${fields.join(', ')} WHERE id = ?`, values);
@@ -942,6 +1107,508 @@ app.post('/api/leases/reclaim', (c) => {
   // Instead, we reload which triggers lease cleanup
   const result = reloadDnsmasq();
   return c.json({ success: result.success, message: result.success ? 'dnsmasq reloaded (leases refreshed)' : result.message });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DHCP Blacklist (MAC deny list)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const MAC_REGEX = /^([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}$|^([0-9a-fA-F]{2}[:*]){5}[0-9a-fA-F*]{2}$|^([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F*]{2}$/;
+
+app.get('/api/blacklist', (c) => {
+  try {
+    const blacklist = db.query(`SELECT b.*, s.name as subnetName
+      FROM DhcpBlacklist b LEFT JOIN DhcpSubnet s ON b.subnetId = s.id
+      ORDER BY b.macAddress ASC`).all() as any[];
+    return c.json({ success: true, data: blacklist });
+  } catch (error) {
+    return c.json({ success: false, error: String(error) });
+  }
+});
+
+app.post('/api/blacklist', async (c) => {
+  try {
+    const body = await c.req.json();
+    const id = generateId('bl');
+    const now = new Date().toISOString();
+
+    // Validate MAC format (allow wildcards like aa:bb:cc:*:*:*)
+    const mac = (body.macAddress || '').toLowerCase();
+    if (!mac || !MAC_REGEX.test(mac)) {
+      return c.json({ success: false, error: 'Invalid MAC address format. Use xx:xx:xx:xx:xx:xx or xx:xx:xx:*:*:*' });
+    }
+
+    db.run(`INSERT INTO DhcpBlacklist (id, tenantId, propertyId, subnetId, macAddress, reason, enabled, createdAt, updatedAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+      id,
+      body.tenantId || 'tenant-1',
+      body.propertyId || 'property-1',
+      body.subnetId || null,
+      mac,
+      body.reason || '',
+      body.enabled !== false ? 1 : 0, now, now,
+    ]);
+
+    fullSync();
+    return c.json({ success: true, data: { id, macAddress: mac, reason: body.reason, subnetId: body.subnetId, enabled: body.enabled !== false }, message: 'MAC blacklist entry added and applied', persisted: true });
+  } catch (error) {
+    return c.json({ success: false, error: String(error) });
+  }
+});
+
+app.put('/api/blacklist/:id', async (c) => {
+  try {
+    const { id } = c.req.param();
+    const body = await c.req.json();
+    const now = new Date().toISOString();
+
+    const fields: string[] = [];
+    const values: any[] = [];
+    if (body.macAddress !== undefined) {
+      const mac = body.macAddress.toLowerCase();
+      if (!MAC_REGEX.test(mac)) return c.json({ success: false, error: 'Invalid MAC address format' });
+      fields.push('macAddress = ?'); values.push(mac);
+    }
+    if (body.reason !== undefined) { fields.push('reason = ?'); values.push(body.reason); }
+    if (body.subnetId !== undefined) { fields.push('subnetId = ?'); values.push(body.subnetId || null); }
+    if (body.enabled !== undefined) { fields.push('enabled = ?'); values.push(body.enabled ? 1 : 0); }
+    fields.push('updatedAt = ?'); values.push(now); values.push(id);
+
+    db.run(`UPDATE DhcpBlacklist SET ${fields.join(', ')} WHERE id = ?`, values);
+    fullSync();
+    return c.json({ success: true, data: { id, ...body }, message: 'Blacklist entry updated and applied', persisted: true });
+  } catch (error) {
+    return c.json({ success: false, error: String(error) });
+  }
+});
+
+app.delete('/api/blacklist/:id', (c) => {
+  try {
+    const { id } = c.req.param();
+    db.run('DELETE FROM DhcpBlacklist WHERE id = ?', [id]);
+    fullSync();
+    return c.json({ success: true, message: 'Blacklist entry deleted', persisted: true });
+  } catch (error) {
+    return c.json({ success: false, error: String(error) });
+  }
+});
+
+app.post('/api/blacklist/bulk', async (c) => {
+  try {
+    const body = await c.req.json();
+    const now = new Date().toISOString();
+    let added = 0, removed = 0;
+
+    // Bulk add
+    if (body.add && Array.isArray(body.add)) {
+      for (const entry of body.add) {
+        const mac = (entry.macAddress || '').toLowerCase();
+        if (!MAC_REGEX.test(mac)) continue;
+        try {
+          const id = generateId('bl');
+          db.run(`INSERT INTO DhcpBlacklist (id, tenantId, propertyId, subnetId, macAddress, reason, enabled, createdAt, updatedAt)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+            id,
+            entry.tenantId || 'tenant-1',
+            entry.propertyId || 'property-1',
+            entry.subnetId || null,
+            mac,
+            entry.reason || '',
+            entry.enabled !== false ? 1 : 0, now, now,
+          ]);
+          added++;
+        } catch { /* duplicate or constraint error */ }
+      }
+    }
+
+    // Bulk delete
+    if (body.remove && Array.isArray(body.remove)) {
+      for (const macId of body.remove) {
+        try {
+          if (macId.startsWith('bl_')) {
+            db.run('DELETE FROM DhcpBlacklist WHERE id = ?', [macId]);
+          } else {
+            db.run('DELETE FROM DhcpBlacklist WHERE macAddress = ?', [macId.toLowerCase()]);
+          }
+          removed++;
+        } catch {}
+      }
+    }
+
+    fullSync();
+    return c.json({ success: true, data: { added, removed }, message: `Bulk operation: ${added} added, ${removed} removed`, persisted: true });
+  } catch (error) {
+    return c.json({ success: false, error: String(error) });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DHCP Options
+// ─────────────────────────────────────────────────────────────────────────────
+
+app.get('/api/options', (c) => {
+  try {
+    const options = db.query(`SELECT o.*, s.name as subnetName
+      FROM DhcpOption o LEFT JOIN DhcpSubnet s ON o.subnetId = s.id
+      ORDER BY o.code ASC`).all() as any[];
+    return c.json({ success: true, data: options });
+  } catch (error) {
+    return c.json({ success: false, error: String(error) });
+  }
+});
+
+app.post('/api/options', async (c) => {
+  try {
+    const body = await c.req.json();
+    const id = generateId('opt');
+    const now = new Date().toISOString();
+
+    // Validate option code (1-254)
+    const code = parseInt(body.code);
+    if (!code || code < 1 || code > 254) {
+      return c.json({ success: false, error: 'Invalid option code. Must be 1-254' });
+    }
+
+    const validTypes = ['string', 'ip', 'integer', 'boolean', 'hex'];
+    const optType = body.type || 'string';
+    if (!validTypes.includes(optType)) {
+      return c.json({ success: false, error: `Invalid type. Must be one of: ${validTypes.join(', ')}` });
+    }
+
+    db.run(`INSERT INTO DhcpOption (id, tenantId, propertyId, subnetId, code, name, value, type, enabled, description, createdAt, updatedAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+      id,
+      body.tenantId || 'tenant-1',
+      body.propertyId || 'property-1',
+      body.subnetId || null,
+      code,
+      body.name || `option-${code}`,
+      body.value || '',
+      optType,
+      body.enabled !== false ? 1 : 0,
+      body.description || '',
+      now, now,
+    ]);
+
+    fullSync();
+    return c.json({ success: true, data: { id, code, name: body.name, value: body.value, type: optType, subnetId: body.subnetId }, message: 'DHCP option created and applied', persisted: true });
+  } catch (error) {
+    return c.json({ success: false, error: String(error) });
+  }
+});
+
+app.put('/api/options/:id', async (c) => {
+  try {
+    const { id } = c.req.param();
+    const body = await c.req.json();
+    const now = new Date().toISOString();
+
+    const fields: string[] = [];
+    const values: any[] = [];
+    if (body.code !== undefined) {
+      const code = parseInt(body.code);
+      if (!code || code < 1 || code > 254) return c.json({ success: false, error: 'Invalid option code. Must be 1-254' });
+      fields.push('code = ?'); values.push(code);
+    }
+    if (body.name !== undefined) { fields.push('name = ?'); values.push(body.name); }
+    if (body.value !== undefined) { fields.push('value = ?'); values.push(body.value); }
+    if (body.type !== undefined) { fields.push('type = ?'); values.push(body.type); }
+    if (body.subnetId !== undefined) { fields.push('subnetId = ?'); values.push(body.subnetId || null); }
+    if (body.description !== undefined) { fields.push('description = ?'); values.push(body.description); }
+    if (body.enabled !== undefined) { fields.push('enabled = ?'); values.push(body.enabled ? 1 : 0); }
+    fields.push('updatedAt = ?'); values.push(now); values.push(id);
+
+    db.run(`UPDATE DhcpOption SET ${fields.join(', ')} WHERE id = ?`, values);
+    fullSync();
+    return c.json({ success: true, data: { id, ...body }, message: 'DHCP option updated and applied', persisted: true });
+  } catch (error) {
+    return c.json({ success: false, error: String(error) });
+  }
+});
+
+app.delete('/api/options/:id', (c) => {
+  try {
+    const { id } = c.req.param();
+    db.run('DELETE FROM DhcpOption WHERE id = ?', [id]);
+    fullSync();
+    return c.json({ success: true, message: 'DHCP option deleted', persisted: true });
+  } catch (error) {
+    return c.json({ success: false, error: String(error) });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DHCP Tag Rules
+// ─────────────────────────────────────────────────────────────────────────────
+
+const VALID_MATCH_TYPES = ['mac', 'vendor_class', 'user_class', 'hostname'];
+
+app.get('/api/tag-rules', (c) => {
+  try {
+    const tagRules = db.query(`SELECT t.*, s.name as subnetName
+      FROM DhcpTagRule t LEFT JOIN DhcpSubnet s ON t.subnetId = s.id
+      ORDER BY t.name ASC`).all() as any[];
+    return c.json({ success: true, data: tagRules });
+  } catch (error) {
+    return c.json({ success: false, error: String(error) });
+  }
+});
+
+app.post('/api/tag-rules', async (c) => {
+  try {
+    const body = await c.req.json();
+    const id = generateId('tag');
+    const now = new Date().toISOString();
+
+    // Validate matchType
+    const matchType = body.matchType || 'mac';
+    if (!VALID_MATCH_TYPES.includes(matchType)) {
+      return c.json({ success: false, error: `Invalid matchType. Must be one of: ${VALID_MATCH_TYPES.join(', ')}` });
+    }
+
+    if (!body.matchPattern) {
+      return c.json({ success: false, error: 'matchPattern is required' });
+    }
+
+    db.run(`INSERT INTO DhcpTagRule (id, tenantId, propertyId, subnetId, name, matchType, matchPattern, setTag, enabled, description, createdAt, updatedAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+      id,
+      body.tenantId || 'tenant-1',
+      body.propertyId || 'property-1',
+      body.subnetId || null,
+      body.name || `tag-rule-${Date.now()}`,
+      matchType,
+      body.matchPattern,
+      body.setTag || body.name || `tag-${Date.now()}`,
+      body.enabled !== false ? 1 : 0,
+      body.description || '',
+      now, now,
+    ]);
+
+    fullSync();
+    return c.json({ success: true, data: { id, name: body.name, matchType, matchPattern: body.matchPattern, setTag: body.setTag }, message: 'Tag rule created and applied', persisted: true });
+  } catch (error) {
+    return c.json({ success: false, error: String(error) });
+  }
+});
+
+app.put('/api/tag-rules/:id', async (c) => {
+  try {
+    const { id } = c.req.param();
+    const body = await c.req.json();
+    const now = new Date().toISOString();
+
+    const fields: string[] = [];
+    const values: any[] = [];
+    if (body.name !== undefined) { fields.push('name = ?'); values.push(body.name); }
+    if (body.matchType !== undefined) {
+      if (!VALID_MATCH_TYPES.includes(body.matchType)) return c.json({ success: false, error: `Invalid matchType. Must be one of: ${VALID_MATCH_TYPES.join(', ')}` });
+      fields.push('matchType = ?'); values.push(body.matchType);
+    }
+    if (body.matchPattern !== undefined) { fields.push('matchPattern = ?'); values.push(body.matchPattern); }
+    if (body.setTag !== undefined) { fields.push('setTag = ?'); values.push(body.setTag); }
+    if (body.subnetId !== undefined) { fields.push('subnetId = ?'); values.push(body.subnetId || null); }
+    if (body.description !== undefined) { fields.push('description = ?'); values.push(body.description); }
+    if (body.enabled !== undefined) { fields.push('enabled = ?'); values.push(body.enabled ? 1 : 0); }
+    fields.push('updatedAt = ?'); values.push(now); values.push(id);
+
+    db.run(`UPDATE DhcpTagRule SET ${fields.join(', ')} WHERE id = ?`, values);
+    fullSync();
+    return c.json({ success: true, data: { id, ...body }, message: 'Tag rule updated and applied', persisted: true });
+  } catch (error) {
+    return c.json({ success: false, error: String(error) });
+  }
+});
+
+app.delete('/api/tag-rules/:id', (c) => {
+  try {
+    const { id } = c.req.param();
+    db.run('DELETE FROM DhcpTagRule WHERE id = ?', [id]);
+    fullSync();
+    return c.json({ success: true, message: 'Tag rule deleted', persisted: true });
+  } catch (error) {
+    return c.json({ success: false, error: String(error) });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DHCP Hostname Filters
+// ─────────────────────────────────────────────────────────────────────────────
+
+app.get('/api/hostname-filters', (c) => {
+  try {
+    const filters = db.query(`SELECT h.*, s.name as subnetName
+      FROM DhcpHostnameFilter h LEFT JOIN DhcpSubnet s ON h.subnetId = s.id
+      ORDER BY h.pattern ASC`).all() as any[];
+    return c.json({ success: true, data: filters });
+  } catch (error) {
+    return c.json({ success: false, error: String(error) });
+  }
+});
+
+app.post('/api/hostname-filters', async (c) => {
+  try {
+    const body = await c.req.json();
+    const id = generateId('hnf');
+    const now = new Date().toISOString();
+
+    // Validate action
+    const action = body.action || 'ignore';
+    if (action !== 'ignore' && action !== 'deny') {
+      return c.json({ success: false, error: 'Invalid action. Must be "ignore" or "deny"' });
+    }
+
+    if (!body.pattern) {
+      return c.json({ success: false, error: 'pattern is required' });
+    }
+
+    db.run(`INSERT INTO DhcpHostnameFilter (id, tenantId, propertyId, subnetId, pattern, action, enabled, description, createdAt, updatedAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+      id,
+      body.tenantId || 'tenant-1',
+      body.propertyId || 'property-1',
+      body.subnetId || null,
+      body.pattern,
+      action,
+      body.enabled !== false ? 1 : 0,
+      body.description || '',
+      now, now,
+    ]);
+
+    fullSync();
+    return c.json({ success: true, data: { id, pattern: body.pattern, action, subnetId: body.subnetId }, message: 'Hostname filter created and applied', persisted: true });
+  } catch (error) {
+    return c.json({ success: false, error: String(error) });
+  }
+});
+
+app.put('/api/hostname-filters/:id', async (c) => {
+  try {
+    const { id } = c.req.param();
+    const body = await c.req.json();
+    const now = new Date().toISOString();
+
+    const fields: string[] = [];
+    const values: any[] = [];
+    if (body.pattern !== undefined) { fields.push('pattern = ?'); values.push(body.pattern); }
+    if (body.action !== undefined) {
+      if (body.action !== 'ignore' && body.action !== 'deny') return c.json({ success: false, error: 'Invalid action. Must be "ignore" or "deny"' });
+      fields.push('action = ?'); values.push(body.action);
+    }
+    if (body.subnetId !== undefined) { fields.push('subnetId = ?'); values.push(body.subnetId || null); }
+    if (body.description !== undefined) { fields.push('description = ?'); values.push(body.description); }
+    if (body.enabled !== undefined) { fields.push('enabled = ?'); values.push(body.enabled ? 1 : 0); }
+    fields.push('updatedAt = ?'); values.push(now); values.push(id);
+
+    db.run(`UPDATE DhcpHostnameFilter SET ${fields.join(', ')} WHERE id = ?`, values);
+    fullSync();
+    return c.json({ success: true, data: { id, ...body }, message: 'Hostname filter updated and applied', persisted: true });
+  } catch (error) {
+    return c.json({ success: false, error: String(error) });
+  }
+});
+
+app.delete('/api/hostname-filters/:id', (c) => {
+  try {
+    const { id } = c.req.param();
+    db.run('DELETE FROM DhcpHostnameFilter WHERE id = ?', [id]);
+    fullSync();
+    return c.json({ success: true, message: 'Hostname filter deleted', persisted: true });
+  } catch (error) {
+    return c.json({ success: false, error: String(error) });
+  }
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DHCP Lease Scripts
+// ─────────────────────────────────────────────────────────────────────────────
+
+app.get('/api/lease-scripts', (c) => {
+  try {
+    const scripts = db.query('SELECT * FROM DhcpLeaseScript ORDER BY name ASC').all() as any[];
+    return c.json({ success: true, data: scripts });
+  } catch (error) {
+    return c.json({ success: false, error: String(error) });
+  }
+});
+
+app.post('/api/lease-scripts', async (c) => {
+  try {
+    const body = await c.req.json();
+    const id = generateId('ls');
+    const now = new Date().toISOString();
+
+    if (!body.scriptPath) {
+      return c.json({ success: false, error: 'scriptPath is required' });
+    }
+
+    // Validate scriptPath exists on filesystem
+    if (!fs.existsSync(body.scriptPath)) {
+      return c.json({ success: false, error: `Script not found at path: ${body.scriptPath}` });
+    }
+
+    const events = Array.isArray(body.events) ? JSON.stringify(body.events) : (body.events || '[]');
+
+    db.run(`INSERT INTO DhcpLeaseScript (id, tenantId, propertyId, name, scriptPath, events, enabled, description, createdAt, updatedAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+      id,
+      body.tenantId || 'tenant-1',
+      body.propertyId || 'property-1',
+      body.name || path.basename(body.scriptPath),
+      body.scriptPath,
+      events,
+      body.enabled !== false ? 1 : 0,
+      body.description || '',
+      now, now,
+    ]);
+
+    fullSync();
+    return c.json({ success: true, data: { id, name: body.name, scriptPath: body.scriptPath, events: body.events }, message: 'Lease script created and applied', persisted: true });
+  } catch (error) {
+    return c.json({ success: false, error: String(error) });
+  }
+});
+
+app.put('/api/lease-scripts/:id', async (c) => {
+  try {
+    const { id } = c.req.param();
+    const body = await c.req.json();
+    const now = new Date().toISOString();
+
+    const fields: string[] = [];
+    const values: any[] = [];
+    if (body.name !== undefined) { fields.push('name = ?'); values.push(body.name); }
+    if (body.scriptPath !== undefined) {
+      if (!fs.existsSync(body.scriptPath)) {
+        return c.json({ success: false, error: `Script not found at path: ${body.scriptPath}` });
+      }
+      fields.push('scriptPath = ?'); values.push(body.scriptPath);
+    }
+    if (body.events !== undefined) {
+      fields.push('events = ?');
+      values.push(Array.isArray(body.events) ? JSON.stringify(body.events) : body.events);
+    }
+    if (body.description !== undefined) { fields.push('description = ?'); values.push(body.description); }
+    if (body.enabled !== undefined) { fields.push('enabled = ?'); values.push(body.enabled ? 1 : 0); }
+    fields.push('updatedAt = ?'); values.push(now); values.push(id);
+
+    db.run(`UPDATE DhcpLeaseScript SET ${fields.join(', ')} WHERE id = ?`, values);
+    fullSync();
+    return c.json({ success: true, data: { id, ...body }, message: 'Lease script updated and applied', persisted: true });
+  } catch (error) {
+    return c.json({ success: false, error: String(error) });
+  }
+});
+
+app.delete('/api/lease-scripts/:id', (c) => {
+  try {
+    const { id } = c.req.param();
+    db.run('DELETE FROM DhcpLeaseScript WHERE id = ?', [id]);
+    fullSync();
+    return c.json({ success: true, message: 'Lease script deleted', persisted: true });
+  } catch (error) {
+    return c.json({ success: false, error: String(error) });
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
