@@ -109,11 +109,19 @@ interface DhcpDnsEntry {
 
 const DNS_PORT = 3012;
 
+async function safeJson(res: Response): Promise<any> {
+  const ct = res.headers.get('content-type') || '';
+  if (!ct.includes('application/json')) {
+    throw new Error(`DNS service returned non-JSON response (HTTP ${res.status}): ${ct || 'unknown content-type'}`);
+  }
+  return res.json();
+}
+
 async function apiFetch<T>(endpoint: string, options?: RequestInit): Promise<T> {
   const sep = endpoint.includes('?') ? '&' : '?';
   const url = `${endpoint}${sep}XTransformPort=${DNS_PORT}`;
   const res = await fetch(url, { ...options, headers: { 'Content-Type': 'application/json', ...options?.headers } });
-  const data = await res.json();
+  const data = await safeJson(res);
   if (!data.success) throw new Error(data.error || 'API Error');
   return data.data as T;
 }
@@ -126,7 +134,7 @@ async function apiMutate(endpoint: string, body: unknown, method = 'POST') {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-  const data = await res.json();
+  const data = await safeJson(res);
   if (!data.success) throw new Error(data.error || 'API Error');
   return data;
 }
@@ -135,7 +143,7 @@ async function apiDelete(endpoint: string) {
   const sep = endpoint.includes('?') ? '&' : '?';
   const url = `${endpoint}${sep}XTransformPort=${DNS_PORT}`;
   const res = await fetch(url, { method: 'DELETE' });
-  const data = await res.json();
+  const data = await safeJson(res);
   if (!data.success) throw new Error(data.error || 'API Error');
   return data;
 }

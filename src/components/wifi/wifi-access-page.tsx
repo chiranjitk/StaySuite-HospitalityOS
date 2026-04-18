@@ -148,6 +148,11 @@ function RADIUSStatusCard() {
     const checkStatus = async () => {
       try {
         const res = await fetch('/api/wifi/sync?XTransformPort=3010');
+        const ct = res.headers.get('content-type') || '';
+        if (!ct.includes('application/json')) {
+          setRadiusStatus(prev => ({ ...prev, connected: false }));
+          return;
+        }
         const data = await res.json();
         setRadiusStatus({
           connected: true,

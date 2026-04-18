@@ -57,6 +57,18 @@ async function proxyRequest(request: NextRequest, method: string) {
     }
 
     const response = await fetch(targetUrl, fetchOptions);
+
+    // Guard against gateway returning HTML error pages instead of JSON
+    const ct = response.headers.get('content-type') || '';
+    if (!ct.includes('application/json')) {
+      const bodyText = await response.text().catch(() => '');
+      console.error('[nftables Proxy] Non-JSON response from gateway:', response.status, ct, bodyText.substring(0, 200));
+      return NextResponse.json(
+        { success: false, error: { code: 'BAD_GATEWAY', message: `Gateway returned non-JSON response (HTTP ${response.status})` } },
+        { status: 502 }
+      );
+    }
+
     const data = await response.json();
 
     return NextResponse.json(data, { status: response.status });
