@@ -1026,11 +1026,18 @@ app.delete('/api/redirects/:id', (c) => {
 app.get('/api/cache', (c) => {
   try {
     let cacheSize = 0;
-    const cacheOutput = safeExec('dnsmasq --dump-cache /dev/stdout 2>/dev/null || echo ""');
-    if (cacheOutput) {
-      const lines = cacheOutput.trim().split('\n').filter((l: string) => l.length > 0);
+    // Try dump-cache to a temp file (stdout redirect doesn't work reliably across platforms)
+    const tmpFile = '/tmp/dnsmasq-cache-dump.txt';
+    safeExec(`dnsmasq --dump-cache > ${tmpFile} 2>/dev/null`);
+    try {
+      const cacheContent = fs.readFileSync(tmpFile, 'utf-8');
+      const lines = cacheContent.trim().split('\n').filter((l: string) => l.length > 0);
+      // First line is a timestamp header, rest are cache entries
       cacheSize = Math.max(0, lines.length - 1);
+    } catch {
+      // File not readable — cache likely empty or dnsmasq not running
     }
+    try { fs.unlinkSync(tmpFile); } catch {}
 
     return c.json({
       success: true,
