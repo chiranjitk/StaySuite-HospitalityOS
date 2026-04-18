@@ -23,6 +23,16 @@ function findBun() {
 
 const BUN_PATH = findBun();
 
+// Shared mini-service defaults — prevents EADDRINUSE crash loops
+const MINI_SERVICE_DEFAULTS = {
+  max_memory_restart: '512M',
+  autorestart: true,
+  max_restarts: 10,
+  restart_delay: 5000,       // 5s between restart attempts (was 3s — too fast for port release)
+  kill_timeout: 3000,        // give process 3s to shut down gracefully before SIGKILL
+  listen_timeout: 10000,     // wait up to 10s for port to be available on startup
+};
+
 module.exports = {
   apps: [
     {
@@ -46,6 +56,7 @@ module.exports = {
       autorestart: true,
       max_restarts: 10,
       restart_delay: 5000,
+      kill_timeout: 5000,
     },
     {
       name: 'freeradius-service',
@@ -58,10 +69,7 @@ module.exports = {
         PROJECT_ROOT: PROJECT_ROOT,
         NODE_PATH: path.join(PROJECT_ROOT, 'mini-services', 'freeradius-service', 'node_modules'),
       },
-      max_memory_restart: '512M',
-      autorestart: true,
-      max_restarts: 10,
-      restart_delay: 3000,
+      ...MINI_SERVICE_DEFAULTS,
     },
     {
       name: 'realtime-service',
@@ -72,10 +80,7 @@ module.exports = {
         PORT: 3003,
         DATABASE_URL: DB_PATH,
       },
-      max_memory_restart: '512M',
-      autorestart: true,
-      max_restarts: 10,
-      restart_delay: 3000,
+      ...MINI_SERVICE_DEFAULTS,
     },
     {
       name: 'availability-service',
@@ -86,10 +91,7 @@ module.exports = {
         PORT: 3002,
         DATABASE_URL: DB_PATH,
       },
-      max_memory_restart: '512M',
-      autorestart: true,
-      max_restarts: 10,
-      restart_delay: 3000,
+      ...MINI_SERVICE_DEFAULTS,
     },
     {
       name: 'dns-service',
@@ -102,10 +104,7 @@ module.exports = {
         DATABASE_PATH: path.join(PROJECT_ROOT, 'db', 'custom.db'),
         NODE_PATH: path.join(PROJECT_ROOT, 'mini-services', 'dns-service', 'node_modules'),
       },
-      max_memory_restart: '512M',
-      autorestart: true,
-      max_restarts: 10,
-      restart_delay: 3000,
+      ...MINI_SERVICE_DEFAULTS,
     },
     {
       name: 'nftables-service',
@@ -117,10 +116,7 @@ module.exports = {
         PROJECT_ROOT: PROJECT_ROOT,
         NODE_PATH: path.join(PROJECT_ROOT, 'mini-services', 'nftables-service', 'node_modules'),
       },
-      max_memory_restart: '512M',
-      autorestart: true,
-      max_restarts: 10,
-      restart_delay: 3000,
+      ...MINI_SERVICE_DEFAULTS,
     },
     {
       name: 'dhcp-service',
@@ -133,10 +129,7 @@ module.exports = {
         DATABASE_PATH: path.join(PROJECT_ROOT, 'db', 'custom.db'),
         NODE_PATH: path.join(PROJECT_ROOT, 'mini-services', 'dhcp-service', 'node_modules'),
       },
-      max_memory_restart: '512M',
-      autorestart: true,
-      max_restarts: 10,
-      restart_delay: 3000,
+      ...MINI_SERVICE_DEFAULTS,
     },
   ],
 };

@@ -51,6 +51,11 @@ const PUBLIC_PATHS = [
   '/api/vendors/portal',
   // Tutorial progress (self-service)
   '/api/tutorials/progress',
+  // Network service proxies (dhcp-service, dns-service, nftables-service, freeradius-service)
+  '/api/kea/',             // DHCP service proxy (dnsmasq backend)
+  '/api/dns/',             // DNS service proxy
+  '/api/nftables/',        // nftables service proxy
+  '/api/network/os',       // Network interface data (used by DHCP/VLAN pages)
   // Page routes
   '/login',
   '/signup',
