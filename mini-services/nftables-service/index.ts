@@ -1277,6 +1277,904 @@ app.get('/api/config', (c) => {
 });
 
 // ============================================================================
+// Gateway Default Chains Engine
+// ============================================================================
+
+/**
+ * Network interface info parsed from .nmconnection files.
+ */
+interface NmConnectionInfo {
+  name: string;           // Connection id from [connection]
+  iface: string;          // Interface name (interface-name or derived from filename)
+  type: string;           // ethernet, vlan, bridge, bond
+  ipAddr: string;         // IPv4 address (e.g., "192.168.1.1")
+  prefix: number;         // CIDR prefix (e.g., 24)
+  gateway: string;        // Default gateway IP
+  dns: string[];          // DNS server IPs
+  nettype: number;        // 0=LAN, 1=WAN, 2=VLAN, 3=MGMT, 4=UNUSED
+  vlanId: number | null;  // VLAN ID if type=vlan
+  mac: string;            // MAC address
+  isSlave: boolean;       // Whether it's a slave/port of a bridge or bond
+  subnetCidr: string;     // Computed subnet CIDR (e.g., "192.168.1.0/24")
+}
+
+/**
+ * Options for the generateDefaultChains() function.
+ */
+interface DefaultChainsOptions {
+  captivePortalHttp?: number;   // Port for HTTP captive portal redirect (default 8888)
+  captivePortalHttps?: number;  // Port for HTTPS captive portal redirect (default 8443)
+  openPorts?: number[];         // Additional ports to allow on input (default [22,80,443,3000,8888,8443])
+  rateLimit?: number;           // Rate limit per second for unauthenticated HTTP/HTTPS (default 50)
+  blockPorts?: number[];        // Ports to block for unauthenticated LAN clients (default [137,138,139,445])
+  preserveUsers?: boolean;      // Preserve logged-in users when re-applying (default true)
+}
+
+const NM_CONNECTIONS_DIR = '/etc/NetworkManager/system-connections';
+
+// Nettype labels
+const NETTYPE_LABELS: Record<number, string> = {
+  0: 'LAN',
+  1: 'WAN',
+  2: 'VLAN',
+  3: 'MGMT',
+  4: 'UNUSED',
+};
+
+/**
+ * Parse a simple INI-like .nmconnection file content.
+ * Returns a map of section name -> { key: value } entries.
+ */
+function parseNmConnection(content: string): Map<string, Record<string, string>> {
+  const sections = new Map<string, Record<string, string>>();
+  let currentSection = '';
+
+  for (const rawLine of content.split('\n')) {
+    const line = rawLine.trim();
+
+    // Skip empty lines and comments
+    if (!line || line.startsWith('#') || line.startsWith(';')) continue;
+
+    // Section header
+    const sectionMatch = line.match(/^\[(.+)\]$/);
+    if (sectionMatch) {
+      currentSection = sectionMatch[1].trim();
+      if (!sections.has(currentSection)) {
+        sections.set(currentSection, {});
+      }
+      continue;
+    }
+
+    // Key = Value pair
+    const eqIndex = line.indexOf('=');
+    if (eqIndex > 0 && currentSection) {
+      const key = line.substring(0, eqIndex).trim();
+      const value = line.substring(eqIndex + 1).trim();
+      // Strip surrounding quotes from value
+      const cleanValue = value.replace(/^["']|["']$/g, '');
+      sections.get(currentSection)![key] = cleanValue;
+    }
+  }
+
+  return sections;
+}
+
+/**
+ * Scan NetworkManager .nmconnection files and return parsed interface info.
+ * Returns empty array if directory doesn't exist (sandbox-safe).
+ */
+function scanNmConnections(): NmConnectionInfo[] {
+  const results: NmConnectionInfo[] = [];
+
+  // Check if the NM connections directory exists
+  if (!fs.existsSync(NM_CONNECTIONS_DIR)) {
+    log.warn('NM connections directory not found', { dir: NM_CONNECTIONS_DIR });
+    return results;
+  }
+
+  let files: string[];
+  try {
+    files = fs.readdirSync(NM_CONNECTIONS_DIR);
+  } catch {
+    return results;
+  }
+
+  for (const file of files) {
+    if (!file.endsWith('.nmconnection')) continue;
+
+    const filePath = path.join(NM_CONNECTIONS_DIR, file);
+    let content: string;
+    try {
+      content = fs.readFileSync(filePath, 'utf-8');
+    } catch {
+      continue;
+    }
+
+    const sections = parseNmConnection(content);
+    const conn = sections.get('connection') || {};
+    const ipv4 = sections.get('ipv4') || {};
+    const ethernet = sections.get('ethernet') || {};
+    const vlan = sections.get('vlan') || {};
+    const staysuite = sections.get('staysuite') || {};
+    const bridgePort = sections.get('bridge-port');
+    const bondPort = sections.get('bond-port');
+
+    // Skip loopback
+    const connType = (conn.type || '').toLowerCase();
+    const connName = conn.id || file.replace('.nmconnection', '');
+    if (connName === 'lo' || connType === 'loopback') continue;
+
+    // Check if it's a slave/port of a bridge or bond
+    const isSlave = bridgePort !== undefined || bondPort !== undefined;
+    if (isSlave) continue; // Skip slaves per spec
+
+    // Parse IPv4 address from address1 (format: ip/prefix)
+    const address1 = ipv4.address1 || '';
+    const addrParts = address1.split('/');
+    const ipAddr = addrParts[0] || '';
+    const prefix = parseInt(addrParts[1] || '24', 10);
+
+    // Skip interfaces with no IPv4
+    if (!ipAddr || ipAddr === '0.0.0.0') continue;
+
+    // Compute subnet CIDR
+    const ipParts = ipAddr.split('.').map(Number);
+    const maskBits = prefix;
+    let subnetParts: number[] = [0, 0, 0, 0];
+    for (let i = 0; i < 4; i++) {
+      const bits = maskBits > (i * 8) ? Math.min(8, maskBits - i * 8) : 0;
+      subnetParts[i] = ipParts[i] & (0xFF << (8 - bits)) & 0xFF;
+    }
+    const subnetCidr = `${subnetParts.join('.')}/${prefix}`;
+
+    // Parse gateway and DNS
+    const gateway = ipv4.gateway || '';
+    const dnsStr = ipv4.dns || '';
+    const dns = dnsStr ? dnsStr.split(';').map(d => d.trim()).filter(d => d.length > 0) : [];
+
+    // Parse MAC address
+    const mac = ethernet['cloned-mac-address'] || ethernet['assigned-mac-address'] || '';
+
+    // Parse nettype (default to 4 = UNUSED)
+    const nettype = parseInt(staysuite.nettype || '4', 10);
+
+    // Parse VLAN ID if applicable
+    const vlanId = connType === 'vlan' && vlan.id ? parseInt(vlan.id, 10) : null;
+
+    // Interface name: prefer interface-name from connection, derive from file name
+    const iface = conn['interface-name'] || connName;
+
+    results.push({
+      name: connName,
+      iface,
+      type: connType,
+      ipAddr,
+      prefix,
+      gateway,
+      dns,
+      nettype,
+      vlanId,
+      mac,
+      isSlave,
+      subnetCidr,
+    });
+  }
+
+  log.info('Scanned NM connections', { count: results.length });
+  return results;
+}
+
+/**
+ * Get the existing logged-in user IPs from the staysuite table.
+ * Used to preserve users when re-applying default chains.
+ */
+function getLoggedInUsers(): string[] {
+  if (!staysuiteTableExists()) return [];
+  const result = execNft(`nft list set ip ${TABLE_NAME} loggedin_users 2>/dev/null`);
+  if (!result.success) return [];
+
+  const ips: string[] = [];
+  // Parse the set elements from nft output
+  // Format: "elements = { 1.2.3.4, 5.6.7.8 }"
+  const match = result.output.match(/elements\s*=\s*\{([^}]*)\}/);
+  if (match) {
+    const elements = match[1];
+    for (const elem of elements.split(',')) {
+      const ip = elem.trim();
+      if (ip && /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(ip)) {
+        ips.push(ip);
+      }
+    }
+  }
+  return ips;
+}
+
+/**
+ * Count rules in a generated nft config string.
+ */
+function countRulesInConfig(config: string): number {
+  let count = 0;
+  for (const line of config.split('\n')) {
+    const trimmed = line.trim();
+    if (trimmed.match(/\b(accept|drop|reject|log|masquerade|counter)\s*$/) &&
+        !trimmed.startsWith('#') &&
+        !trimmed.startsWith('policy') &&
+        trimmed.length > 0) {
+      count++;
+    }
+  }
+  return count;
+}
+
+/**
+ * Generate the complete nftables default chains ruleset for a gateway.
+ * This produces a comprehensive config similar to 24online's defaultchains but in nftables syntax.
+ */
+function generateDefaultChains(
+  interfaces: NmConnectionInfo[],
+  options: DefaultChainsOptions = {},
+): { config: string; stats: { wanCount: number; lanCount: number; vlanCount: number; totalRules: number } } {
+  const opts: Required<DefaultChainsOptions> = {
+    captivePortalHttp: options.captivePortalHttp ?? 8888,
+    captivePortalHttps: options.captivePortalHttps ?? 8443,
+    openPorts: options.openPorts ?? [22, 80, 443, 3000, 8888, 8443],
+    rateLimit: options.rateLimit ?? 50,
+    blockPorts: options.blockPorts ?? [137, 138, 139, 445],
+    preserveUsers: options.preserveUsers ?? true,
+  };
+
+  // Categorize interfaces
+  const wanIfaces = interfaces.filter(i => i.nettype === 1);
+  const lanIfaces = interfaces.filter(i => i.nettype === 0);
+  const vlanIfaces = interfaces.filter(i => i.nettype === 2);
+  const mgmtIfaces = interfaces.filter(i => i.nettype === 3);
+  const guestIfaces = [...lanIfaces, ...vlanIfaces]; // Guest-facing interfaces
+  const lanSubnets = guestIfaces.map(i => i.subnetCidr);
+
+  // Preserve logged-in users
+  const preservedUsers = opts.preserveUsers ? getLoggedInUsers() : [];
+  const usersElements = preservedUsers.length > 0
+    ? preservedUsers.join(', ')
+    : '';
+
+  let conf = '';
+  conf += `#!/usr/sbin/nft -f
+# StaySuite Gateway Default Chains - Auto-generated
+# Generated: ${new Date().toISOString()}
+# WAN: ${wanIfaces.map(i => i.iface).join(', ') || 'none'}
+# LAN: ${lanIfaces.map(i => i.iface).join(', ') || 'none'}
+# VLAN: ${vlanIfaces.map(i => i.iface).join(', ') || 'none'}
+# DO NOT EDIT MANUALLY - Changes will be overwritten
+
+flush table ip ${TABLE_NAME}
+
+table ip ${TABLE_NAME} {
+
+`;
+  // ==========================================================================
+  // Sets
+  // ==========================================================================
+
+  // loggedin_users set
+  conf += `  set loggedin_users {
+    type ipv4_addr\n`;
+  if (usersElements) {
+    conf += `    elements = { ${usersElements} }\n`;
+  }
+  conf += `  }
+
+`;
+
+  // mac_blacklist set
+  conf += `  set mac_blacklist {
+    type ether_addr
+  }
+
+`;
+
+  // mac_whitelist set
+  conf += `  set mac_whitelist {
+    type ether_addr
+  }
+
+`;
+
+  // lan_subnets set (interval type for CIDR matching)
+  conf += `  set lan_subnets {
+    type ipv4_addr
+    flags interval\n`;
+  if (lanSubnets.length > 0) {
+    conf += `    elements = { ${lanSubnets.join(', ')} }\n`;
+  }
+  conf += `  }
+
+`;
+
+  // ==========================================================================
+  // Filter chain: input (type filter hook input priority 0; policy drop)
+  // ==========================================================================
+  conf += `  # ----------------------------------------------------------------
+  # Filter: Input chain
+  # ----------------------------------------------------------------
+  chain input {
+    type filter hook input priority 0; policy drop;
+
+    # Allow loopback
+    iif "lo" accept
+
+    # Allow established/related connections
+    ct state established,related accept
+
+    # Allow ICMP
+    ip protocol icmp accept
+
+    # Drop invalid state packets
+    ct state invalid drop
+
+    # Drop MAC blacklisted
+    ether saddr @mac_blacklist drop
+
+    # Allow SSH from LAN subnets only
+    iifname != "lo" ip saddr @lan_subnets tcp dport 22 accept
+
+    # Allow DHCP from LAN
+    iifname != "lo" ip saddr @lan_subnets udp sport 67 udp dport 68 accept
+
+    # Allow DNS to local resolver
+    udp dport 53 accept
+    tcp dport 53 accept
+
+    # Allow StaySuite web UI and services
+    tcp dport { ${opts.openPorts.join(', ')} } accept
+
+    # Log and drop everything else
+    log prefix "SS-IN-DROP: " drop
+  }
+
+`;
+
+  // ==========================================================================
+  // Filter chain: forward (type filter hook forward priority 0; policy drop)
+  // ==========================================================================
+  conf += `  # ----------------------------------------------------------------
+  # Filter: Forward chain
+  # ----------------------------------------------------------------
+  chain forward {
+    type filter hook forward priority 0; policy drop;
+
+    # Allow established/related connections
+    ct state established,related accept
+
+    # Allow loopback
+    iif "lo" oif "lo" accept
+
+    # Drop invalid state packets
+    ct state invalid drop
+
+    # Drop MAC blacklisted
+    ether saddr @mac_blacklist drop\n`;
+
+  // Jump to per-LAN-interface chains for guest traffic
+  if (guestIfaces.length > 0) {
+    for (const iface of guestIfaces) {
+      const chainName = `guest_${iface.iface.replace(/[^a-zA-Z0-9_]/g, '_')}`;
+      conf += `
+    # Jump to per-interface chain for ${iface.iface} (${NETTYPE_LABELS[iface.nettype] || 'UNKNOWN'})
+    iifname "${iface.iface}" jump ${chainName}
+`;
+    }
+  }
+
+  // Allow LAN-to-LAN forwarding (between all guest interfaces)
+  if (guestIfaces.length >= 2) {
+    for (const iface of guestIfaces) {
+      conf += `    iifname "${iface.iface}" oifname { ${guestIfaces.map(i => `"${i.iface}"`).join(', ')} } accept
+`;
+    }
+  }
+
+  conf += `
+    # Log and drop everything else
+    log prefix "SS-FWD-DROP: " drop
+  }
+
+`;
+
+  // ==========================================================================
+  // Filter chain: output (type filter hook output priority 0; policy accept)
+  // ==========================================================================
+  conf += `  # ----------------------------------------------------------------
+  # Filter: Output chain
+  # ----------------------------------------------------------------
+  chain output {
+    type filter hook output priority 0; policy accept;
+  }
+
+`;
+
+  // ==========================================================================
+  // Per-LAN-interface chains (captive portal + access control)
+  // ==========================================================================
+  if (guestIfaces.length > 0) {
+    for (const iface of guestIfaces) {
+      const chainName = `guest_${iface.iface.replace(/[^a-zA-Z0-9_]/g, '_')}`;
+      const netLabel = NETTYPE_LABELS[iface.nettype] || 'UNKNOWN';
+
+      conf += `  # ----------------------------------------------------------------
+  # Guest chain: ${iface.iface} (${netLabel})
+  # ----------------------------------------------------------------
+  chain ${chainName} {
+    # Allow logged-in users (bypass all restrictions)
+    ip saddr @loggedin_users accept
+
+    # Allow MAC whitelisted devices (bypass all restrictions)
+    ether saddr @mac_whitelist accept
+
+    # Allow DHCP client requests
+    udp dport 67 accept
+
+    # Allow DNS
+    udp dport 53 accept
+    tcp dport 53 accept
+
+    # Rate-limit unauthenticated HTTP
+    tcp dport 80 limit rate ${opts.rateLimit}/second burst 20 packets accept
+
+    # Rate-limit unauthenticated HTTPS
+    tcp dport 443 limit rate ${opts.rateLimit}/second burst 20 packets accept
+
+    # Mark HTTP for captive portal redirect
+    tcp dport 80 meta mark set 10000
+
+    # Mark HTTPS for captive portal redirect
+    tcp dport 443 meta mark set 20000
+
+    # Block SMB/CIFS file sharing ports
+    tcp dport { ${opts.blockPorts.join(', ')} } drop
+
+    # Drop all other traffic for unauthenticated clients
+    drop
+  }
+
+`;
+    }
+  }
+
+  // ==========================================================================
+  // NAT chain: postrouting (masquerade WAN traffic)
+  // ==========================================================================
+  conf += `  # ----------------------------------------------------------------
+  # NAT: Postrouting (masquerade)
+  # ----------------------------------------------------------------
+  chain postrouting {
+    type nat hook postrouting priority 100; policy accept;
+`;
+  for (const wan of wanIfaces) {
+    conf += `    oifname "${wan.iface}" masquerade comment "masq-wan-${wan.iface}"
+`;
+  }
+  // If no WAN interfaces defined, masquerade all outgoing (safety fallback)
+  if (wanIfaces.length === 0) {
+    conf += `    oifname != "lo" masquerade comment "masq-all-fallback"
+`;
+  }
+  conf += `  }
+
+`;
+
+  // ==========================================================================
+  // NAT chain: prerouting (captive portal redirect)
+  // ==========================================================================
+  conf += `  # ----------------------------------------------------------------
+  # NAT: Prerouting (captive portal redirect)
+  # ----------------------------------------------------------------
+  chain prerouting {
+    type nat hook prerouting priority dstnat; policy accept;
+
+    # Captive portal HTTP redirect
+    meta mark 10000 dnat to :${opts.captivePortalHttp}
+
+    # Captive portal HTTPS redirect
+    meta mark 20000 dnat to :${opts.captivePortalHttps}
+  }
+
+`;
+
+  // ==========================================================================
+  // Mangle chain: prerouting accounting (per-LAN counters)
+  // ==========================================================================
+  conf += `  # ----------------------------------------------------------------
+  # Mangle: Prerouting (ingress accounting per LAN interface)
+  # ----------------------------------------------------------------
+  chain mangle_prerouting {
+    type filter hook prerouting priority mangle; policy accept;
+`;
+  for (const iface of guestIfaces) {
+    conf += `    iifname "${iface.iface}" counter comment "acct-in-${iface.iface}"
+`;
+  }
+  if (mgmtIfaces.length > 0) {
+    for (const iface of mgmtIfaces) {
+      conf += `    iifname "${iface.iface}" counter comment "acct-mgmt-${iface.iface}"
+`;
+    }
+  }
+  conf += `  }
+
+`;
+
+  // ==========================================================================
+  // Mangle chain: postrouting accounting (per-WAN counters)
+  // ==========================================================================
+  conf += `  # ----------------------------------------------------------------
+  # Mangle: Postrouting (egress accounting per WAN interface)
+  # ----------------------------------------------------------------
+  chain mangle_postrouting {
+    type filter hook postrouting priority mangle; policy accept;
+`;
+  for (const wan of wanIfaces) {
+    conf += `    oifname "${wan.iface}" counter comment "acct-out-${wan.iface}"
+`;
+  }
+  if (wanIfaces.length === 0) {
+    conf += `    oifname != "lo" counter comment "acct-out-all"
+`;
+  }
+  conf += `  }
+
+`;
+
+  // ==========================================================================
+  // Close table
+  // ==========================================================================
+  conf += `}\n`;
+
+  // Count rules
+  const totalRules = countRulesInConfig(conf);
+
+  return {
+    config: conf,
+    stats: {
+      wanCount: wanIfaces.length,
+      lanCount: lanIfaces.length,
+      vlanCount: vlanIfaces.length,
+      totalRules,
+    },
+  };
+}
+
+// ============================================================================
+// GET /api/default-chains - Preview generated config WITHOUT applying
+// ============================================================================
+
+app.get('/api/default-chains', (c) => {
+  try {
+    const interfaces = scanNmConnections();
+
+    // Parse optional query params
+    const captivePortalHttp = c.req.query('captivePortalHttp');
+    const captivePortalHttps = c.req.query('captivePortalHttps');
+    const rateLimit = c.req.query('rateLimit');
+
+    const options: DefaultChainsOptions = {};
+    if (captivePortalHttp) options.captivePortalHttp = parseInt(captivePortalHttp, 10);
+    if (captivePortalHttps) options.captivePortalHttps = parseInt(captivePortalHttps, 10);
+    if (rateLimit) options.rateLimit = parseInt(rateLimit, 10);
+
+    const { config, stats } = generateDefaultChains(interfaces, options);
+
+    return c.json({
+      success: true,
+      interfaces: interfaces.map(i => ({
+        name: i.name,
+        iface: i.iface,
+        type: i.type,
+        nettype: i.nettype,
+        nettypeLabel: NETTYPE_LABELS[i.nettype] || 'UNKNOWN',
+        ipAddr: i.ipAddr,
+        prefix: i.prefix,
+        subnetCidr: i.subnetCidr,
+        gateway: i.gateway,
+        vlanId: i.vlanId,
+        mac: i.mac,
+      })),
+      config,
+      stats,
+    });
+  } catch (err: unknown) {
+    const error = err instanceof Error ? err.message : String(err);
+    return c.json({ success: false, error }, 500);
+  }
+});
+
+// ============================================================================
+// POST /api/default-chains - Generate and apply the complete gateway ruleset
+// ============================================================================
+
+app.post('/api/default-chains', async (c) => {
+  try {
+    // Parse optional body params
+    let body: DefaultChainsOptions = {};
+    try {
+      body = await c.req.json();
+    } catch {
+      // No body or invalid JSON - use defaults
+    }
+
+    // Scan interfaces
+    const interfaces = scanNmConnections();
+
+    if (interfaces.length === 0) {
+      return c.json({
+        success: false,
+        error: 'No network interfaces found. Ensure .nmconnection files exist in /etc/NetworkManager/system-connections/ with [staysuite] nettype configured.',
+        interfaces: [],
+      }, 400);
+    }
+
+    // Generate config
+    const { config, stats } = generateDefaultChains(interfaces, body);
+
+    // Ensure config directory exists
+    ensureConfigDir();
+
+    // Write config to disk
+    const configPath = path.join(NFTABLES_CONFIG_DIR, 'staysuite-gateway.conf');
+    fs.writeFileSync(configPath, config, 'utf-8');
+    log.info('Wrote gateway default chains config', { path: configPath, lines: config.split('\n').length });
+
+    // Validate config with nft -c -f
+    const check = execNft(`nft -c -f ${configPath} 2>&1`);
+    if (!check.success) {
+      return c.json({
+        success: false,
+        error: 'Gateway config validation failed',
+        validationErrors: check.error || check.output,
+        rulesApplied: 0,
+        config,
+      }, 400);
+    }
+
+    // Apply config atomically
+    const apply = execNft(`nft -f ${configPath} 2>&1`);
+    if (!apply.success) {
+      return c.json({
+        success: false,
+        error: 'Failed to apply gateway config',
+        applyError: apply.error || apply.output,
+        rulesApplied: 0,
+      }, 500);
+    }
+
+    // Restore preserved users if needed
+    if (body.preserveUsers !== false) {
+      const preservedUsers = getLoggedInUsers(); // These should already be in the config
+      // Additional: re-add any users that may have been added dynamically between config write and apply
+      // (handled within generateDefaultChains via getLoggedInUsers)
+    }
+
+    log.info('Applied gateway default chains', {
+      rulesApplied: stats.totalRules,
+      wanCount: stats.wanCount,
+      lanCount: stats.lanCount,
+      vlanCount: stats.vlanCount,
+    });
+
+    return c.json({
+      success: true,
+      message: `Gateway default chains applied with ${stats.totalRules} rules`,
+      rulesApplied: stats.totalRules,
+      interfaces: {
+        wan: interfaces.filter(i => i.nettype === 1).map(i => ({ name: i.name, iface: i.iface, ip: i.ipAddr })),
+        lan: interfaces.filter(i => i.nettype === 0).map(i => ({ name: i.name, iface: i.iface, ip: i.ipAddr })),
+        vlan: interfaces.filter(i => i.nettype === 2).map(i => ({ name: i.name, iface: i.iface, ip: i.ipAddr, vlanId: i.vlanId })),
+        mgmt: interfaces.filter(i => i.nettype === 3).map(i => ({ name: i.name, iface: i.iface, ip: i.ipAddr })),
+      },
+      stats,
+      configPath,
+    });
+  } catch (err: unknown) {
+    const error = err instanceof Error ? err.message : String(err);
+    return c.json({ success: false, error, rulesApplied: 0 }, 500);
+  }
+});
+
+// ============================================================================
+// POST /api/default-chains/users - Add user IP to loggedin_users set
+// ============================================================================
+
+app.post('/api/default-chains/users', async (c) => {
+  if (!staysuiteTableExists()) {
+    return c.json({ success: false, error: 'StaySuite nftables table does not exist. Apply default chains first.' }, 404);
+  }
+
+  try {
+    const body = await c.req.json();
+    const { ip, mac } = body;
+
+    if (!ip) {
+      return c.json({ success: false, error: 'IP address is required' }, 400);
+    }
+
+    // Validate IP format
+    const ipRegex = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/;
+    if (!ipRegex.test(ip)) {
+      return c.json({ success: false, error: 'Invalid IP address format' }, 400);
+    }
+
+    const cmd = `nft add element ip ${TABLE_NAME} loggedin_users { ${ip} }`;
+    log.info('Adding user to loggedin_users', { ip, mac });
+
+    const result = execNft(cmd);
+    if (!result.success) {
+      log.error('Failed to add user to loggedin_users', { error: result.error });
+      return c.json({
+        success: false,
+        error: 'Failed to add user IP to loggedin_users set',
+        nftError: result.error,
+      }, 500);
+    }
+
+    return c.json({
+      success: true,
+      message: `User IP ${ip} added to loggedin_users`,
+      ip,
+      mac,
+    });
+  } catch (err: unknown) {
+    const error = err instanceof Error ? err.message : String(err);
+    return c.json({ success: false, error }, 500);
+  }
+});
+
+// ============================================================================
+// DELETE /api/default-chains/users - Remove user IP from loggedin_users set
+// ============================================================================
+
+app.delete('/api/default-chains/users', async (c) => {
+  if (!staysuiteTableExists()) {
+    return c.json({ success: false, error: 'StaySuite nftables table does not exist' }, 404);
+  }
+
+  try {
+    const body = await c.req.json();
+    const { ip } = body;
+
+    if (!ip) {
+      return c.json({ success: false, error: 'IP address is required' }, 400);
+    }
+
+    const cmd = `nft delete element ip ${TABLE_NAME} loggedin_users { ${ip} }`;
+    log.info('Removing user from loggedin_users', { ip });
+
+    const result = execNft(cmd);
+    if (!result.success) {
+      log.error('Failed to remove user from loggedin_users', { error: result.error });
+      return c.json({
+        success: false,
+        error: 'Failed to remove user IP from loggedin_users set',
+        nftError: result.error,
+      }, 500);
+    }
+
+    return c.json({
+      success: true,
+      message: `User IP ${ip} removed from loggedin_users`,
+      ip,
+    });
+  } catch (err: unknown) {
+    const error = err instanceof Error ? err.message : String(err);
+    return c.json({ success: false, error }, 500);
+  }
+});
+
+// ============================================================================
+// GET /api/default-chains/users - List logged-in user IPs
+// ============================================================================
+
+app.get('/api/default-chains/users', (c) => {
+  if (!staysuiteTableExists()) {
+    return c.json({ success: true, users: [], message: 'Table does not exist yet' });
+  }
+
+  const ips = getLoggedInUsers();
+
+  return c.json({
+    success: true,
+    users: ips,
+    count: ips.length,
+  });
+});
+
+// ============================================================================
+// POST /api/default-chains/mac-blacklist - Add MAC to blacklist
+// ============================================================================
+
+app.post('/api/default-chains/mac-blacklist', async (c) => {
+  if (!staysuiteTableExists()) {
+    return c.json({ success: false, error: 'StaySuite nftables table does not exist. Apply default chains first.' }, 404);
+  }
+
+  try {
+    const body = await c.req.json();
+    const { mac } = body;
+
+    if (!mac) {
+      return c.json({ success: false, error: 'MAC address is required' }, 400);
+    }
+
+    // Validate MAC format
+    const macRegex = /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/;
+    if (!macRegex.test(mac)) {
+      return c.json({ success: false, error: 'Invalid MAC address format (expected XX:XX:XX:XX:XX:XX)' }, 400);
+    }
+
+    const cmd = `nft add element ip ${TABLE_NAME} mac_blacklist { ${mac} }`;
+    log.info('Adding MAC to blacklist', { mac });
+
+    const result = execNft(cmd);
+    if (!result.success) {
+      log.error('Failed to add MAC to blacklist', { error: result.error });
+      return c.json({
+        success: false,
+        error: 'Failed to add MAC to blacklist',
+        nftError: result.error,
+      }, 500);
+    }
+
+    return c.json({
+      success: true,
+      message: `MAC ${mac} added to blacklist`,
+      mac,
+    });
+  } catch (err: unknown) {
+    const error = err instanceof Error ? err.message : String(err);
+    return c.json({ success: false, error }, 500);
+  }
+});
+
+// ============================================================================
+// DELETE /api/default-chains/mac-blacklist - Remove MAC from blacklist
+// ============================================================================
+
+app.delete('/api/default-chains/mac-blacklist', async (c) => {
+  if (!staysuiteTableExists()) {
+    return c.json({ success: false, error: 'StaySuite nftables table does not exist' }, 404);
+  }
+
+  try {
+    const body = await c.req.json();
+    const { mac } = body;
+
+    if (!mac) {
+      return c.json({ success: false, error: 'MAC address is required' }, 400);
+    }
+
+    const cmd = `nft delete element ip ${TABLE_NAME} mac_blacklist { ${mac} }`;
+    log.info('Removing MAC from blacklist', { mac });
+
+    const result = execNft(cmd);
+    if (!result.success) {
+      log.error('Failed to remove MAC from blacklist', { error: result.error });
+      return c.json({
+        success: false,
+        error: 'Failed to remove MAC from blacklist',
+        nftError: result.error,
+      }, 500);
+    }
+
+    return c.json({
+      success: true,
+      message: `MAC ${mac} removed from blacklist`,
+      mac,
+    });
+  } catch (err: unknown) {
+    const error = err instanceof Error ? err.message : String(err);
+    return c.json({ success: false, error }, 500);
+  }
+});
+
+// ============================================================================
 // Start Server
 // ============================================================================
 
