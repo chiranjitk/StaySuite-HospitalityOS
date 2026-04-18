@@ -477,6 +477,46 @@ app.get('/api/status', (c) => {
     ruleCount = countRules();
   }
 
+  // GUI chain info: check if gui_custom_rules chain exists
+  let guiChainExists = false;
+  let guiRulesCount = 0;
+  let portForwardsCount = 0;
+  let rateLimitsCount = 0;
+  let quickBlocksCount = 0;
+
+  if (staysuiteExists) {
+    const guiChainResult = execNft(`nft list chain ip ${TABLE_NAME} gui_custom_rules 2>/dev/null`);
+    if (guiChainResult.success) {
+      guiChainExists = true;
+      // Count rules in gui_custom_rules (lines with handle or action verbs)
+      const guiLines = guiChainResult.output.split('\n');
+      for (const line of guiLines) {
+        const trimmed = line.trim();
+        if (trimmed.match(/\b(accept|drop|reject|log)\b/) && !trimmed.startsWith('#') && !trimmed.startsWith('type') && !trimmed.startsWith('policy')) {
+          guiRulesCount++;
+        }
+      }
+    }
+  }
+
+  // Read persisted JSON counts
+  try {
+    const guiRules = readGuiRules();
+    guiRulesCount = guiRules.length;
+  } catch {}
+  try {
+    const portForwards = readPortForwards();
+    portForwardsCount = portForwards.length;
+  } catch {}
+  try {
+    const rateLimits = readRateLimits();
+    rateLimitsCount = rateLimits.length;
+  } catch {}
+  try {
+    const quickBlocks = readQuickBlocks();
+    quickBlocksCount = quickBlocks.length;
+  } catch {}
+
   return c.json({
     installed,
     version,
@@ -486,6 +526,11 @@ app.get('/api/status', (c) => {
     rulesInStaysuite: ruleCount,
     configPath: NFTABLES_CONFIG,
     configExists: fs.existsSync(NFTABLES_CONFIG),
+    guiRulesCount,
+    portForwardsCount,
+    rateLimitsCount,
+    quickBlocksCount,
+    guiChainExists,
   });
 });
 
@@ -1825,6 +1870,22 @@ table ip ${TABLE_NAME} {
 `;
 
   // ==========================================================================
+  // GUI-managed chains (populated by GUI CRUD, DO NOT edit manually)
+  // ==========================================================================
+  conf += `  # ─── GUI-managed chains (populated by GUI CRUD, DO NOT edit manually) ───
+  chain gui_custom_rules {
+    type filter hook forward priority 5; policy accept;
+    # Rules added/removed ONLY from GUI firewall management page
+  }
+
+  chain gui_nat_rules {
+    type nat hook prerouting priority -50; policy accept;
+    # Port forwarding (DNAT) rules from GUI
+  }
+
+`;
+
+  // ==========================================================================
   // Close table
   // ==========================================================================
   conf += `}\n`;
@@ -1953,17 +2014,122 @@ app.post('/api/default-chains', async (c) => {
       // (handled within generateDefaultChains via getLoggedInUsers)
     }
 
+    // =========================================================================
+    // Boot Restore: Re-apply all persisted GUI rules
+    // =========================================================================
+    let guiRulesRestored = 0;
+
+    // Restore GUI filter rules
+    const guiRules = readGuiRules();
+    for (const rule of guiRules) {
+      if (!rule.enabled) continue;
+      const parts: string[] = [`nft add rule ip ${TABLE_NAME} gui_custom_rules`];
+      if (rule.sourceIp) parts.push(`ip saddr ${rule.sourceIp}`);
+      if (rule.destIp) parts.push(`ip daddr ${rule.destIp}`);
+      if (rule.protocol !== 'all') {
+        parts.push(rule.protocol === 'icmp' ? 'ip protocol icmp' : `${rule.protocol} protocol ${rule.protocol}`);
+      }
+      if (rule.destPort && ['tcp', 'udp'].includes(rule.protocol)) {
+        parts.push(`${rule.protocol} dport ${rule.destPort}`);
+      }
+      parts.push(rule.action);
+      if (rule.comment) parts.push(`comment "${rule.comment.replace(/"/g, '\\"')}"`);
+
+      const result = execNft(parts.join(' '));
+      if (result.success) {
+        rule.handle = getRuleHandle('gui_custom_rules');
+        guiRulesRestored++;
+      } else {
+        log.warn('Failed to restore GUI rule', { id: rule.id, error: result.error });
+      }
+    }
+    writeGuiRules(guiRules);
+
+    // Restore port forwards
+    const portForwards = readPortForwards();
+    for (const pf of portForwards) {
+      if (!pf.enabled) continue;
+      const protocols = pf.protocol === 'both' ? ['tcp', 'udp'] : [pf.protocol];
+      let pfRestored = false;
+      for (const proto of protocols) {
+        const pfParts: string[] = [`nft add rule ip ${TABLE_NAME} gui_nat_rules`];
+        pfParts.push(`${proto} dport ${pf.externalPort}`);
+        if (pf.sourceIp) pfParts.push(`ip saddr ${pf.sourceIp}`);
+        pfParts.push(`dnat to ${pf.internalIp}:${pf.internalPort}`);
+        pfParts.push(`comment "${pf.name.replace(/"/g, '\\"')}"`);
+
+        const result = execNft(pfParts.join(' '));
+        if (result.success) pfRestored = true;
+      }
+      if (pfRestored) {
+        pf.handle = getRuleHandle('gui_nat_rules');
+        guiRulesRestored++;
+      }
+    }
+    writePortForwards(portForwards);
+
+    // Restore rate limits
+    const rateLimits = readRateLimits();
+    for (const rl of rateLimits) {
+      if (!rl.enabled) continue;
+
+      const dlParts: string[] = [`nft add rule ip ${TABLE_NAME} gui_custom_rules`];
+      if (rl.protocol !== 'all') dlParts.push(`${rl.protocol} protocol ${rl.protocol}`);
+      dlParts.push(`ip daddr ${rl.targetIp}`);
+      dlParts.push(`limit rate over ${rl.downloadRate} drop`);
+      dlParts.push(`comment "rl-dl:${rl.name.replace(/"/g, '\\"')}"`);
+      const dlResult = execNft(dlParts.join(' '));
+      if (dlResult.success) {
+        rl.downloadHandle = getRuleHandle('gui_custom_rules');
+      }
+
+      const ulParts: string[] = [`nft add rule ip ${TABLE_NAME} gui_custom_rules`];
+      if (rl.protocol !== 'all') ulParts.push(`${rl.protocol} protocol ${rl.protocol}`);
+      ulParts.push(`ip saddr ${rl.targetIp}`);
+      ulParts.push(`limit rate over ${rl.uploadRate} drop`);
+      ulParts.push(`comment "rl-ul:${rl.name.replace(/"/g, '\\"')}"`);
+      const ulResult = execNft(ulParts.join(' '));
+      if (ulResult.success) {
+        rl.uploadHandle = getRuleHandle('gui_custom_rules');
+      }
+
+      if (dlResult.success || ulResult.success) guiRulesRestored++;
+    }
+    writeRateLimits(rateLimits);
+
+    // Restore quick blocks
+    const quickBlocks = readQuickBlocks();
+    for (const block of quickBlocks) {
+      if (block.type === 'mac') {
+        const result = execNft(`nft add element ip ${TABLE_NAME} mac_blacklist { ${block.value} }`);
+        if (result.success) guiRulesRestored++;
+      } else {
+        const matchExpr = `ip saddr ${block.value}`;
+        const cmd = `nft add rule ip ${TABLE_NAME} gui_custom_rules ${matchExpr} drop comment "quick-block:${block.reason.replace(/"/g, '\\"').substring(0, 50)}"`;
+        const result = execNft(cmd);
+        if (result.success) {
+          block.handle = getRuleHandle('gui_custom_rules');
+          guiRulesRestored++;
+        }
+      }
+    }
+    writeQuickBlocks(quickBlocks);
+
+    log.info('Restored GUI rules on boot', { guiRulesRestored });
+
     log.info('Applied gateway default chains', {
       rulesApplied: stats.totalRules,
       wanCount: stats.wanCount,
       lanCount: stats.lanCount,
       vlanCount: stats.vlanCount,
+      guiRulesRestored,
     });
 
     return c.json({
       success: true,
-      message: `Gateway default chains applied with ${stats.totalRules} rules`,
+      message: `Default chains applied with ${stats.totalRules} rules, restored ${guiRulesRestored} GUI rules`,
       rulesApplied: stats.totalRules,
+      guiRulesRestored,
       interfaces: {
         wan: interfaces.filter(i => i.nettype === 1).map(i => ({ name: i.name, iface: i.iface, ip: i.ipAddr })),
         lan: interfaces.filter(i => i.nettype === 0).map(i => ({ name: i.name, iface: i.iface, ip: i.ipAddr })),
@@ -2172,6 +2338,1156 @@ app.delete('/api/default-chains/mac-blacklist', async (c) => {
     const error = err instanceof Error ? err.message : String(err);
     return c.json({ success: false, error }, 500);
   }
+});
+
+// ============================================================================
+// GUI Firewall Management — Persistence Layer
+// ============================================================================
+
+// --- GUI Rule Types ---
+
+interface GuiRule {
+  id: string;
+  name: string;
+  chain: string;            // "gui_custom_rules"
+  protocol: string;         // tcp, udp, icmp, all
+  sourceIp: string;         // IP or CIDR, empty = any
+  destIp: string;           // IP or CIDR, empty = any
+  destPort: string;         // port or range
+  action: string;           // accept, drop, reject, log
+  enabled: boolean;
+  comment: string;
+  priority: number;
+  handle: number;
+  createdAt: string;
+}
+
+interface PortForward {
+  id: string;
+  name: string;
+  protocol: string;         // tcp, udp, both
+  externalPort: number;
+  internalIp: string;
+  internalPort: number;
+  sourceIp: string;         // optional source restriction
+  enabled: boolean;
+  handle: number;
+  createdAt: string;
+}
+
+interface RateLimit {
+  id: string;
+  name: string;
+  targetIp: string;
+  downloadRate: string;     // e.g., "5mbit"
+  uploadRate: string;       // e.g., "2mbit"
+  protocol: string;         // all, tcp, udp
+  enabled: boolean;
+  downloadHandle: number;
+  uploadHandle: number;
+  createdAt: string;
+}
+
+interface QuickBlock {
+  id: string;
+  type: string;             // ip, subnet, mac
+  value: string;
+  reason: string;
+  blockedAt: string;
+  handle: number;           // nft handle for ip/subnet; 0 for mac
+}
+
+// --- Persistence Helpers ---
+
+const GUI_RULES_FILE = path.join(NFTABLES_CONFIG_DIR, 'gui-rules.json');
+const PORT_FORWARDS_FILE = path.join(NFTABLES_CONFIG_DIR, 'port-forwards.json');
+const RATE_LIMITS_FILE = path.join(NFTABLES_CONFIG_DIR, 'rate-limits.json');
+const QUICK_BLOCKS_FILE = path.join(NFTABLES_CONFIG_DIR, 'quick-blocks.json');
+
+/**
+ * Atomic JSON write: write to .tmp then rename.
+ */
+function atomicWriteJson(filePath: string, data: unknown): void {
+  ensureConfigDir();
+  const tmpPath = filePath + '.tmp';
+  fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2), 'utf-8');
+  fs.renameSync(tmpPath, filePath);
+}
+
+function readGuiRules(): GuiRule[] {
+  try {
+    if (!fs.existsSync(GUI_RULES_FILE)) return [];
+    return JSON.parse(fs.readFileSync(GUI_RULES_FILE, 'utf-8'));
+  } catch {
+    return [];
+  }
+}
+
+function writeGuiRules(rules: GuiRule[]): void {
+  atomicWriteJson(GUI_RULES_FILE, rules);
+}
+
+function readPortForwards(): PortForward[] {
+  try {
+    if (!fs.existsSync(PORT_FORWARDS_FILE)) return [];
+    return JSON.parse(fs.readFileSync(PORT_FORWARDS_FILE, 'utf-8'));
+  } catch {
+    return [];
+  }
+}
+
+function writePortForwards(rules: PortForward[]): void {
+  atomicWriteJson(PORT_FORWARDS_FILE, rules);
+}
+
+function readRateLimits(): RateLimit[] {
+  try {
+    if (!fs.existsSync(RATE_LIMITS_FILE)) return [];
+    return JSON.parse(fs.readFileSync(RATE_LIMITS_FILE, 'utf-8'));
+  } catch {
+    return [];
+  }
+}
+
+function writeRateLimits(rules: RateLimit[]): void {
+  atomicWriteJson(RATE_LIMITS_FILE, rules);
+}
+
+function readQuickBlocks(): QuickBlock[] {
+  try {
+    if (!fs.existsSync(QUICK_BLOCKS_FILE)) return [];
+    return JSON.parse(fs.readFileSync(QUICK_BLOCKS_FILE, 'utf-8'));
+  } catch {
+    return [];
+  }
+}
+
+function writeQuickBlocks(blocks: QuickBlock[]): void {
+  atomicWriteJson(QUICK_BLOCKS_FILE, blocks);
+}
+
+// --- Input Validation Helpers ---
+
+const IP_REGEX = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/;
+const CIDR_REGEX = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\/\d{1,2}$/;
+const IP_OR_CIDR_REGEX = /^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})(\/\d{1,2})?$/;
+const MAC_REGEX = /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/;
+const PORT_REGEX = /^(\d+)(-(\d+))?$/;
+
+function validateIpOrCidr(value: string): boolean {
+  if (!value || value.trim() === '') return true; // empty = any
+  return IP_OR_CIDR_REGEX.test(value.trim());
+}
+
+function validatePort(value: string): boolean {
+  if (!value || value.trim() === '') return true; // empty = any
+  const match = value.trim().match(PORT_REGEX);
+  if (!match) return false;
+  const p1 = parseInt(match[1], 10);
+  if (p1 < 1 || p1 > 65535) return false;
+  if (match[3]) {
+    const p2 = parseInt(match[3], 10);
+    if (p2 < 1 || p2 > 65535 || p2 <= p1) return false;
+  }
+  return true;
+}
+
+function validatePortNumber(port: number): boolean {
+  return Number.isInteger(port) && port >= 1 && port <= 65535;
+}
+
+function getRuleHandle(chain: string): number {
+  const listResult = execNft(`nft list chain ip ${TABLE_NAME} ${chain} -a 2>/dev/null`);
+  if (!listResult.success) return -1;
+  const handleMatch = listResult.output.match(/handle (\d+)/g);
+  if (handleMatch && handleMatch.length > 0) {
+    const lastHandle = handleMatch[handleMatch.length - 1].match(/handle (\d+)/);
+    if (lastHandle) return parseInt(lastHandle[1]);
+  }
+  return -1;
+}
+
+// ============================================================================
+// GUI Firewall Management — REST Endpoints
+// ============================================================================
+
+// --- GUI Rules CRUD ---
+
+// GET /api/gui-rules — list all persisted GUI rules
+app.get('/api/gui-rules', (c) => {
+  const rules = readGuiRules();
+  return c.json({ success: true, data: rules });
+});
+
+// POST /api/gui-rules — add a new GUI rule
+app.post('/api/gui-rules', async (c) => {
+  try {
+    const body = await c.req.json();
+    const {
+      name = '',
+      protocol = 'tcp',
+      sourceIp = '',
+      destIp = '',
+      destPort = '',
+      action = 'accept',
+      comment = '',
+      priority = 100,
+      enabled = true,
+    } = body;
+
+    if (!name.trim()) {
+      return c.json({ success: false, error: 'Rule name is required' }, 400);
+    }
+
+    if (!['tcp', 'udp', 'icmp', 'all'].includes(protocol)) {
+      return c.json({ success: false, error: 'Invalid protocol. Must be tcp, udp, icmp, or all' }, 400);
+    }
+
+    if (!['accept', 'drop', 'reject', 'log'].includes(action)) {
+      return c.json({ success: false, error: 'Invalid action. Must be accept, drop, reject, or log' }, 400);
+    }
+
+    if (!validateIpOrCidr(sourceIp)) {
+      return c.json({ success: false, error: 'Invalid source IP/CIDR format' }, 400);
+    }
+
+    if (!validateIpOrCidr(destIp)) {
+      return c.json({ success: false, error: 'Invalid destination IP/CIDR format' }, 400);
+    }
+
+    if (!validatePort(destPort)) {
+      return c.json({ success: false, error: 'Invalid destination port format (1-65535, or range like 8000-9000)' }, 400);
+    }
+
+    if (!staysuiteTableExists()) {
+      return c.json({ success: false, error: 'StaySuite table does not exist. Apply default chains first.' }, 404);
+    }
+
+    // Build nft command
+    const parts: string[] = [`nft add rule ip ${TABLE_NAME} gui_custom_rules`];
+
+    if (sourceIp.trim()) parts.push(`ip saddr ${sourceIp.trim()}`);
+    if (destIp.trim()) parts.push(`ip daddr ${destIp.trim()}`);
+    if (protocol !== 'all') {
+      parts.push(protocol === 'icmp' ? 'ip protocol icmp' : `${protocol} protocol ${protocol}`);
+    }
+    if (destPort.trim() && ['tcp', 'udp'].includes(protocol)) {
+      parts.push(`${protocol} dport ${destPort.trim()}`);
+    }
+
+    parts.push(action);
+
+    if (comment.trim()) {
+      parts.push(`comment "${comment.trim().replace(/"/g, '\\"')}"`);
+    }
+
+    const cmd = parts.join(' ');
+    let handle = -1;
+
+    if (enabled) {
+      const result = execNft(cmd);
+      if (!result.success) {
+        log.error('Failed to add GUI rule', { command: cmd, error: result.error });
+        return c.json({ success: false, error: 'Failed to add nft rule', nftError: result.error }, 500);
+      }
+      handle = getRuleHandle('gui_custom_rules');
+    }
+
+    const rule: GuiRule = {
+      id: crypto.randomUUID(),
+      name: name.trim(),
+      chain: 'gui_custom_rules',
+      protocol,
+      sourceIp: sourceIp.trim(),
+      destIp: destIp.trim(),
+      destPort: destPort.trim(),
+      action,
+      enabled,
+      comment: comment.trim(),
+      priority: Number(priority) || 100,
+      handle,
+      createdAt: new Date().toISOString(),
+    };
+
+    const rules = readGuiRules();
+    rules.push(rule);
+    writeGuiRules(rules);
+
+    log.info('GUI rule added', { id: rule.id, name: rule.name, handle });
+    return c.json({ success: true, data: rule });
+  } catch (err: unknown) {
+    const error = err instanceof Error ? err.message : String(err);
+    return c.json({ success: false, error }, 500);
+  }
+});
+
+// PUT /api/gui-rules/:id — update a GUI rule
+app.put('/api/gui-rules/:id', async (c) => {
+  try {
+    const { id } = c.req.param();
+    const rules = readGuiRules();
+    const idx = rules.findIndex(r => r.id === id);
+    if (idx === -1) {
+      return c.json({ success: false, error: 'Rule not found' }, 404);
+    }
+
+    const body = await c.req.json();
+    const existing = rules[idx];
+
+    // Validate updated fields
+    if (body.protocol !== undefined && !['tcp', 'udp', 'icmp', 'all'].includes(body.protocol)) {
+      return c.json({ success: false, error: 'Invalid protocol' }, 400);
+    }
+    if (body.action !== undefined && !['accept', 'drop', 'reject', 'log'].includes(body.action)) {
+      return c.json({ success: false, error: 'Invalid action' }, 400);
+    }
+    if (body.sourceIp !== undefined && !validateIpOrCidr(body.sourceIp)) {
+      return c.json({ success: false, error: 'Invalid source IP/CIDR format' }, 400);
+    }
+    if (body.destIp !== undefined && !validateIpOrCidr(body.destIp)) {
+      return c.json({ success: false, error: 'Invalid destination IP/CIDR format' }, 400);
+    }
+    if (body.destPort !== undefined && !validatePort(body.destPort)) {
+      return c.json({ success: false, error: 'Invalid destination port format' }, 400);
+    }
+
+    // Delete old nft rule if it was enabled and had a handle
+    if (existing.enabled && existing.handle > 0) {
+      execNft(`nft delete rule ip ${TABLE_NAME} gui_custom_rules handle ${existing.handle}`);
+    }
+
+    // Apply updated values
+    const updated: GuiRule = {
+      ...existing,
+      name: body.name !== undefined ? body.name : existing.name,
+      protocol: body.protocol !== undefined ? body.protocol : existing.protocol,
+      sourceIp: body.sourceIp !== undefined ? body.sourceIp : existing.sourceIp,
+      destIp: body.destIp !== undefined ? body.destIp : existing.destIp,
+      destPort: body.destPort !== undefined ? body.destPort : existing.destPort,
+      action: body.action !== undefined ? body.action : existing.action,
+      comment: body.comment !== undefined ? body.comment : existing.comment,
+      priority: body.priority !== undefined ? body.priority : existing.priority,
+      enabled: body.enabled !== undefined ? body.enabled : existing.enabled,
+      handle: -1,
+    };
+
+    // Re-add rule to nft if enabled
+    if (updated.enabled) {
+      const parts: string[] = [`nft add rule ip ${TABLE_NAME} gui_custom_rules`];
+      if (updated.sourceIp) parts.push(`ip saddr ${updated.sourceIp}`);
+      if (updated.destIp) parts.push(`ip daddr ${updated.destIp}`);
+      if (updated.protocol !== 'all') {
+        parts.push(updated.protocol === 'icmp' ? 'ip protocol icmp' : `${updated.protocol} protocol ${updated.protocol}`);
+      }
+      if (updated.destPort && ['tcp', 'udp'].includes(updated.protocol)) {
+        parts.push(`${updated.protocol} dport ${updated.destPort}`);
+      }
+      parts.push(updated.action);
+      if (updated.comment) {
+        parts.push(`comment "${updated.comment.replace(/"/g, '\\"')}"`);
+      }
+
+      const cmd = parts.join(' ');
+      const result = execNft(cmd);
+      if (!result.success) {
+        log.error('Failed to re-add updated GUI rule', { command: cmd, error: result.error });
+        return c.json({ success: false, error: 'Failed to re-add nft rule', nftError: result.error }, 500);
+      }
+      updated.handle = getRuleHandle('gui_custom_rules');
+    }
+
+    rules[idx] = updated;
+    writeGuiRules(rules);
+
+    log.info('GUI rule updated', { id, handle: updated.handle });
+    return c.json({ success: true, data: updated });
+  } catch (err: unknown) {
+    const error = err instanceof Error ? err.message : String(err);
+    return c.json({ success: false, error }, 500);
+  }
+});
+
+// DELETE /api/gui-rules/:id — delete a GUI rule
+app.delete('/api/gui-rules/:id', (c) => {
+  try {
+    const { id } = c.req.param();
+    const rules = readGuiRules();
+    const idx = rules.findIndex(r => r.id === id);
+    if (idx === -1) {
+      return c.json({ success: false, error: 'Rule not found' }, 404);
+    }
+
+    const rule = rules[idx];
+
+    // Delete from nft if enabled with valid handle
+    if (rule.enabled && rule.handle > 0) {
+      const result = execNft(`nft delete rule ip ${TABLE_NAME} gui_custom_rules handle ${rule.handle}`);
+      if (!result.success) {
+        log.warn('Failed to delete nft rule during GUI rule removal', { id, handle: rule.handle, error: result.error });
+      }
+    }
+
+    rules.splice(idx, 1);
+    writeGuiRules(rules);
+
+    log.info('GUI rule deleted', { id, name: rule.name });
+    return c.json({ success: true, message: 'Rule deleted' });
+  } catch (err: unknown) {
+    const error = err instanceof Error ? err.message : String(err);
+    return c.json({ success: false, error }, 500);
+  }
+});
+
+// PATCH /api/gui-rules/:id/toggle — enable/disable a GUI rule
+app.patch('/api/gui-rules/:id/toggle', async (c) => {
+  try {
+    const { id } = c.req.param();
+    const body = await c.req.json();
+    const { enabled } = body;
+
+    if (typeof enabled !== 'boolean') {
+      return c.json({ success: false, error: 'enabled (boolean) is required' }, 400);
+    }
+
+    const rules = readGuiRules();
+    const idx = rules.findIndex(r => r.id === id);
+    if (idx === -1) {
+      return c.json({ success: false, error: 'Rule not found' }, 404);
+    }
+
+    const rule = rules[idx];
+
+    if (enabled && !rule.enabled) {
+      // Enable: re-add rule to nft
+      const parts: string[] = [`nft add rule ip ${TABLE_NAME} gui_custom_rules`];
+      if (rule.sourceIp) parts.push(`ip saddr ${rule.sourceIp}`);
+      if (rule.destIp) parts.push(`ip daddr ${rule.destIp}`);
+      if (rule.protocol !== 'all') {
+        parts.push(rule.protocol === 'icmp' ? 'ip protocol icmp' : `${rule.protocol} protocol ${rule.protocol}`);
+      }
+      if (rule.destPort && ['tcp', 'udp'].includes(rule.protocol)) {
+        parts.push(`${rule.protocol} dport ${rule.destPort}`);
+      }
+      parts.push(rule.action);
+      if (rule.comment) {
+        parts.push(`comment "${rule.comment.replace(/"/g, '\\"')}"`);
+      }
+
+      const cmd = parts.join(' ');
+      const result = execNft(cmd);
+      if (!result.success) {
+        log.error('Failed to enable GUI rule', { command: cmd, error: result.error });
+        return c.json({ success: false, error: 'Failed to add nft rule', nftError: result.error }, 500);
+      }
+      rule.handle = getRuleHandle('gui_custom_rules');
+      rule.enabled = true;
+    } else if (!enabled && rule.enabled) {
+      // Disable: delete from nft
+      if (rule.handle > 0) {
+        execNft(`nft delete rule ip ${TABLE_NAME} gui_custom_rules handle ${rule.handle}`);
+      }
+      rule.handle = -1;
+      rule.enabled = false;
+    }
+
+    rules[idx] = rule;
+    writeGuiRules(rules);
+
+    log.info('GUI rule toggled', { id, enabled });
+    return c.json({ success: true, data: rule });
+  } catch (err: unknown) {
+    const error = err instanceof Error ? err.message : String(err);
+    return c.json({ success: false, error }, 500);
+  }
+});
+
+// --- Port Forward CRUD ---
+
+// GET /api/port-forwards
+app.get('/api/port-forwards', (c) => {
+  const rules = readPortForwards();
+  return c.json({ success: true, data: rules });
+});
+
+// POST /api/port-forwards
+app.post('/api/port-forwards', async (c) => {
+  try {
+    const body = await c.req.json();
+    const {
+      name = '',
+      protocol = 'tcp',
+      externalPort,
+      internalIp,
+      internalPort,
+      sourceIp = '',
+      enabled = true,
+    } = body;
+
+    if (!name.trim()) {
+      return c.json({ success: false, error: 'Name is required' }, 400);
+    }
+    if (!['tcp', 'udp', 'both'].includes(protocol)) {
+      return c.json({ success: false, error: 'Invalid protocol. Must be tcp, udp, or both' }, 400);
+    }
+    if (!validatePortNumber(externalPort)) {
+      return c.json({ success: false, error: 'External port must be 1-65535' }, 400);
+    }
+    if (!IP_REGEX.test(internalIp)) {
+      return c.json({ success: false, error: 'Invalid internal IP address format' }, 400);
+    }
+    if (!validatePortNumber(internalPort)) {
+      return c.json({ success: false, error: 'Internal port must be 1-65535' }, 400);
+    }
+    if (sourceIp && !validateIpOrCidr(sourceIp)) {
+      return c.json({ success: false, error: 'Invalid source IP/CIDR format' }, 400);
+    }
+
+    if (!staysuiteTableExists()) {
+      return c.json({ success: false, error: 'StaySuite table does not exist. Apply default chains first.' }, 404);
+    }
+
+    let handle = -1;
+    if (enabled) {
+      const protocols = protocol === 'both' ? ['tcp', 'udp'] : [protocol];
+      for (const proto of protocols) {
+        const parts: string[] = [`nft add rule ip ${TABLE_NAME} gui_nat_rules`];
+        parts.push(`${proto} dport ${externalPort}`);
+        if (sourceIp.trim()) parts.push(`ip saddr ${sourceIp.trim()}`);
+        parts.push(`dnat to ${internalIp}:${internalPort}`);
+        parts.push(`comment "${name.trim().replace(/"/g, '\\"')}"`);
+
+        const result = execNft(parts.join(' '));
+        if (!result.success) {
+          log.error('Failed to add port forward rule', { proto, error: result.error });
+          return c.json({ success: false, error: `Failed to add DNAT rule for ${proto}`, nftError: result.error }, 500);
+        }
+      }
+      handle = getRuleHandle('gui_nat_rules');
+    }
+
+    const pf: PortForward = {
+      id: crypto.randomUUID(),
+      name: name.trim(),
+      protocol,
+      externalPort,
+      internalIp,
+      internalPort,
+      sourceIp: sourceIp.trim(),
+      enabled,
+      handle,
+      createdAt: new Date().toISOString(),
+    };
+
+    const rules = readPortForwards();
+    rules.push(pf);
+    writePortForwards(rules);
+
+    log.info('Port forward added', { id: pf.id, name: pf.name, handle });
+    return c.json({ success: true, data: pf });
+  } catch (err: unknown) {
+    const error = err instanceof Error ? err.message : String(err);
+    return c.json({ success: false, error }, 500);
+  }
+});
+
+// PUT /api/port-forwards/:id
+app.put('/api/port-forwards/:id', async (c) => {
+  try {
+    const { id } = c.req.param();
+    const rules = readPortForwards();
+    const idx = rules.findIndex(r => r.id === id);
+    if (idx === -1) {
+      return c.json({ success: false, error: 'Port forward not found' }, 404);
+    }
+
+    const body = await c.req.json();
+    const existing = rules[idx];
+
+    // Validate
+    if (body.protocol !== undefined && !['tcp', 'udp', 'both'].includes(body.protocol)) {
+      return c.json({ success: false, error: 'Invalid protocol' }, 400);
+    }
+    if (body.externalPort !== undefined && !validatePortNumber(body.externalPort)) {
+      return c.json({ success: false, error: 'Invalid external port' }, 400);
+    }
+    if (body.internalIp !== undefined && !IP_REGEX.test(body.internalIp)) {
+      return c.json({ success: false, error: 'Invalid internal IP' }, 400);
+    }
+    if (body.internalPort !== undefined && !validatePortNumber(body.internalPort)) {
+      return c.json({ success: false, error: 'Invalid internal port' }, 400);
+    }
+    if (body.sourceIp !== undefined && body.sourceIp !== '' && !validateIpOrCidr(body.sourceIp)) {
+      return c.json({ success: false, error: 'Invalid source IP/CIDR' }, 400);
+    }
+
+    // Delete old nft rules
+    if (existing.enabled && existing.handle > 0) {
+      // For "both" protocol, we need to delete multiple rules; best effort
+      execNft(`nft delete rule ip ${TABLE_NAME} gui_nat_rules handle ${existing.handle}`);
+    }
+
+    const updated: PortForward = {
+      ...existing,
+      name: body.name !== undefined ? body.name : existing.name,
+      protocol: body.protocol !== undefined ? body.protocol : existing.protocol,
+      externalPort: body.externalPort !== undefined ? body.externalPort : existing.externalPort,
+      internalIp: body.internalIp !== undefined ? body.internalIp : existing.internalIp,
+      internalPort: body.internalPort !== undefined ? body.internalPort : existing.internalPort,
+      sourceIp: body.sourceIp !== undefined ? body.sourceIp : existing.sourceIp,
+      enabled: body.enabled !== undefined ? body.enabled : existing.enabled,
+      handle: -1,
+    };
+
+    if (updated.enabled) {
+      const protocols = updated.protocol === 'both' ? ['tcp', 'udp'] : [updated.protocol];
+      for (const proto of protocols) {
+        const parts: string[] = [`nft add rule ip ${TABLE_NAME} gui_nat_rules`];
+        parts.push(`${proto} dport ${updated.externalPort}`);
+        if (updated.sourceIp) parts.push(`ip saddr ${updated.sourceIp}`);
+        parts.push(`dnat to ${updated.internalIp}:${updated.internalPort}`);
+        parts.push(`comment "${updated.name.replace(/"/g, '\\"')}"`);
+
+        const result = execNft(parts.join(' '));
+        if (!result.success) {
+          return c.json({ success: false, error: `Failed to re-add DNAT rule for ${proto}`, nftError: result.error }, 500);
+        }
+      }
+      updated.handle = getRuleHandle('gui_nat_rules');
+    }
+
+    rules[idx] = updated;
+    writePortForwards(rules);
+
+    log.info('Port forward updated', { id, handle: updated.handle });
+    return c.json({ success: true, data: updated });
+  } catch (err: unknown) {
+    const error = err instanceof Error ? err.message : String(err);
+    return c.json({ success: false, error }, 500);
+  }
+});
+
+// DELETE /api/port-forwards/:id
+app.delete('/api/port-forwards/:id', (c) => {
+  try {
+    const { id } = c.req.param();
+    const rules = readPortForwards();
+    const idx = rules.findIndex(r => r.id === id);
+    if (idx === -1) {
+      return c.json({ success: false, error: 'Port forward not found' }, 404);
+    }
+
+    const pf = rules[idx];
+    if (pf.enabled && pf.handle > 0) {
+      execNft(`nft delete rule ip ${TABLE_NAME} gui_nat_rules handle ${pf.handle}`);
+    }
+
+    rules.splice(idx, 1);
+    writePortForwards(rules);
+
+    log.info('Port forward deleted', { id, name: pf.name });
+    return c.json({ success: true, message: 'Port forward deleted' });
+  } catch (err: unknown) {
+    const error = err instanceof Error ? err.message : String(err);
+    return c.json({ success: false, error }, 500);
+  }
+});
+
+// PATCH /api/port-forwards/:id/toggle
+app.patch('/api/port-forwards/:id/toggle', async (c) => {
+  try {
+    const { id } = c.req.param();
+    const body = await c.req.json();
+    const { enabled } = body;
+
+    if (typeof enabled !== 'boolean') {
+      return c.json({ success: false, error: 'enabled (boolean) is required' }, 400);
+    }
+
+    const rules = readPortForwards();
+    const idx = rules.findIndex(r => r.id === id);
+    if (idx === -1) {
+      return c.json({ success: false, error: 'Port forward not found' }, 404);
+    }
+
+    const pf = rules[idx];
+
+    if (enabled && !pf.enabled) {
+      const protocols = pf.protocol === 'both' ? ['tcp', 'udp'] : [pf.protocol];
+      for (const proto of protocols) {
+        const parts: string[] = [`nft add rule ip ${TABLE_NAME} gui_nat_rules`];
+        parts.push(`${proto} dport ${pf.externalPort}`);
+        if (pf.sourceIp) parts.push(`ip saddr ${pf.sourceIp}`);
+        parts.push(`dnat to ${pf.internalIp}:${pf.internalPort}`);
+        parts.push(`comment "${pf.name.replace(/"/g, '\\"')}"`);
+
+        const result = execNft(parts.join(' '));
+        if (!result.success) {
+          return c.json({ success: false, error: `Failed to add DNAT rule for ${proto}`, nftError: result.error }, 500);
+        }
+      }
+      pf.handle = getRuleHandle('gui_nat_rules');
+      pf.enabled = true;
+    } else if (!enabled && pf.enabled) {
+      if (pf.handle > 0) {
+        execNft(`nft delete rule ip ${TABLE_NAME} gui_nat_rules handle ${pf.handle}`);
+      }
+      pf.handle = -1;
+      pf.enabled = false;
+    }
+
+    rules[idx] = pf;
+    writePortForwards(rules);
+
+    log.info('Port forward toggled', { id, enabled });
+    return c.json({ success: true, data: pf });
+  } catch (err: unknown) {
+    const error = err instanceof Error ? err.message : String(err);
+    return c.json({ success: false, error }, 500);
+  }
+});
+
+// --- Rate Limit CRUD ---
+
+// GET /api/rate-limits
+app.get('/api/rate-limits', (c) => {
+  const rules = readRateLimits();
+  return c.json({ success: true, data: rules });
+});
+
+// POST /api/rate-limits
+app.post('/api/rate-limits', async (c) => {
+  try {
+    const body = await c.req.json();
+    const {
+      name = '',
+      targetIp,
+      downloadRate,
+      uploadRate,
+      protocol = 'all',
+      enabled = true,
+    } = body;
+
+    if (!name.trim()) {
+      return c.json({ success: false, error: 'Name is required' }, 400);
+    }
+    if (!targetIp || !validateIpOrCidr(targetIp)) {
+      return c.json({ success: false, error: 'Valid target IP or CIDR is required' }, 400);
+    }
+    if (!downloadRate || !downloadRate.match(/^\d+(kbit|mbit|gbit|kbytes|mbytes|gbytes)$/)) {
+      return c.json({ success: false, error: 'Invalid download rate format (e.g., 5mbit, 512kbit)' }, 400);
+    }
+    if (!uploadRate || !uploadRate.match(/^\d+(kbit|mbit|gbit|kbytes|mbytes|gbytes)$/)) {
+      return c.json({ success: false, error: 'Invalid upload rate format' }, 400);
+    }
+
+    if (!staysuiteTableExists()) {
+      return c.json({ success: false, error: 'StaySuite table does not exist. Apply default chains first.' }, 404);
+    }
+
+    let downloadHandle = -1;
+    let uploadHandle = -1;
+
+    if (enabled) {
+      // Download rule: limit rate over for traffic destined to target
+      const dlParts: string[] = [`nft add rule ip ${TABLE_NAME} gui_custom_rules`];
+      if (protocol !== 'all') dlParts.push(`${protocol} protocol ${protocol}`);
+      dlParts.push(`ip daddr ${targetIp}`);
+      dlParts.push(`limit rate over ${downloadRate} drop`);
+      dlParts.push(`comment "rl-dl:${name.trim().replace(/"/g, '\\"')}"`);
+
+      const dlResult = execNft(dlParts.join(' '));
+      if (!dlResult.success) {
+        return c.json({ success: false, error: 'Failed to add download rate limit', nftError: dlResult.error }, 500);
+      }
+      downloadHandle = getRuleHandle('gui_custom_rules');
+
+      // Upload rule: limit rate over for traffic from target
+      const ulParts: string[] = [`nft add rule ip ${TABLE_NAME} gui_custom_rules`];
+      if (protocol !== 'all') ulParts.push(`${protocol} protocol ${protocol}`);
+      ulParts.push(`ip saddr ${targetIp}`);
+      ulParts.push(`limit rate over ${uploadRate} drop`);
+      ulParts.push(`comment "rl-ul:${name.trim().replace(/"/g, '\\"')}"`);
+
+      const ulResult = execNft(ulParts.join(' '));
+      if (!ulResult.success) {
+        // Rollback download rule
+        if (downloadHandle > 0) {
+          execNft(`nft delete rule ip ${TABLE_NAME} gui_custom_rules handle ${downloadHandle}`);
+        }
+        return c.json({ success: false, error: 'Failed to add upload rate limit', nftError: ulResult.error }, 500);
+      }
+      uploadHandle = getRuleHandle('gui_custom_rules');
+    }
+
+    const rl: RateLimit = {
+      id: crypto.randomUUID(),
+      name: name.trim(),
+      targetIp: targetIp.trim(),
+      downloadRate: downloadRate.trim(),
+      uploadRate: uploadRate.trim(),
+      protocol,
+      enabled,
+      downloadHandle,
+      uploadHandle,
+      createdAt: new Date().toISOString(),
+    };
+
+    const rules = readRateLimits();
+    rules.push(rl);
+    writeRateLimits(rules);
+
+    log.info('Rate limit added', { id: rl.id, name: rl.name });
+    return c.json({ success: true, data: rl });
+  } catch (err: unknown) {
+    const error = err instanceof Error ? err.message : String(err);
+    return c.json({ success: false, error }, 500);
+  }
+});
+
+// PUT /api/rate-limits/:id
+app.put('/api/rate-limits/:id', async (c) => {
+  try {
+    const { id } = c.req.param();
+    const rules = readRateLimits();
+    const idx = rules.findIndex(r => r.id === id);
+    if (idx === -1) {
+      return c.json({ success: false, error: 'Rate limit not found' }, 404);
+    }
+
+    const body = await c.req.json();
+    const existing = rules[idx];
+
+    // Validate
+    if (body.targetIp !== undefined && !validateIpOrCidr(body.targetIp)) {
+      return c.json({ success: false, error: 'Invalid target IP/CIDR' }, 400);
+    }
+    if (body.downloadRate !== undefined && !body.downloadRate.match(/^\d+(kbit|mbit|gbit|kbytes|mbytes|gbytes)$/)) {
+      return c.json({ success: false, error: 'Invalid download rate format' }, 400);
+    }
+    if (body.uploadRate !== undefined && !body.uploadRate.match(/^\d+(kbit|mbit|gbit|kbytes|mbytes|gbytes)$/)) {
+      return c.json({ success: false, error: 'Invalid upload rate format' }, 400);
+    }
+
+    // Delete old rules from nft
+    if (existing.enabled) {
+      if (existing.downloadHandle > 0) execNft(`nft delete rule ip ${TABLE_NAME} gui_custom_rules handle ${existing.downloadHandle}`);
+      if (existing.uploadHandle > 0) execNft(`nft delete rule ip ${TABLE_NAME} gui_custom_rules handle ${existing.uploadHandle}`);
+    }
+
+    const updated: RateLimit = {
+      ...existing,
+      name: body.name !== undefined ? body.name : existing.name,
+      targetIp: body.targetIp !== undefined ? body.targetIp : existing.targetIp,
+      downloadRate: body.downloadRate !== undefined ? body.downloadRate : existing.downloadRate,
+      uploadRate: body.uploadRate !== undefined ? body.uploadRate : existing.uploadRate,
+      protocol: body.protocol !== undefined ? body.protocol : existing.protocol,
+      enabled: body.enabled !== undefined ? body.enabled : existing.enabled,
+      downloadHandle: -1,
+      uploadHandle: -1,
+    };
+
+    if (updated.enabled) {
+      const dlParts: string[] = [`nft add rule ip ${TABLE_NAME} gui_custom_rules`];
+      if (updated.protocol !== 'all') dlParts.push(`${updated.protocol} protocol ${updated.protocol}`);
+      dlParts.push(`ip daddr ${updated.targetIp}`);
+      dlParts.push(`limit rate over ${updated.downloadRate} drop`);
+      dlParts.push(`comment "rl-dl:${updated.name.replace(/"/g, '\\"')}"`);
+      const dlResult = execNft(dlParts.join(' '));
+      if (dlResult.success) updated.downloadHandle = getRuleHandle('gui_custom_rules');
+
+      const ulParts: string[] = [`nft add rule ip ${TABLE_NAME} gui_custom_rules`];
+      if (updated.protocol !== 'all') ulParts.push(`${updated.protocol} protocol ${updated.protocol}`);
+      ulParts.push(`ip saddr ${updated.targetIp}`);
+      ulParts.push(`limit rate over ${updated.uploadRate} drop`);
+      ulParts.push(`comment "rl-ul:${updated.name.replace(/"/g, '\\"')}"`);
+      const ulResult = execNft(ulParts.join(' '));
+      if (ulResult.success) updated.uploadHandle = getRuleHandle('gui_custom_rules');
+    }
+
+    rules[idx] = updated;
+    writeRateLimits(rules);
+
+    log.info('Rate limit updated', { id });
+    return c.json({ success: true, data: updated });
+  } catch (err: unknown) {
+    const error = err instanceof Error ? err.message : String(err);
+    return c.json({ success: false, error }, 500);
+  }
+});
+
+// DELETE /api/rate-limits/:id
+app.delete('/api/rate-limits/:id', (c) => {
+  try {
+    const { id } = c.req.param();
+    const rules = readRateLimits();
+    const idx = rules.findIndex(r => r.id === id);
+    if (idx === -1) {
+      return c.json({ success: false, error: 'Rate limit not found' }, 404);
+    }
+
+    const rl = rules[idx];
+    if (rl.enabled) {
+      if (rl.downloadHandle > 0) execNft(`nft delete rule ip ${TABLE_NAME} gui_custom_rules handle ${rl.downloadHandle}`);
+      if (rl.uploadHandle > 0) execNft(`nft delete rule ip ${TABLE_NAME} gui_custom_rules handle ${rl.uploadHandle}`);
+    }
+
+    rules.splice(idx, 1);
+    writeRateLimits(rules);
+
+    log.info('Rate limit deleted', { id, name: rl.name });
+    return c.json({ success: true, message: 'Rate limit deleted' });
+  } catch (err: unknown) {
+    const error = err instanceof Error ? err.message : String(err);
+    return c.json({ success: false, error }, 500);
+  }
+});
+
+// PATCH /api/rate-limits/:id/toggle
+app.patch('/api/rate-limits/:id/toggle', async (c) => {
+  try {
+    const { id } = c.req.param();
+    const body = await c.req.json();
+    const { enabled } = body;
+
+    if (typeof enabled !== 'boolean') {
+      return c.json({ success: false, error: 'enabled (boolean) is required' }, 400);
+    }
+
+    const rules = readRateLimits();
+    const idx = rules.findIndex(r => r.id === id);
+    if (idx === -1) {
+      return c.json({ success: false, error: 'Rate limit not found' }, 404);
+    }
+
+    const rl = rules[idx];
+
+    if (enabled && !rl.enabled) {
+      // Add download rule
+      const dlParts: string[] = [`nft add rule ip ${TABLE_NAME} gui_custom_rules`];
+      if (rl.protocol !== 'all') dlParts.push(`${rl.protocol} protocol ${rl.protocol}`);
+      dlParts.push(`ip daddr ${rl.targetIp}`);
+      dlParts.push(`limit rate over ${rl.downloadRate} drop`);
+      dlParts.push(`comment "rl-dl:${rl.name.replace(/"/g, '\\"')}"`);
+      const dlResult = execNft(dlParts.join(' '));
+      if (dlResult.success) rl.downloadHandle = getRuleHandle('gui_custom_rules');
+
+      // Add upload rule
+      const ulParts: string[] = [`nft add rule ip ${TABLE_NAME} gui_custom_rules`];
+      if (rl.protocol !== 'all') ulParts.push(`${rl.protocol} protocol ${rl.protocol}`);
+      ulParts.push(`ip saddr ${rl.targetIp}`);
+      ulParts.push(`limit rate over ${rl.uploadRate} drop`);
+      ulParts.push(`comment "rl-ul:${rl.name.replace(/"/g, '\\"')}"`);
+      const ulResult = execNft(ulParts.join(' '));
+      if (ulResult.success) rl.uploadHandle = getRuleHandle('gui_custom_rules');
+
+      rl.enabled = true;
+    } else if (!enabled && rl.enabled) {
+      if (rl.downloadHandle > 0) execNft(`nft delete rule ip ${TABLE_NAME} gui_custom_rules handle ${rl.downloadHandle}`);
+      if (rl.uploadHandle > 0) execNft(`nft delete rule ip ${TABLE_NAME} gui_custom_rules handle ${rl.uploadHandle}`);
+      rl.downloadHandle = -1;
+      rl.uploadHandle = -1;
+      rl.enabled = false;
+    }
+
+    rules[idx] = rl;
+    writeRateLimits(rules);
+
+    log.info('Rate limit toggled', { id, enabled });
+    return c.json({ success: true, data: rl });
+  } catch (err: unknown) {
+    const error = err instanceof Error ? err.message : String(err);
+    return c.json({ success: false, error }, 500);
+  }
+});
+
+// --- Quick Block ---
+
+// GET /api/quick-blocks
+app.get('/api/quick-blocks', (c) => {
+  const blocks = readQuickBlocks();
+  return c.json({ success: true, data: blocks });
+});
+
+// POST /api/quick-blocks
+app.post('/api/quick-blocks', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { type = 'ip', value, reason = '' } = body;
+
+    if (!value || !value.trim()) {
+      return c.json({ success: false, error: 'Value is required' }, 400);
+    }
+
+    if (!['ip', 'subnet', 'mac'].includes(type)) {
+      return c.json({ success: false, error: 'Type must be ip, subnet, or mac' }, 400);
+    }
+
+    const trimmedValue = value.trim();
+
+    if (type === 'ip' && !IP_REGEX.test(trimmedValue)) {
+      return c.json({ success: false, error: 'Invalid IP address format' }, 400);
+    }
+    if (type === 'subnet' && !CIDR_REGEX.test(trimmedValue)) {
+      return c.json({ success: false, error: 'Invalid CIDR format (e.g., 10.0.0.0/24)' }, 400);
+    }
+    if (type === 'mac' && !MAC_REGEX.test(trimmedValue)) {
+      return c.json({ success: false, error: 'Invalid MAC address format' }, 400);
+    }
+
+    if (!staysuiteTableExists()) {
+      return c.json({ success: false, error: 'StaySuite table does not exist. Apply default chains first.' }, 404);
+    }
+
+    let handle = -1;
+
+    if (type === 'mac') {
+      // Add to mac_blacklist set
+      const result = execNft(`nft add element ip ${TABLE_NAME} mac_blacklist { ${trimmedValue} }`);
+      if (!result.success) {
+        return c.json({ success: false, error: 'Failed to add MAC to blacklist set', nftError: result.error }, 500);
+      }
+      // MAC blocks don't have a handle (they're set elements)
+      handle = 0;
+    } else {
+      // Add drop rule to gui_custom_rules
+      const matchExpr = type === 'subnet' ? `ip saddr ${trimmedValue}` : `ip saddr ${trimmedValue}`;
+      const cmd = `nft add rule ip ${TABLE_NAME} gui_custom_rules ${matchExpr} drop comment "quick-block:${reason.replace(/"/g, '\\"').substring(0, 50)}"`;
+      const result = execNft(cmd);
+      if (!result.success) {
+        return c.json({ success: false, error: 'Failed to add drop rule', nftError: result.error }, 500);
+      }
+      handle = getRuleHandle('gui_custom_rules');
+    }
+
+    const block: QuickBlock = {
+      id: crypto.randomUUID(),
+      type,
+      value: trimmedValue,
+      reason: reason.trim(),
+      blockedAt: new Date().toISOString(),
+      handle,
+    };
+
+    const blocks = readQuickBlocks();
+    blocks.push(block);
+    writeQuickBlocks(blocks);
+
+    log.info('Quick block added', { id: block.id, type, value });
+    return c.json({ success: true, data: block });
+  } catch (err: unknown) {
+    const error = err instanceof Error ? err.message : String(err);
+    return c.json({ success: false, error }, 500);
+  }
+});
+
+// DELETE /api/quick-blocks/:id
+app.delete('/api/quick-blocks/:id', (c) => {
+  try {
+    const { id } = c.req.param();
+    const blocks = readQuickBlocks();
+    const idx = blocks.findIndex(b => b.id === id);
+    if (idx === -1) {
+      return c.json({ success: false, error: 'Quick block not found' }, 404);
+    }
+
+    const block = blocks[idx];
+
+    if (block.type === 'mac') {
+      execNft(`nft delete element ip ${TABLE_NAME} mac_blacklist { ${block.value} }`);
+    } else if (block.handle > 0) {
+      execNft(`nft delete rule ip ${TABLE_NAME} gui_custom_rules handle ${block.handle}`);
+    }
+
+    blocks.splice(idx, 1);
+    writeQuickBlocks(blocks);
+
+    log.info('Quick block removed', { id, type: block.type, value: block.value });
+    return c.json({ success: true, message: 'Quick block removed' });
+  } catch (err: unknown) {
+    const error = err instanceof Error ? err.message : String(err);
+    return c.json({ success: false, error }, 500);
+  }
+});
+
+// --- Presets ---
+
+// GET /api/presets — return hardcoded list of preset templates
+app.get('/api/presets', (c) => {
+  const presets = [
+    {
+      id: 'allow-pms',
+      name: 'Allow PMS Access',
+      description: 'Allow TCP 5432 from any LAN subnet',
+      category: 'networking',
+      rules: [{ protocol: 'tcp', destPort: '5432', action: 'accept' }],
+    },
+    {
+      id: 'allow-rdp',
+      name: 'Allow RDP',
+      description: 'Allow TCP 3389 from specific IP',
+      category: 'remote-access',
+      rules: [{ protocol: 'tcp', destPort: '3389', action: 'accept' }],
+    },
+    {
+      id: 'allow-voip',
+      name: 'Allow VoIP/SIP',
+      description: 'Allow UDP 5060,5061 + RTP 10000-20000',
+      category: 'networking',
+      rules: [
+        { protocol: 'udp', destPort: '5060', action: 'accept' },
+        { protocol: 'udp', destPort: '5061', action: 'accept' },
+        { protocol: 'udp', destPort: '10000-20000', action: 'accept' },
+      ],
+    },
+    {
+      id: 'block-social-media',
+      name: 'Block Social Media',
+      description: 'Drop traffic to known social media IP ranges',
+      category: 'content-filter',
+      rules: [
+        { protocol: 'tcp', destIp: '31.13.24.0/22', destPort: '443', action: 'drop' },
+        { protocol: 'tcp', destIp: '157.240.0.0/16', destPort: '443', action: 'drop' },
+      ],
+    },
+    {
+      id: 'allow-printer',
+      name: 'Allow Printer',
+      description: 'Allow TCP 9100 from LAN subnet',
+      category: 'networking',
+      rules: [{ protocol: 'tcp', destPort: '9100', action: 'accept' }],
+    },
+    {
+      id: 'allow-cctv',
+      name: 'Allow CCTV/NVR',
+      description: 'Allow TCP 554,8080 from CCTV subnet',
+      category: 'networking',
+      rules: [
+        { protocol: 'tcp', destPort: '554', action: 'accept' },
+        { protocol: 'tcp', destPort: '8080', action: 'accept' },
+      ],
+    },
+    {
+      id: 'guest-isolation',
+      name: 'Guest Isolation',
+      description: 'Block inter-guest communication',
+      category: 'security',
+      rules: [
+        { protocol: 'all', destIp: '10.0.2.0/24', action: 'drop' },
+      ],
+    },
+    {
+      id: 'dns-only',
+      name: 'DNS Only Access',
+      description: 'Only allow DNS from specific subnet',
+      category: 'security',
+      rules: [
+        { protocol: 'udp', destPort: '53', action: 'accept' },
+        { protocol: 'tcp', destPort: '53', action: 'accept' },
+      ],
+    },
+  ];
+
+  return c.json({ success: true, data: presets });
 });
 
 // ============================================================================

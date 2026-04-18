@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
   Card,
   CardContent,
@@ -13,11 +13,7 @@ import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
-import { Slider } from '@/components/ui/slider';
-import { Separator } from '@/components/ui/separator';
-import { Progress } from '@/components/ui/progress';
 import { Checkbox } from '@/components/ui/checkbox';
-import { Textarea } from '@/components/ui/textarea';
 import {
   Select,
   SelectContent,
@@ -34,6 +30,16 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
+import {
   Table,
   TableBody,
   TableCell,
@@ -46,348 +52,212 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
-import {
-  RadioGroup,
-  RadioGroupItem,
-} from '@/components/ui/radio-group';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
+import { Skeleton } from '@/components/ui/skeleton';
+import { EmptyState } from '@/components/ui/empty-state';
+import { useToast } from '@/hooks/use-toast';
+import { cn } from '@/lib/utils';
 import {
   Shield,
   ShieldCheck,
-  ShieldAlert,
   ShieldBan,
-  Lock,
-  Unlock,
-  Network,
-  Wifi,
-  Activity,
-  Globe,
-  Gauge,
-  TrendingUp,
-  TrendingDown,
+  ShieldAlert,
   Plus,
-  Edit2,
   Trash2,
+  Edit2,
+  Eye,
+  Ban,
+  Gauge,
+  Clock,
+  Zap,
+  ArrowUp,
+  ArrowDown,
   Search,
   Filter,
-  ChevronUp,
-  ChevronDown,
   RefreshCw,
-  Zap,
-  AlertTriangle,
-  CheckCircle2,
-  XCircle,
-  Clock,
-  Calendar,
-  Users,
-  ArrowUpDown,
-  Eye,
-  Monitor,
-  Ban,
-  BarChart3,
-  Download,
-  Upload,
   Loader2,
+  Globe,
+  Network,
+  Lock,
+  Unlock,
+  Server,
+  Route,
+  Timer,
+  LayoutGrid,
 } from 'lucide-react';
-import { Skeleton } from '@/components/ui/skeleton';
-import { useToast } from '@/hooks/use-toast';
-import { cn } from '@/lib/utils';
-import { usePropertyId } from '@/hooks/use-property';
 
-// ─── Types ───────────────────────────────────────────────────────
+// ─── Types ───────────────────────────────────────────────────────────
 
-interface FirewallZone {
+interface GuiRule {
   id: string;
   name: string;
-  interfaces: string[];
-  inputPolicy: 'accept' | 'drop' | 'reject';
-  forwardPolicy: 'accept' | 'drop' | 'reject';
-  outputPolicy: 'accept' | 'drop' | 'reject';
-  masquerade: boolean;
+  chain: string;
+  protocol: string;
+  sourceIp: string;
+  destIp: string;
+  destPort: string;
+  action: string;
   enabled: boolean;
-}
-
-interface FirewallRule {
-  id: string;
-  priority: number;
-  zone: string;
-  chain: 'input' | 'forward' | 'output';
-  protocol: 'tcp' | 'udp' | 'icmp' | 'all';
-  source: string;
-  dest: string;
-  ports: string;
-  action: 'accept' | 'drop' | 'reject' | 'log';
-  logPrefix: string;
-  schedule: string;
   comment: string;
-  enabled: boolean;
-}
-
-interface MacEntry {
-  id: string;
-  mac: string;
-  description: string;
-  listType: 'whitelist' | 'blacklist';
-  linkedType: 'guest' | 'device' | 'staff';
-  expires: string;
-  status: 'active' | 'expired' | 'disabled';
-}
-
-interface BandwidthPolicy {
-  id: string;
-  name: string;
-  downloadKbps: number;
-  uploadKbps: number;
-  burstDownKbps: number;
-  burstUpKbps: number;
   priority: number;
-  linkedPlan: string;
+  handle: number;
+  createdAt: string;
+}
+
+interface PortForward {
+  id: string;
+  name: string;
+  protocol: string;
+  externalPort: number;
+  internalIp: string;
+  internalPort: number;
+  sourceIp: string;
   enabled: boolean;
+  handle: number;
+  createdAt: string;
 }
 
-interface BandwidthUser {
-  id: string;
-  username: string;
-  ip: string;
-  mac: string;
-  plan: string;
-  downloadSpeed: number;
-  uploadSpeed: number;
-  sessionTime: number;
-  dataDown: number;
-  dataUp: number;
-}
-
-interface BandwidthPool {
+interface RateLimit {
   id: string;
   name: string;
-  vlan: string;
-  totalDownKbps: number;
-  totalUpKbps: number;
-  usedDownKbps: number;
-  usedUpKbps: number;
-  perUserDownKbps: number;
-  perUserUpKbps: number;
-  activeUsers: number;
+  targetIp: string;
+  downloadRate: string;
+  uploadRate: string;
+  protocol: string;
+  enabled: boolean;
+  downloadHandle: number;
+  uploadHandle: number;
+  createdAt: string;
 }
 
-interface TimeSchedule {
+interface QuickBlock {
+  id: string;
+  type: string;
+  value: string;
+  reason: string;
+  blockedAt: string;
+  handle: number;
+}
+
+interface Preset {
   id: string;
   name: string;
-  days: boolean[];
+  description: string;
+  category: string;
+  rules: { protocol: string; destPort: string; action: string }[];
+}
+
+interface Schedule {
+  id: string;
+  name: string;
+  days: string;
   startTime: string;
   endTime: string;
-  linkedRuleCount: number;
+  linkedRules?: number;
   enabled: boolean;
+  createdAt?: string;
 }
 
-// ─── Constants ───────────────────────────────────────────────────
+// ─── API Helper ──────────────────────────────────────────────────────
 
-const WIFI_PLANS = ['Free WiFi', 'Basic Plan', 'Standard Plan', 'Premium Plan', 'VIP Suite Plan', 'None'];
-const INTERFACES = ['eth0', 'eth1', 'eth2', 'br-lan', 'wlan0', 'wlan0-guest', 'ppp0', 'vlan20', 'vlan30'];
-const DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+const API_BASE = '/api/nftables';
 
-// ─── API Helpers ─────────────────────────────────────────────────
-
-function apiFetch<T>(url: string, options?: RequestInit): Promise<{ success: boolean; data?: T; error?: { message: string } }> {
+async function apiFetch<T>(
+  url: string,
+  options?: RequestInit
+): Promise<{ success: boolean; data?: T; error?: { message: string } }> {
   return fetch(url, {
     headers: { 'Content-Type': 'application/json' },
     ...options,
   }).then(async (res) => {
     const result = await res.json();
-    if (!res.ok) {
+    if (!res.ok)
       throw new Error(result.error?.message || `Request failed (${res.status})`);
-    }
     return result;
   });
 }
 
-function mapZoneFromApi(d: Record<string, unknown>): FirewallZone {
-  return {
-    id: d.id as string,
-    name: d.name as string,
-    interfaces: typeof d.interfaces === 'string' ? JSON.parse(d.interfaces) : (d.interfaces as string[] || []),
-    inputPolicy: (d.inputPolicy as FirewallZone['inputPolicy']) || 'accept',
-    forwardPolicy: (d.forwardPolicy as FirewallZone['forwardPolicy']) || 'accept',
-    outputPolicy: (d.outputPolicy as FirewallZone['outputPolicy']) || 'accept',
-    masquerade: !!(d.masquerade),
-    enabled: !!(d.enabled),
-  };
-}
+// ─── Shared Components ───────────────────────────────────────────────
 
-function mapRuleFromApi(d: Record<string, unknown>): FirewallRule {
-  return {
-    id: d.id as string,
-    priority: (d.priority as number) || 0,
-    zone: ((d.firewallZone as Record<string, unknown>)?.name || d.zoneId || d.zone || '') as string,
-    chain: (d.chain as FirewallRule['chain']) || 'input',
-    protocol: (d.protocol as FirewallRule['protocol']) || 'all',
-    source: (d.sourceIp || d.source || '') as string,
-    dest: (d.destIp || d.dest || '') as string,
-    ports: (d.destPort ? String(d.destPort) : d.ports || '') as string,
-    action: (d.action as FirewallRule['action']) || 'accept',
-    logPrefix: (d.logPrefix || '') as string,
-    schedule: ((d.schedule as Record<string, unknown>)?.name || d.scheduleId || 'Always') as string,
-    comment: (d.comment || '') as string,
-    enabled: !!(d.enabled),
-  };
-}
-
-function mapMacFromApi(d: Record<string, unknown>): MacEntry {
-  const expiresAt = d.expiresAt ? new Date(d.expiresAt as string) : null;
-  const now = new Date();
-  let status: MacEntry['status'] = 'active';
-  if (d.enabled === false) status = 'disabled';
-  else if (expiresAt && expiresAt < now) status = 'expired';
-  return {
-    id: d.id as string,
-    mac: (d.macAddress || d.mac || '') as string,
-    description: (d.description || '') as string,
-    listType: (d.listType as MacEntry['listType']) || 'blacklist',
-    linkedType: (d.linkedType as MacEntry['linkedType']) || 'device',
-    expires: expiresAt ? expiresAt.toISOString().split('T')[0] : 'Never',
-    status,
-  };
-}
-
-function mapPolicyFromApi(d: Record<string, unknown>): BandwidthPolicy {
-  return {
-    id: d.id as string,
-    name: (d.name || '') as string,
-    downloadKbps: (d.downloadLimit || d.downloadKbps || 0) as number,
-    uploadKbps: (d.uploadLimit || d.uploadKbps || 0) as number,
-    burstDownKbps: (d.burstDownloadLimit || d.burstDownKbps || 0) as number,
-    burstUpKbps: (d.burstUploadLimit || d.burstUpKbps || 0) as number,
-    priority: (d.priority || 0) as number,
-    linkedPlan: ((d.wifiPlan as Record<string, unknown>)?.name || d.linkedPlan || d.planId || '') as string,
-    enabled: !!(d.enabled),
-  };
-}
-
-function mapPoolFromApi(d: Record<string, unknown>): BandwidthPool {
-  return {
-    id: d.id as string,
-    name: (d.name || '') as string,
-    vlan: ((d.vlan as Record<string, unknown>)?.vlanId || d.vlanId || d.vlan || '') as string,
-    totalDownKbps: (d.totalDownKbps || d.totalDownloadLimit || 0) as number,
-    totalUpKbps: (d.totalUpKbps || d.totalUploadLimit || 0) as number,
-    usedDownKbps: (d.usedDownKbps || d.currentDownKbps || 0) as number,
-    usedUpKbps: (d.usedUpKbps || d.currentUpKbps || 0) as number,
-    perUserDownKbps: (d.perUserDownKbps || d.perUserDownloadLimit || 0) as number,
-    perUserUpKbps: (d.perUserUpKbps || d.perUserUploadLimit || 0) as number,
-    activeUsers: (d.activeUsers || d.currentUsers || 0) as number,
-  };
-}
-
-function mapScheduleFromApi(d: Record<string, unknown>): TimeSchedule {
-  return {
-    id: d.id as string,
-    name: (d.name || '') as string,
-    days: typeof d.days === 'string' ? JSON.parse(d.days) : (d.days || [true, true, true, true, true, true, true]) as boolean[],
-    startTime: (d.startTime || '00:00') as string,
-    endTime: (d.endTime || '23:59') as string,
-    linkedRuleCount: (d.linkedRuleCount || 0) as number,
-    enabled: !!(d.enabled),
-  };
-}
-
-function mapSessionFromApi(d: Record<string, unknown>): BandwidthUser {
-  return {
-    id: d.id as string,
-    username: (d.username || '') as string,
-    ip: (d.ipAddress || d.ip || '') as string,
-    mac: (d.macAddress || d.mac || '') as string,
-    plan: ((d.wifiPlan as Record<string, unknown>)?.name || d.planName || '') as string,
-    downloadSpeed: (d.downloadSpeed || 0) as number,
-    uploadSpeed: (d.uploadSpeed || 0) as number,
-    sessionTime: (d.durationSeconds || 0) as number,
-    dataDown: Math.round((d.downloadBytes || 0) as number / 1024 / 1024),
-    dataUp: Math.round((d.uploadBytes || 0) as number / 1024 / 1024),
-  };
-}
-
-// ─── Loading Skeleton ────────────────────────────────────────────
-
-function TabSkeleton() {
+function TableSkeleton({ cols = 6, rows = 5 }: { cols?: number; rows?: number }) {
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <Skeleton className="h-7 w-48" />
-        <Skeleton className="h-9 w-24" />
-      </div>
-      <div className="grid gap-4 md:grid-cols-2">
-        {Array.from({ length: 4 }).map((_, i) => (
-          <Card key={i}>
-            <CardHeader className="pb-3">
-              <div className="flex items-center gap-2">
-                <Skeleton className="h-9 w-9 rounded-lg" />
-                <div className="flex-1">
-                  <Skeleton className="h-4 w-24 mb-1" />
-                  <Skeleton className="h-3 w-16" />
-                </div>
-              </div>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              <Skeleton className="h-4 w-full" />
-              <Skeleton className="h-4 w-3/4" />
-            </CardContent>
-          </Card>
-        ))}
-      </div>
+    <div className="space-y-3">
+      {Array.from({ length: rows }).map((_, i) => (
+        <div key={i} className="flex gap-4 items-center">
+          {Array.from({ length: cols }).map((_, j) => (
+            <Skeleton key={j} className="h-8 flex-1" />
+          ))}
+        </div>
+      ))}
     </div>
   );
 }
 
-function TableSkeleton({ cols = 6, rows = 5 }: { cols?: number; rows?: number }) {
+function ActionBadge({ action }: { action: string }) {
+  const colors: Record<string, string> = {
+    accept: 'bg-emerald-100 text-emerald-700 border-emerald-200',
+    drop: 'bg-red-100 text-red-700 border-red-200',
+    reject: 'bg-orange-100 text-orange-700 border-orange-200',
+    log: 'bg-amber-100 text-amber-700 border-amber-200',
+  };
   return (
-    <Card>
-      <CardContent className="p-0">
-        <div className="overflow-x-auto">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                {Array.from({ length: cols }).map((_, i) => (
-                  <TableHead key={i}>
-                    <Skeleton className="h-4 w-16" />
-                  </TableHead>
-                ))}
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {Array.from({ length: rows }).map((_, i) => (
-                <TableRow key={i}>
-                  {Array.from({ length: cols }).map((_, j) => (
-                    <TableCell key={j}>
-                      <Skeleton className="h-4 w-full max-w-20" />
-                    </TableCell>
-                  ))}
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </div>
-      </CardContent>
-    </Card>
+    <Badge variant="outline" className={cn('text-xs font-semibold', colors[action] || '')}>
+      {action.toUpperCase()}
+    </Badge>
   );
 }
 
-// ─── Component ───────────────────────────────────────────────────
+function BlockTypeBadge({ type }: { type: string }) {
+  const colors: Record<string, string> = {
+    ip: 'bg-cyan-100 text-cyan-700 border-cyan-200',
+    subnet: 'bg-purple-100 text-purple-700 border-purple-200',
+    mac: 'bg-pink-100 text-pink-700 border-pink-200',
+  };
+  return (
+    <Badge variant="outline" className={cn('text-xs font-semibold', colors[type] || '')}>
+      {type.toUpperCase()}
+    </Badge>
+  );
+}
+
+function CategoryBadge({ category }: { category: string }) {
+  const colors: Record<string, string> = {
+    networking: 'bg-teal-100 text-teal-700 border-teal-200',
+    'remote-access': 'bg-blue-100 text-blue-700 border-blue-200',
+    security: 'bg-red-100 text-red-700 border-red-200',
+    'content-filter': 'bg-amber-100 text-amber-700 border-amber-200',
+  };
+  return (
+    <Badge variant="outline" className={cn('text-xs font-semibold', colors[category] || '')}>
+      {category.replace(/-/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase())}
+    </Badge>
+  );
+}
+
+const RATE_PRESETS = [
+  { label: '512 Kbps', value: '512kbit' },
+  { label: '1 Mbps', value: '1mbit' },
+  { label: '2 Mbps', value: '2mbit' },
+  { label: '5 Mbps', value: '5mbit' },
+  { label: '10 Mbps', value: '10mbit' },
+  { label: '20 Mbps', value: '20mbit' },
+  { label: '50 Mbps', value: '50mbit' },
+  { label: '100 Mbps', value: '100mbit' },
+];
+
+const DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+// ─── Main Firewall Page ─────────────────────────────────────────────
 
 export default function FirewallPage() {
-  const [activeTab, setActiveTab] = useState(0);
+  const [activeTab, setActiveTab] = useState('rules');
+
   const tabs = [
-    { label: 'Zones', icon: Shield },
-    { label: 'Rules', icon: ShieldCheck },
-    { label: 'MAC Filter', icon: ShieldBan },
-    { label: 'BW Policies', icon: Gauge },
-    { label: 'BW Monitor', icon: BarChart3 },
-    { label: 'Schedules', icon: Clock },
-    { label: 'Content Filtering', icon: ShieldAlert },
+    { id: 'rules', label: 'Rules', icon: ShieldCheck },
+    { id: 'port-forward', label: 'Port Forwarding', icon: Route },
+    { id: 'rate-limit', label: 'Rate Limiting', icon: Gauge },
+    { id: 'quick-block', label: 'Quick Block', icon: Ban },
+    { id: 'schedules', label: 'Schedules', icon: Clock },
+    { id: 'presets', label: 'Presets', icon: LayoutGrid },
   ];
 
   return (
@@ -396,452 +266,134 @@ export default function FirewallPage() {
       <div>
         <h2 className="text-2xl font-bold tracking-tight flex items-center gap-2">
           <Shield className="h-6 w-6 text-teal-600" />
-          Firewall & Bandwidth
+          Firewall Management
         </h2>
         <p className="text-muted-foreground">
-          Zone-based firewall, traffic shaping, MAC filtering, and real-time bandwidth monitoring
+          Manage nftables firewall rules, port forwarding, rate limiting, and security presets
         </p>
       </div>
 
-      {/* Custom Tabs */}
-      <div className="flex gap-1 bg-muted/50 p-1 rounded-lg overflow-x-auto">
-        {tabs.map((tab, idx) => {
-          const Icon = tab.icon;
-          return (
-            <button
-              key={idx}
-              onClick={() => setActiveTab(idx)}
-              className={cn(
-                'flex items-center gap-2 px-4 py-2.5 rounded-md text-sm font-medium transition-all whitespace-nowrap',
-                activeTab === idx
-                  ? 'bg-background text-foreground shadow-sm border border-border'
-                  : 'text-muted-foreground hover:text-foreground hover:bg-background/50'
-              )}
-            >
-              <Icon className="h-4 w-4" />
-              {tab.label}
-            </button>
-          );
-        })}
+      {/* Sticky Tab Navigation */}
+      <div className="sticky top-0 z-10 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 pb-1">
+        <div className="flex gap-1 bg-muted/50 p-1 rounded-lg overflow-x-auto">
+          {tabs.map((tab) => {
+            const Icon = tab.icon;
+            return (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={cn(
+                  'flex items-center gap-2 px-4 py-2.5 rounded-md text-sm font-medium transition-all whitespace-nowrap',
+                  activeTab === tab.id
+                    ? 'bg-background text-foreground shadow-sm border border-border'
+                    : 'text-muted-foreground hover:text-foreground hover:bg-background/50'
+                )}
+              >
+                <Icon className="h-4 w-4" />
+                <span className="hidden sm:inline">{tab.label}</span>
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       {/* Tab Content */}
-      {activeTab === 0 && <ZonesTab />}
-      {activeTab === 1 && <RulesTab />}
-      {activeTab === 2 && <MacFilterTab />}
-      {activeTab === 3 && <BwPoliciesTab />}
-      {activeTab === 4 && <BwMonitorTab />}
-      {activeTab === 5 && <SchedulesTab />}
-      {activeTab === 6 && <ContentFilterTab />}
+      {activeTab === 'rules' && <RulesTab />}
+      {activeTab === 'port-forward' && <PortForwardTab />}
+      {activeTab === 'rate-limit' && <RateLimitTab />}
+      {activeTab === 'quick-block' && <QuickBlockTab />}
+      {activeTab === 'schedules' && <SchedulesTab />}
+      {activeTab === 'presets' && <PresetsTab />}
     </div>
   );
 }
 
-function PolicyBadge({ policy }: { policy: string }) {
-  const colors: Record<string, string> = {
-    accept: 'bg-emerald-100 text-emerald-700 border-emerald-200',
-    drop: 'bg-red-100 text-red-700 border-red-200',
-    reject: 'bg-orange-100 text-orange-700 border-orange-200',
-  };
-  return (
-    <Badge variant="outline" className={cn('text-xs font-mono', colors[policy] || '')}>
-      {policy.toUpperCase()}
-    </Badge>
-  );
-}
-
-// ─── Tab 1: Firewall Zones ───────────────────────────────────────
-
-function ZonesTab() {
-  const { toast } = useToast();
-  const [zones, setZones] = useState<FirewallZone[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [editingZone, setEditingZone] = useState<FirewallZone | null>(null);
-  const [form, setForm] = useState({
-    name: '',
-    interfaces: [] as string[],
-    inputPolicy: 'accept' as const,
-    forwardPolicy: 'accept' as const,
-    outputPolicy: 'accept' as const,
-    masquerade: false,
-    enabled: true,
-  });
-
-  const fetchZones = useCallback(async () => {
-    try {
-      setLoading(true);
-      const res = await apiFetch<Record<string, unknown>[]>('/api/wifi/firewall/zones');
-      if (res.success && res.data) {
-        setZones(res.data.map(mapZoneFromApi));
-      }
-    } catch (e) {
-      console.error(e);
-      toast({ title: 'Error', description: 'Failed to load firewall zones', variant: 'destructive' });
-    } finally {
-      setLoading(false);
-    }
-  }, [toast]);
-
-  useEffect(() => { fetchZones(); }, [fetchZones]);
-
-  const openAdd = () => {
-    setEditingZone(null);
-    setForm({ name: '', interfaces: [], inputPolicy: 'accept', forwardPolicy: 'accept', outputPolicy: 'accept', masquerade: false, enabled: true });
-    setDialogOpen(true);
-  };
-
-  const openEdit = (z: FirewallZone) => {
-    setEditingZone(z);
-    setForm({ name: z.name, interfaces: z.interfaces, inputPolicy: z.inputPolicy, forwardPolicy: z.forwardPolicy, outputPolicy: z.outputPolicy, masquerade: z.masquerade, enabled: z.enabled });
-    setDialogOpen(true);
-  };
-
-  const saveZone = async () => {
-    try {
-      setSaving(true);
-      if (editingZone) {
-        const res = await apiFetch(`/api/wifi/firewall/zones/${editingZone.id}`, {
-          method: 'PUT',
-          body: JSON.stringify(form),
-        });
-        if (res.success) {
-          toast({ title: 'Zone Updated', description: `${form.name} zone has been updated.` });
-        }
-      } else {
-        const res = await apiFetch('/api/wifi/firewall/zones', {
-          method: 'POST',
-          body: JSON.stringify(form),
-        });
-        if (res.success) {
-          toast({ title: 'Zone Created', description: `${form.name} zone has been created.` });
-        }
-      }
-      setDialogOpen(false);
-      await fetchZones();
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Failed to save zone';
-      toast({ title: 'Error', description: msg, variant: 'destructive' });
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const toggleInterface = (iface: string) => {
-    setForm(prev => ({
-      ...prev,
-      interfaces: prev.interfaces.includes(iface)
-        ? prev.interfaces.filter(i => i !== iface)
-        : [...prev.interfaces, iface],
-    }));
-  };
-
-  const deleteZone = async (id: string) => {
-    try {
-      const res = await apiFetch(`/api/wifi/firewall/zones/${id}`, { method: 'DELETE' });
-      if (res.success) {
-        toast({ title: 'Zone Deleted', description: 'Firewall zone has been removed.' });
-        await fetchZones();
-      }
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Failed to delete zone';
-      toast({ title: 'Error', description: msg, variant: 'destructive' });
-    }
-  };
-
-  const toggleEnabled = async (zone: FirewallZone, enabled: boolean) => {
-    try {
-      await apiFetch(`/api/wifi/firewall/zones/${zone.id}`, {
-        method: 'PUT',
-        body: JSON.stringify({ enabled }),
-      });
-      setZones(zones.map(z => z.id === zone.id ? { ...z, enabled } : z));
-    } catch {
-      toast({ title: 'Error', description: 'Failed to toggle zone', variant: 'destructive' });
-    }
-  };
-
-  const zoneColors: Record<string, string> = {
-    wan: 'from-red-500/20 to-orange-500/20 border-red-300',
-    lan: 'from-emerald-500/20 to-teal-500/20 border-emerald-300',
-    guest: 'from-amber-500/20 to-yellow-500/20 border-amber-300',
-    dmz: 'from-purple-500/20 to-pink-500/20 border-purple-300',
-  };
-
-  if (loading) return <TabSkeleton />;
-
-  return (
-    <div className="space-y-6">
-      {/* Zone Diagram */}
-      <Card className="bg-gradient-to-br from-slate-900 to-slate-800 text-white overflow-hidden">
-        <CardHeader className="pb-2">
-          <CardTitle className="text-base text-slate-300 flex items-center gap-2">
-            <Network className="h-4 w-4" />
-            Zone Topology
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="flex items-center justify-center gap-4 py-6 flex-wrap">
-            {/* WAN Zone */}
-            <div className="flex flex-col items-center gap-2">
-              <div className="w-28 h-20 rounded-xl bg-gradient-to-br from-red-500/30 to-orange-500/30 border-2 border-red-400/50 flex items-center justify-center flex-col">
-                <Globe className="h-5 w-5 text-red-400" />
-                <span className="text-xs font-bold text-red-300 mt-1">WAN</span>
-                <span className="text-[10px] text-red-400/70">Untrusted</span>
-              </div>
-              <span className="text-[10px] text-slate-500">eth0, ppp0</span>
-            </div>
-
-            {/* Arrow */}
-            <div className="flex flex-col items-center gap-1">
-              <ChevronDown className="h-5 w-5 text-slate-400" />
-              <div className="w-8 h-0.5 bg-gradient-to-r from-red-400/50 to-slate-400/50" />
-            </div>
-
-            {/* System / Firewall */}
-            <div className="flex flex-col items-center gap-2">
-              <div className="w-32 h-24 rounded-xl bg-gradient-to-br from-teal-500/30 to-cyan-500/30 border-2 border-teal-400/60 flex items-center justify-center flex-col shadow-lg shadow-teal-500/10">
-                <Shield className="h-6 w-6 text-teal-400" />
-                <span className="text-xs font-bold text-teal-300 mt-1">FIREWALL</span>
-                <span className="text-[10px] text-teal-400/70">System Router</span>
-              </div>
-            </div>
-
-            {/* Arrows to internal zones */}
-            <div className="flex flex-col items-center gap-1">
-              <ChevronDown className="h-5 w-5 text-slate-400" />
-              <div className="w-8 h-0.5 bg-gradient-to-r from-slate-400/50 to-emerald-400/50" />
-            </div>
-
-            {/* Internal Zones */}
-            <div className="flex gap-3 flex-wrap justify-center">
-              {zones.filter(z => z.id !== 'wan').map(zone => {
-                const col: Record<string, string> = {
-                  lan: 'from-emerald-500/30 to-teal-500/30 border-emerald-400/50',
-                  guest: 'from-amber-500/30 to-yellow-500/30 border-amber-400/50',
-                  dmz: 'from-purple-500/30 to-pink-500/30 border-purple-400/50',
-                };
-                const iconCol: Record<string, string> = { lan: 'text-emerald-400', guest: 'text-amber-400', dmz: 'text-purple-400' };
-                return (
-                  <div key={zone.id} className="flex flex-col items-center gap-1">
-                    <div className={cn('w-24 h-20 rounded-xl bg-gradient-to-br border-2 flex items-center justify-center flex-col', col[zone.id] || 'from-slate-500/30 border-slate-400/50')}>
-                      <Lock className={cn('h-4 w-4', iconCol[zone.id] || 'text-slate-400')} />
-                      <span className={cn('text-xs font-bold mt-1', iconCol[zone.id] || 'text-slate-400')}>{zone.name}</span>
-                      <span className="text-[10px] text-slate-400/60">{zone.interfaces.length} iface</span>
-                    </div>
-                    <span className="text-[10px] text-slate-500">{zone.interfaces.join(', ')}</span>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Zone Cards */}
-      <div className="flex items-center justify-between">
-        <h3 className="text-lg font-semibold">Firewall Zones</h3>
-        <Button onClick={openAdd} size="sm">
-          <Plus className="h-4 w-4 mr-2" />
-          Add Zone
-        </Button>
-      </div>
-
-      <div className="grid gap-4 md:grid-cols-2">
-        {zones.map(zone => (
-          <Card key={zone.id} className={cn('border transition-all hover:shadow-md', zoneColors[zone.id] && `border-l-4`, !zone.enabled && 'opacity-60')}>
-            <CardHeader className="pb-3">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <div className={cn('p-2 rounded-lg', zone.id === 'wan' ? 'bg-red-100' : zone.id === 'lan' ? 'bg-emerald-100' : zone.id === 'guest' ? 'bg-amber-100' : 'bg-purple-100')}>
-                    {zone.id === 'wan' ? <Globe className="h-4 w-4 text-red-600" /> : <Shield className={cn('h-4 w-4', zone.id === 'lan' ? 'text-emerald-600' : zone.id === 'guest' ? 'text-amber-600' : 'text-purple-600')} />}
-                  </div>
-                  <div>
-                    <CardTitle className="text-base">{zone.name} Zone</CardTitle>
-                    <CardDescription>{zone.interfaces.length} interface(s)</CardDescription>
-                  </div>
-                </div>
-                <div className="flex items-center gap-1">
-                  <Switch checked={zone.enabled} onCheckedChange={(c) => toggleEnabled(zone, c)} />
-                  <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => openEdit(zone)}>
-                    <Edit2 className="h-3.5 w-3.5" />
-                  </Button>
-                  {zone.id !== 'wan' && zone.id !== 'lan' && (
-                    <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => deleteZone(zone.id)}>
-                      <Trash2 className="h-3.5 w-3.5 text-destructive" />
-                    </Button>
-                  )}
-                </div>
-              </div>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              {/* Interface Tags */}
-              <div className="flex flex-wrap gap-1.5">
-                {zone.interfaces.map(iface => (
-                  <Badge key={iface} variant="outline" className="text-xs font-mono">
-                    <Network className="h-2.5 w-2.5 mr-1" />
-                    {iface}
-                  </Badge>
-                ))}
-              </div>
-              {/* Policies */}
-              <div className="grid grid-cols-3 gap-2">
-                <div className="text-center">
-                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1">Input</p>
-                  <PolicyBadge policy={zone.inputPolicy} />
-                </div>
-                <div className="text-center">
-                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1">Forward</p>
-                  <PolicyBadge policy={zone.forwardPolicy} />
-                </div>
-                <div className="text-center">
-                  <p className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1">Output</p>
-                  <PolicyBadge policy={zone.outputPolicy} />
-                </div>
-              </div>
-              {/* Masquerade */}
-              <div className="flex items-center justify-between pt-2 border-t">
-                <span className="text-xs text-muted-foreground">Masquerade (NAT)</span>
-                <Badge variant={zone.masquerade ? 'default' : 'secondary'} className="text-xs">
-                  {zone.masquerade ? 'Enabled' : 'Disabled'}
-                </Badge>
-              </div>
-            </CardContent>
-          </Card>
-        ))}
-      </div>
-
-      {/* Add/Edit Dialog */}
-      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent className="max-w-lg">
-          <DialogHeader>
-            <DialogTitle>{editingZone ? 'Edit Zone' : 'Add Zone'}</DialogTitle>
-            <DialogDescription>Configure firewall zone settings and policies</DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <Label>Zone Name</Label>
-              <Input value={form.name} onChange={e => setForm(p => ({ ...p, name: e.target.value }))} placeholder="e.g. IoT" />
-            </div>
-            <div className="space-y-2">
-              <Label>Interfaces</Label>
-              <div className="flex flex-wrap gap-2">
-                {INTERFACES.map(iface => (
-                  <Badge
-                    key={iface}
-                    variant={form.interfaces.includes(iface) ? 'default' : 'outline'}
-                    className="cursor-pointer font-mono text-xs"
-                    onClick={() => toggleInterface(iface)}
-                  >
-                    {iface}
-                  </Badge>
-                ))}
-              </div>
-            </div>
-            <div className="grid grid-cols-3 gap-3">
-              {(['inputPolicy', 'forwardPolicy', 'outputPolicy'] as const).map(key => (
-                <div key={key} className="space-y-1">
-                  <Label className="text-xs capitalize">{key.replace('Policy', '')}</Label>
-                  <Select value={form[key]} onValueChange={v => setForm(p => ({ ...p, [key]: v }))}>
-                    <SelectTrigger><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="accept">Accept</SelectItem>
-                      <SelectItem value="drop">Drop</SelectItem>
-                      <SelectItem value="reject">Reject</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-              ))}
-            </div>
-            <div className="flex items-center justify-between">
-              <Label>Masquerade (NAT)</Label>
-              <Switch checked={form.masquerade} onCheckedChange={c => setForm(p => ({ ...p, masquerade: c }))} />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setDialogOpen(false)}>Cancel</Button>
-            <Button onClick={saveZone} disabled={!form.name || saving}>
-              {saving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-              {editingZone ? 'Update' : 'Create'} Zone
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </div>
-  );
-}
-
-// ─── Tab 2: Firewall Rules ───────────────────────────────────────
+// ─── Tab 1: Rules ───────────────────────────────────────────────────
 
 function RulesTab() {
   const { toast } = useToast();
-  const [rules, setRules] = useState<FirewallRule[]>([]);
+  const [rules, setRules] = useState<GuiRule[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
-  const [editingRule, setEditingRule] = useState<FirewallRule | null>(null);
-  const [testDialogOpen, setTestDialogOpen] = useState(false);
-  const [testResult, setTestResult] = useState<string | null>(null);
-  const [filters, setFilters] = useState({ zone: 'all', chain: 'all', protocol: 'all', action: 'all' });
+  const [editingRule, setEditingRule] = useState<GuiRule | null>(null);
+  const [deleteId, setDeleteId] = useState<string | null>(null);
+  const [filters, setFilters] = useState({ protocol: 'all', action: 'all' });
 
   const [form, setForm] = useState({
-    zone: 'wan', chain: 'input' as const, protocol: 'tcp' as const,
-    source: '', dest: '', ports: '', action: 'accept' as const,
-    logPrefix: '', schedule: 'Always', comment: '',
+    name: '',
+    protocol: 'tcp',
+    sourceIp: '',
+    destIp: '',
+    destPort: '',
+    action: 'accept',
+    comment: '',
+    enabled: true,
   });
 
   const fetchRules = useCallback(async () => {
     try {
       setLoading(true);
-      const params = new URLSearchParams();
-      if (filters.zone !== 'all') params.set('zoneId', filters.zone);
-      if (filters.chain !== 'all') params.set('chain', filters.chain);
-      if (filters.protocol !== 'all') params.set('protocol', filters.protocol);
-      if (filters.action !== 'all') params.set('action', filters.action);
-      const qs = params.toString();
-      const res = await apiFetch<Record<string, unknown>[]>(`/api/wifi/firewall/rules${qs ? `?${qs}` : ''}`);
+      const res = await apiFetch<GuiRule[]>(`${API_BASE}/gui-rules`);
       if (res.success && res.data) {
-        setRules(res.data.map(mapRuleFromApi));
+        setRules(res.data);
       }
     } catch (e) {
-      console.error(e);
-      toast({ title: 'Error', description: 'Failed to load firewall rules', variant: 'destructive' });
+      toast({
+        title: 'Error',
+        description: 'Failed to load firewall rules',
+        variant: 'destructive',
+      });
     } finally {
       setLoading(false);
     }
-  }, [toast, filters.zone, filters.chain, filters.protocol, filters.action]);
+  }, [toast]);
 
-  useEffect(() => { fetchRules(); }, [fetchRules]);
+  useEffect(() => {
+    fetchRules();
+  }, [fetchRules]);
 
   const openAdd = () => {
     setEditingRule(null);
-    setForm({ zone: 'wan', chain: 'input', protocol: 'tcp', source: '', dest: '', ports: '', action: 'accept', logPrefix: '', schedule: 'Always', comment: '' });
+    setForm({ name: '', protocol: 'tcp', sourceIp: '', destIp: '', destPort: '', action: 'accept', comment: '', enabled: true });
     setDialogOpen(true);
   };
 
-  const openEdit = (r: FirewallRule) => {
+  const openEdit = (r: GuiRule) => {
     setEditingRule(r);
-    setForm({ zone: r.zone, chain: r.chain, protocol: r.protocol, source: r.source, dest: r.dest, ports: r.ports, action: r.action, logPrefix: r.logPrefix, schedule: r.schedule, comment: r.comment });
+    setForm({
+      name: r.name,
+      protocol: r.protocol,
+      sourceIp: r.sourceIp || '',
+      destIp: r.destIp || '',
+      destPort: r.destPort || '',
+      action: r.action,
+      comment: r.comment || '',
+      enabled: r.enabled,
+    });
     setDialogOpen(true);
   };
 
   const saveRule = async () => {
+    if (!form.name.trim()) {
+      toast({ title: 'Validation Error', description: 'Rule name is required', variant: 'destructive' });
+      return;
+    }
     try {
       setSaving(true);
       if (editingRule) {
-        await apiFetch(`/api/wifi/firewall/rules/${editingRule.id}`, {
+        await apiFetch(`${API_BASE}/gui-rules/${editingRule.id}`, {
           method: 'PUT',
           body: JSON.stringify(form),
         });
-        toast({ title: 'Rule Updated', description: 'Firewall rule has been updated.' });
+        toast({ title: 'Rule Updated', description: `${form.name} has been updated.` });
       } else {
-        const maxP = Math.max(...rules.map(r => r.priority), 0);
-        await apiFetch('/api/wifi/firewall/rules', {
+        const maxP = rules.length > 0 ? Math.max(...rules.map((r) => r.priority)) : 0;
+        await apiFetch(`${API_BASE}/gui-rules`, {
           method: 'POST',
-          body: JSON.stringify({ ...form, priority: maxP + 10, enabled: true }),
+          body: JSON.stringify({ ...form, priority: maxP + 10 }),
         });
-        toast({ title: 'Rule Created', description: 'New firewall rule has been created.' });
+        toast({ title: 'Rule Created', description: `${form.name} has been created.` });
       }
       setDialogOpen(false);
       await fetchRules();
@@ -853,271 +405,279 @@ function RulesTab() {
     }
   };
 
-  const moveRule = (id: string, dir: 'up' | 'down') => {
-    const sorted = [...rules].sort((a, b) => a.priority - b.priority);
-    const idx = sorted.findIndex(r => r.id === id);
-    if (dir === 'up' && idx > 0) {
-      const temp = sorted[idx].priority;
-      sorted[idx].priority = sorted[idx - 1].priority;
-      sorted[idx - 1].priority = temp;
-      setRules(sorted);
-      apiFetch(`/api/wifi/firewall/rules/${sorted[idx].id}`, { method: 'PUT', body: JSON.stringify({ priority: sorted[idx].priority }) }).catch(() => {});
-      apiFetch(`/api/wifi/firewall/rules/${sorted[idx - 1].id}`, { method: 'PUT', body: JSON.stringify({ priority: sorted[idx - 1].priority }) }).catch(() => {});
-    } else if (dir === 'down' && idx < sorted.length - 1) {
-      const temp = sorted[idx].priority;
-      sorted[idx].priority = sorted[idx + 1].priority;
-      sorted[idx + 1].priority = temp;
-      setRules(sorted);
-      apiFetch(`/api/wifi/firewall/rules/${sorted[idx].id}`, { method: 'PUT', body: JSON.stringify({ priority: sorted[idx].priority }) }).catch(() => {});
-      apiFetch(`/api/wifi/firewall/rules/${sorted[idx + 1].id}`, { method: 'PUT', body: JSON.stringify({ priority: sorted[idx + 1].priority }) }).catch(() => {});
-    }
-  };
-
-  const toggleRule = async (id: string) => {
-    const rule = rules.find(r => r.id === id);
-    if (!rule) return;
+  const deleteRule = async () => {
+    if (!deleteId) return;
     try {
-      await apiFetch(`/api/wifi/firewall/rules/${id}`, { method: 'PUT', body: JSON.stringify({ enabled: !rule.enabled }) });
-      setRules(rules.map(r => r.id === id ? { ...r, enabled: !r.enabled } : r));
-    } catch {
-      toast({ title: 'Error', description: 'Failed to toggle rule', variant: 'destructive' });
-    }
-  };
-
-  const deleteRule = async (id: string) => {
-    try {
-      await apiFetch(`/api/wifi/firewall/rules/${id}`, { method: 'DELETE' });
+      await apiFetch(`${API_BASE}/gui-rules/${deleteId}`, { method: 'DELETE' });
       toast({ title: 'Rule Deleted', description: 'Firewall rule has been removed.' });
       await fetchRules();
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : 'Failed to delete rule';
       toast({ title: 'Error', description: msg, variant: 'destructive' });
+    } finally {
+      setDeleteId(null);
     }
   };
 
-  const [testing, setTesting] = useState(false);
-
-  const runTest = async () => {
-    setTestResult(null);
-    setTesting(true);
+  const toggleRule = async (id: string) => {
+    const rule = rules.find((r) => r.id === id);
+    if (!rule) return;
     try {
-      const res = await apiFetch<{ passed: number; failed: number; details?: string }>('/api/wifi/firewall/test', { method: 'POST' });
-      if (res.success && res.data) {
-        const { passed, failed, details } = res.data;
-        setTestResult(`Test complete: ${passed} rules passed, ${failed} rules failed.${details ? ` ${details}` : ''}`);
-      } else {
-        setTestResult('Test completed but returned no data.');
-      }
+      await apiFetch(`${API_BASE}/gui-rules/${id}/toggle`, {
+        method: 'PATCH',
+        body: JSON.stringify({ enabled: !rule.enabled }),
+      });
+      setRules(rules.map((r) => (r.id === id ? { ...r, enabled: !r.enabled } : r)));
+      toast({ title: rule.enabled ? 'Rule Disabled' : 'Rule Enabled' });
     } catch {
-      setTestResult('Rule testing is not available. The firewall test endpoint is not reachable.');
-    } finally {
-      setTesting(false);
+      toast({ title: 'Error', description: 'Failed to toggle rule', variant: 'destructive' });
+    }
+  };
+
+  const moveRule = async (id: string, dir: 'up' | 'down') => {
+    const sorted = [...rules].sort((a, b) => a.priority - b.priority);
+    const idx = sorted.findIndex((r) => r.id === id);
+    if ((dir === 'up' && idx <= 0) || (dir === 'down' && idx >= sorted.length - 1)) return;
+
+    const swapIdx = dir === 'up' ? idx - 1 : idx + 1;
+    const tempP = sorted[idx].priority;
+    sorted[idx] = { ...sorted[idx], priority: sorted[swapIdx].priority };
+    sorted[swapIdx] = { ...sorted[swapIdx], priority: tempP };
+    setRules(sorted);
+
+    try {
+      await Promise.all([
+        apiFetch(`${API_BASE}/gui-rules/${sorted[idx].id}`, {
+          method: 'PUT',
+          body: JSON.stringify({ priority: sorted[idx].priority }),
+        }),
+        apiFetch(`${API_BASE}/gui-rules/${sorted[swapIdx].id}`, {
+          method: 'PUT',
+          body: JSON.stringify({ priority: sorted[swapIdx].priority }),
+        }),
+      ]);
+    } catch {
+      toast({ title: 'Error', description: 'Failed to reorder rules', variant: 'destructive' });
+      await fetchRules();
     }
   };
 
   const filteredRules = rules
-    .filter(r => filters.zone === 'all' || r.zone === filters.zone)
-    .filter(r => filters.chain === 'all' || r.chain === filters.chain)
-    .filter(r => filters.protocol === 'all' || r.protocol === filters.protocol)
-    .filter(r => filters.action === 'all' || r.action === filters.action)
+    .filter((r) => filters.protocol === 'all' || r.protocol === filters.protocol)
+    .filter((r) => filters.action === 'all' || r.action === filters.action)
     .sort((a, b) => a.priority - b.priority);
 
-  const actionBadge = (action: string) => {
-    const m: Record<string, string> = {
-      accept: 'bg-emerald-100 text-emerald-700 border-emerald-200',
-      drop: 'bg-red-100 text-red-700 border-red-200',
-      reject: 'bg-orange-100 text-orange-700 border-orange-200',
-      log: 'bg-amber-100 text-amber-700 border-amber-200',
-    };
-    return <Badge variant="outline" className={cn('text-xs font-semibold', m[action] || '')}>{action.toUpperCase()}</Badge>;
-  };
-
-  if (loading) return <TableSkeleton cols={12} rows={8} />;
+  if (loading) {
+    return (
+      <div className="space-y-4">
+        <div className="flex items-center justify-between">
+          <Skeleton className="h-8 w-48" />
+          <Skeleton className="h-9 w-24" />
+        </div>
+        <TableSkeleton cols={9} rows={5} />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-4">
-      {/* Filters */}
-      <Card>
-        <CardContent className="p-4">
-          <div className="flex flex-wrap items-center gap-3">
-            <Filter className="h-4 w-4 text-muted-foreground" />
-            <Select value={filters.zone} onValueChange={v => setFilters(p => ({ ...p, zone: v }))}>
-              <SelectTrigger className="w-28"><SelectValue placeholder="Zone" /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All Zones</SelectItem>
-                <SelectItem value="wan">WAN</SelectItem>
-                <SelectItem value="lan">LAN</SelectItem>
-                <SelectItem value="guest">Guest</SelectItem>
-                <SelectItem value="dmz">DMZ</SelectItem>
-              </SelectContent>
-            </Select>
-            <Select value={filters.chain} onValueChange={v => setFilters(p => ({ ...p, chain: v }))}>
-              <SelectTrigger className="w-28"><SelectValue placeholder="Chain" /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All Chains</SelectItem>
-                <SelectItem value="input">Input</SelectItem>
-                <SelectItem value="forward">Forward</SelectItem>
-                <SelectItem value="output">Output</SelectItem>
-              </SelectContent>
-            </Select>
-            <Select value={filters.protocol} onValueChange={v => setFilters(p => ({ ...p, protocol: v }))}>
-              <SelectTrigger className="w-28"><SelectValue placeholder="Protocol" /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All Proto</SelectItem>
-                <SelectItem value="tcp">TCP</SelectItem>
-                <SelectItem value="udp">UDP</SelectItem>
-                <SelectItem value="icmp">ICMP</SelectItem>
-                <SelectItem value="all">ALL</SelectItem>
-              </SelectContent>
-            </Select>
-            <Select value={filters.action} onValueChange={v => setFilters(p => ({ ...p, action: v }))}>
-              <SelectTrigger className="w-28"><SelectValue placeholder="Action" /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">All Actions</SelectItem>
-                <SelectItem value="accept">Accept</SelectItem>
-                <SelectItem value="drop">Drop</SelectItem>
-                <SelectItem value="reject">Reject</SelectItem>
-                <SelectItem value="log">Log</SelectItem>
-              </SelectContent>
-            </Select>
-            <div className="flex-1" />
-            <Button variant="outline" size="sm" onClick={runTest} disabled={testing}>
-              {testing ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Zap className="h-4 w-4 mr-2" />}
-              Test Rules
-            </Button>
-            <Button onClick={openAdd} size="sm">
-              <Plus className="h-4 w-4 mr-2" />
-              Add Rule
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
+      {/* Toolbar */}
+      <div className="flex flex-wrap items-center gap-3">
+        <Filter className="h-4 w-4 text-muted-foreground" />
+        <Select value={filters.protocol} onValueChange={(v) => setFilters((p) => ({ ...p, protocol: v }))}>
+          <SelectTrigger className="w-32">
+            <SelectValue placeholder="Protocol" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All Proto</SelectItem>
+            <SelectItem value="tcp">TCP</SelectItem>
+            <SelectItem value="udp">UDP</SelectItem>
+            <SelectItem value="icmp">ICMP</SelectItem>
+            <SelectItem value="all">All</SelectItem>
+          </SelectContent>
+        </Select>
+        <Select value={filters.action} onValueChange={(v) => setFilters((p) => ({ ...p, action: v }))}>
+          <SelectTrigger className="w-32">
+            <SelectValue placeholder="Action" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All Actions</SelectItem>
+            <SelectItem value="accept">Accept</SelectItem>
+            <SelectItem value="drop">Drop</SelectItem>
+            <SelectItem value="reject">Reject</SelectItem>
+            <SelectItem value="log">Log</SelectItem>
+          </SelectContent>
+        </Select>
+        <div className="flex-1" />
+        <Button variant="outline" size="sm" onClick={fetchRules}>
+          <RefreshCw className="h-4 w-4 mr-2" />
+          Refresh
+        </Button>
+        <Button onClick={openAdd} size="sm">
+          <Plus className="h-4 w-4 mr-2" />
+          Add Rule
+        </Button>
+      </div>
 
       {/* Rules Table */}
-      <Card>
-        <CardContent className="p-0">
-          <div className="overflow-x-auto max-h-[500px] overflow-y-auto">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="w-16">Pri</TableHead>
-                  <TableHead>Zone</TableHead>
-                  <TableHead>Chain</TableHead>
-                  <TableHead>Proto</TableHead>
-                  <TableHead>Source</TableHead>
-                  <TableHead>Dest</TableHead>
-                  <TableHead>Ports</TableHead>
-                  <TableHead>Action</TableHead>
-                  <TableHead>Log</TableHead>
-                  <TableHead>Schedule</TableHead>
-                  <TableHead className="w-12" />
-                  <TableHead className="w-24">Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {filteredRules.map((rule, idx) => (
-                  <TableRow key={rule.id} className={cn(!rule.enabled && 'opacity-50')}>
-                    <TableCell>
-                      <span className="inline-flex items-center justify-center w-8 h-8 rounded-md bg-muted font-mono text-xs font-bold">
-                        {rule.priority}
-                      </span>
-                    </TableCell>
-                    <TableCell><Badge variant="outline" className="text-xs">{rule.zone}</Badge></TableCell>
-                    <TableCell className="uppercase text-xs font-mono">{rule.chain}</TableCell>
-                    <TableCell className="uppercase text-xs font-mono">{rule.protocol}</TableCell>
-                    <TableCell className="font-mono text-xs">{rule.source}</TableCell>
-                    <TableCell className="font-mono text-xs">{rule.dest}</TableCell>
-                    <TableCell className="font-mono text-xs">{rule.ports || '—'}</TableCell>
-                    <TableCell>{actionBadge(rule.action)}</TableCell>
-                    <TableCell className="text-xs text-muted-foreground">{rule.logPrefix || '—'}</TableCell>
-                    <TableCell className="text-xs">{rule.schedule}</TableCell>
-                    <TableCell>
-                      <Switch checked={rule.enabled} onCheckedChange={() => toggleRule(rule.id)} className="scale-75" />
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex items-center gap-0.5">
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Button variant="ghost" size="icon" className="h-7 w-7" disabled={idx === 0} onClick={() => moveRule(rule.id, 'up')}>
-                              <ChevronUp className="h-3.5 w-3.5" />
-                            </Button>
-                          </TooltipTrigger>
-                          <TooltipContent>Move up</TooltipContent>
-                        </Tooltip>
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Button variant="ghost" size="icon" className="h-7 w-7" disabled={idx === filteredRules.length - 1} onClick={() => moveRule(rule.id, 'down')}>
-                              <ChevronDown className="h-3.5 w-3.5" />
-                            </Button>
-                          </TooltipTrigger>
-                          <TooltipContent>Move down</TooltipContent>
-                        </Tooltip>
-                        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openEdit(rule)}>
-                          <Edit2 className="h-3.5 w-3.5" />
-                        </Button>
-                        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => deleteRule(rule.id)}>
-                          <Trash2 className="h-3.5 w-3.5 text-destructive" />
-                        </Button>
-                      </div>
-                    </TableCell>
+      {filteredRules.length === 0 ? (
+        <EmptyState
+          icon={ShieldCheck}
+          title="No firewall rules"
+          description={
+            filters.protocol !== 'all' || filters.action !== 'all'
+              ? 'No rules match the current filters. Try adjusting your filters.'
+              : 'Create your first firewall rule to control network traffic.'
+          }
+          action={filters.protocol === 'all' && filters.action === 'all' ? { label: 'Add Rule', onClick: openAdd } : undefined}
+        />
+      ) : (
+        <Card>
+          <CardContent className="p-0">
+            <div className="max-h-96 overflow-y-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-16">Pri</TableHead>
+                    <TableHead>Name</TableHead>
+                    <TableHead>Protocol</TableHead>
+                    <TableHead>Source</TableHead>
+                    <TableHead>Dest</TableHead>
+                    <TableHead>Port</TableHead>
+                    <TableHead>Action</TableHead>
+                    <TableHead className="w-16">On</TableHead>
+                    <TableHead className="w-28 text-right">Actions</TableHead>
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
-        </CardContent>
-      </Card>
+                </TableHeader>
+                <TableBody>
+                  {filteredRules.map((rule) => (
+                    <TableRow key={rule.id} className={cn(!rule.enabled && 'opacity-50')}>
+                      <TableCell>
+                        <div className="flex items-center gap-1">
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-6 w-6"
+                                onClick={() => moveRule(rule.id, 'up')}
+                              >
+                                <ArrowUp className="h-3 w-3" />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Move Up</TooltipContent>
+                          </Tooltip>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-6 w-6"
+                                onClick={() => moveRule(rule.id, 'down')}
+                              >
+                                <ArrowDown className="h-3 w-3" />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Move Down</TooltipContent>
+                          </Tooltip>
+                          <span className="ml-1 font-mono text-xs font-bold">{rule.priority}</span>
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <div>
+                          <span className="font-medium text-sm">{rule.name}</span>
+                          {rule.comment && (
+                            <p className="text-xs text-muted-foreground truncate max-w-40">{rule.comment}</p>
+                          )}
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant="outline" className="text-xs font-mono">
+                          {rule.protocol.toUpperCase()}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="font-mono text-xs">{rule.sourceIp || '—'}</TableCell>
+                      <TableCell className="font-mono text-xs">{rule.destIp || '—'}</TableCell>
+                      <TableCell className="font-mono text-xs">{rule.destPort || '—'}</TableCell>
+                      <TableCell>
+                        <ActionBadge action={rule.action} />
+                      </TableCell>
+                      <TableCell>
+                        <Switch checked={rule.enabled} onCheckedChange={() => toggleRule(rule.id)} />
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <div className="flex items-center justify-end gap-1">
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openEdit(rule)}>
+                                <Edit2 className="h-3.5 w-3.5" />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Edit</TooltipContent>
+                          </Tooltip>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-7 w-7 text-destructive"
+                                onClick={() => setDeleteId(rule.id)}
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Delete</TooltipContent>
+                          </Tooltip>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
-      {/* Add/Edit Rule Dialog */}
+      {/* Add/Edit Dialog */}
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
         <DialogContent className="max-w-lg">
           <DialogHeader>
-            <DialogTitle>{editingRule ? 'Edit Rule' : 'Add Rule'}</DialogTitle>
-            <DialogDescription>Configure firewall rule parameters</DialogDescription>
+            <DialogTitle>{editingRule ? 'Edit Rule' : 'Add Firewall Rule'}</DialogTitle>
+            <DialogDescription>
+              {editingRule ? 'Modify the existing firewall rule.' : 'Create a new custom firewall rule.'}
+            </DialogDescription>
           </DialogHeader>
-          <div className="space-y-3 py-4">
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1">
-                <Label className="text-xs">Zone</Label>
-                <Select value={form.zone} onValueChange={v => setForm(p => ({ ...p, zone: v }))}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="wan">WAN</SelectItem>
-                    <SelectItem value="lan">LAN</SelectItem>
-                    <SelectItem value="guest">Guest</SelectItem>
-                    <SelectItem value="dmz">DMZ</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-1">
-                <Label className="text-xs">Chain</Label>
-                <Select value={form.chain} onValueChange={v => setForm(p => ({ ...p, chain: v }))}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="input">Input</SelectItem>
-                    <SelectItem value="forward">Forward</SelectItem>
-                    <SelectItem value="output">Output</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label>Rule Name *</Label>
+              <Input
+                value={form.name}
+                onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))}
+                placeholder="e.g. Allow PMS Access"
+              />
             </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1">
-                <Label className="text-xs">Protocol</Label>
-                <Select value={form.protocol} onValueChange={v => setForm(p => ({ ...p, protocol: v }))}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Protocol</Label>
+                <Select value={form.protocol} onValueChange={(v) => setForm((p) => ({ ...p, protocol: v }))}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="tcp">TCP</SelectItem>
                     <SelectItem value="udp">UDP</SelectItem>
                     <SelectItem value="icmp">ICMP</SelectItem>
-                    <SelectItem value="all">ALL</SelectItem>
+                    <SelectItem value="all">All</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
-              <div className="space-y-1">
-                <Label className="text-xs">Action</Label>
-                <Select value={form.action} onValueChange={v => setForm(p => ({ ...p, action: v }))}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
+              <div className="space-y-2">
+                <Label>Action</Label>
+                <Select value={form.action} onValueChange={(v) => setForm((p) => ({ ...p, action: v }))}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="accept">Accept</SelectItem>
                     <SelectItem value="drop">Drop</SelectItem>
@@ -1127,48 +687,50 @@ function RulesTab() {
                 </Select>
               </div>
             </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1">
-                <Label className="text-xs">Source IP/Mask</Label>
-                <Input value={form.source} onChange={e => setForm(p => ({ ...p, source: e.target.value }))} placeholder="0.0.0.0/0" className="font-mono text-xs" />
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Source IP / CIDR</Label>
+                <Input
+                  value={form.sourceIp}
+                  onChange={(e) => setForm((p) => ({ ...p, sourceIp: e.target.value }))}
+                  placeholder="e.g. 10.0.0.0/24"
+                />
               </div>
-              <div className="space-y-1">
-                <Label className="text-xs">Destination IP/Mask</Label>
-                <Input value={form.dest} onChange={e => setForm(p => ({ ...p, dest: e.target.value }))} placeholder="0.0.0.0/0" className="font-mono text-xs" />
-              </div>
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1">
-                <Label className="text-xs">Ports</Label>
-                <Input value={form.ports} onChange={e => setForm(p => ({ ...p, ports: e.target.value }))} placeholder="80,443" className="font-mono text-xs" />
-              </div>
-              <div className="space-y-1">
-                <Label className="text-xs">Log Prefix</Label>
-                <Input value={form.logPrefix} onChange={e => setForm(p => ({ ...p, logPrefix: e.target.value }))} placeholder="RULE_LOG" className="font-mono text-xs" />
+              <div className="space-y-2">
+                <Label>Dest IP / CIDR</Label>
+                <Input
+                  value={form.destIp}
+                  onChange={(e) => setForm((p) => ({ ...p, destIp: e.target.value }))}
+                  placeholder="e.g. 10.0.0.50"
+                />
               </div>
             </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1">
-                <Label className="text-xs">Schedule</Label>
-                <Select value={form.schedule} onValueChange={v => setForm(p => ({ ...p, schedule: v }))}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="Always">Always</SelectItem>
-                    <SelectItem value="Business Hours">Business Hours</SelectItem>
-                    <SelectItem value="Night Only">Night Only</SelectItem>
-                    <SelectItem value="Weekend Only">Weekend Only</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
+            <div className="space-y-2">
+              <Label>Destination Port</Label>
+              <Input
+                value={form.destPort}
+                onChange={(e) => setForm((p) => ({ ...p, destPort: e.target.value }))}
+                placeholder="e.g. 5432 or 8000-9000"
+              />
             </div>
-            <div className="space-y-1">
-              <Label className="text-xs">Comment</Label>
-              <Input value={form.comment} onChange={e => setForm(p => ({ ...p, comment: e.target.value }))} placeholder="Rule description..." />
+            <div className="space-y-2">
+              <Label>Comment</Label>
+              <Input
+                value={form.comment}
+                onChange={(e) => setForm((p) => ({ ...p, comment: e.target.value }))}
+                placeholder="Optional description"
+              />
+            </div>
+            <div className="flex items-center justify-between">
+              <Label>Enabled</Label>
+              <Switch checked={form.enabled} onCheckedChange={(c) => setForm((p) => ({ ...p, enabled: c }))} />
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setDialogOpen(false)}>Cancel</Button>
-            <Button onClick={saveRule} disabled={saving}>
+            <Button variant="outline" onClick={() => setDialogOpen(false)}>
+              Cancel
+            </Button>
+            <Button onClick={saveRule} disabled={!form.name.trim() || saving}>
               {saving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
               {editingRule ? 'Update' : 'Create'} Rule
             </Button>
@@ -1176,1096 +738,895 @@ function RulesTab() {
         </DialogContent>
       </Dialog>
 
-      {/* Test Dialog */}
-      <Dialog open={testDialogOpen} onOpenChange={setTestDialogOpen}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>Firewall Rules Test</DialogTitle>
-            <DialogDescription>Testing firewall rules configuration...</DialogDescription>
-          </DialogHeader>
-          <div className="py-4">
-            {testing ? (
-              <div className="flex items-center justify-center gap-3 py-8">
-                <Loader2 className="h-6 w-6 animate-spin text-teal-600" />
-                <span className="text-muted-foreground">Testing {rules.filter(r => r.enabled).length} active rules...</span>
-              </div>
-            ) : !testResult ? (
-              <div className="flex items-center justify-center gap-3 py-8">
-                <span className="text-muted-foreground">Click "Test Rules" to validate firewall rules.</span>
-              </div>
-            ) : (
-              <div className="space-y-3">
-                <div className={cn('flex items-center gap-2 p-3 rounded-lg', testResult.includes('not available') ? 'bg-amber-50 border border-amber-200' : 'bg-emerald-50 border border-emerald-200')}>
-                  {testResult.includes('not available') ? <AlertTriangle className="h-5 w-5 text-amber-600" /> : <CheckCircle2 className="h-5 w-5 text-emerald-600" />}
-                  <p className={cn('text-sm', testResult.includes('not available') ? 'text-amber-800' : 'text-emerald-800')}>{testResult}</p>
-                </div>
-                {!testResult.includes('not available') && (
-                  <div className="text-xs text-muted-foreground">
-                    Test verified rule processing order, policy conflicts, and security coverage.
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setTestDialogOpen(false)}>Close</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      {/* Delete Confirmation */}
+      <AlertDialog open={!!deleteId} onOpenChange={() => setDeleteId(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete Rule</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to delete this firewall rule? This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={deleteRule} className="bg-destructive text-white hover:bg-destructive/90">
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
 
-// ─── Tab 3: MAC Filtering ────────────────────────────────────────
+// ─── Tab 2: Port Forwarding ─────────────────────────────────────────
 
-function LinkedBadge({ type }: { type: string }) {
-  const m: Record<string, string> = {
-    guest: 'bg-teal-100 text-teal-700',
-    device: 'bg-slate-100 text-slate-700',
-    staff: 'bg-amber-100 text-amber-700',
+function PortForwardTab() {
+  const { toast } = useToast();
+  const [forwards, setForwards] = useState<PortForward[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [editingFwd, setEditingFwd] = useState<PortForward | null>(null);
+  const [deleteId, setDeleteId] = useState<string | null>(null);
+
+  const [form, setForm] = useState({
+    name: '',
+    protocol: 'tcp',
+    externalPort: '',
+    internalIp: '',
+    internalPort: '',
+    sourceIp: '',
+    enabled: true,
+  });
+
+  const fetchForwards = useCallback(async () => {
+    try {
+      setLoading(true);
+      const res = await apiFetch<PortForward[]>(`${API_BASE}/port-forwards`);
+      if (res.success && res.data) setForwards(res.data);
+    } catch {
+      toast({ title: 'Error', description: 'Failed to load port forwards', variant: 'destructive' });
+    } finally {
+      setLoading(false);
+    }
+  }, [toast]);
+
+  useEffect(() => {
+    fetchForwards();
+  }, [fetchForwards]);
+
+  const openAdd = () => {
+    setEditingFwd(null);
+    setForm({ name: '', protocol: 'tcp', externalPort: '', internalIp: '', internalPort: '', sourceIp: '', enabled: true });
+    setDialogOpen(true);
   };
-  return <Badge className={cn('text-xs', m[type] || '')}>{type}</Badge>;
-}
 
-function MacFilterTable({ entries, title, accent, onToggle, onEdit, onDelete }: {
-  entries: MacEntry[];
-  title: string;
-  accent: string;
-  onToggle: (m: MacEntry) => void;
-  onEdit: (m: MacEntry) => void;
-  onDelete: (id: string) => void;
-}) {
-  return (
-    <Card>
-      <CardHeader className="pb-3">
+  const openEdit = (f: PortForward) => {
+    setEditingFwd(f);
+    setForm({
+      name: f.name,
+      protocol: f.protocol,
+      externalPort: String(f.externalPort),
+      internalIp: f.internalIp,
+      internalPort: String(f.internalPort),
+      sourceIp: f.sourceIp || '',
+      enabled: f.enabled,
+    });
+    setDialogOpen(true);
+  };
+
+  const saveForward = async () => {
+    if (!form.name.trim() || !form.externalPort || !form.internalIp || !form.internalPort) {
+      toast({ title: 'Validation Error', description: 'Name, ports, and internal IP are required', variant: 'destructive' });
+      return;
+    }
+    try {
+      setSaving(true);
+      const body = {
+        ...form,
+        externalPort: parseInt(form.externalPort, 10),
+        internalPort: parseInt(form.internalPort, 10),
+      };
+      if (editingFwd) {
+        await apiFetch(`${API_BASE}/port-forwards/${editingFwd.id}`, { method: 'PUT', body: JSON.stringify(body) });
+        toast({ title: 'Port Forward Updated', description: `${form.name} has been updated.` });
+      } else {
+        await apiFetch(`${API_BASE}/port-forwards`, { method: 'POST', body: JSON.stringify(body) });
+        toast({ title: 'Port Forward Created', description: `${form.name} has been created.` });
+      }
+      setDialogOpen(false);
+      await fetchForwards();
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Failed to save port forward';
+      toast({ title: 'Error', description: msg, variant: 'destructive' });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const deleteForward = async () => {
+    if (!deleteId) return;
+    try {
+      await apiFetch(`${API_BASE}/port-forwards/${deleteId}`, { method: 'DELETE' });
+      toast({ title: 'Port Forward Deleted' });
+      await fetchForwards();
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Failed to delete';
+      toast({ title: 'Error', description: msg, variant: 'destructive' });
+    } finally {
+      setDeleteId(null);
+    }
+  };
+
+  const toggleForward = async (id: string) => {
+    const fwd = forwards.find((f) => f.id === id);
+    if (!fwd) return;
+    try {
+      await apiFetch(`${API_BASE}/port-forwards/${id}/toggle`, {
+        method: 'PATCH',
+        body: JSON.stringify({ enabled: !fwd.enabled }),
+      });
+      setForwards(forwards.map((f) => (f.id === id ? { ...f, enabled: !fwd.enabled } : f)));
+    } catch {
+      toast({ title: 'Error', description: 'Failed to toggle port forward', variant: 'destructive' });
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="space-y-4">
         <div className="flex items-center justify-between">
-          <CardTitle className="text-base flex items-center gap-2">
-            {accent === 'green' ? <ShieldCheck className="h-4 w-4 text-emerald-600" /> : <ShieldBan className="h-4 w-4 text-red-600" />}
-            {title}
-            <Badge variant="secondary" className="text-xs">{entries.length}</Badge>
-          </CardTitle>
+          <Skeleton className="h-8 w-48" />
+          <Skeleton className="h-9 w-40" />
         </div>
-      </CardHeader>
-      <CardContent className="p-0">
-        <div className="max-h-64 overflow-y-auto">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>MAC</TableHead>
-                <TableHead>Description</TableHead>
-                <TableHead>Type</TableHead>
-                <TableHead>Expires</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead className="text-right">Actions</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {entries.length === 0 ? (
-                <TableRow>
-                  <TableCell colSpan={6} className="text-center py-8 text-muted-foreground text-sm">
-                    No entries
-                  </TableCell>
-                </TableRow>
-              ) : (
-                entries.map(entry => (
-                  <TableRow key={entry.id}>
-                    <TableCell className="font-mono text-xs">{entry.mac}</TableCell>
-                    <TableCell className="text-sm">{entry.description}</TableCell>
-                    <TableCell><LinkedBadge type={entry.linkedType} /></TableCell>
-                    <TableCell className="text-xs">{entry.expires}</TableCell>
-                    <TableCell>
-                      <Badge variant={entry.status === 'active' ? 'default' : 'secondary'} className="text-xs">
-                        {entry.status}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <div className="flex items-center justify-end gap-1">
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => onToggle(entry)}>
-                              {entry.listType === 'whitelist' ? <Ban className="h-3.5 w-3.5 text-red-500" /> : <ShieldCheck className="h-3.5 w-3.5 text-emerald-500" />}
-                            </Button>
-                          </TooltipTrigger>
-                          <TooltipContent>{entry.listType === 'whitelist' ? 'Block' : 'Allow'}</TooltipContent>
-                        </Tooltip>
-                        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => onEdit(entry)}>
-                          <Edit2 className="h-3.5 w-3.5" />
-                        </Button>
-                        <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => onDelete(entry.id)}>
-                          <Trash2 className="h-3.5 w-3.5 text-destructive" />
-                        </Button>
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                ))
-              )}
-            </TableBody>
-          </Table>
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
-function MacFilterTab() {
-  const { toast } = useToast();
-  const [macs, setMacs] = useState<MacEntry[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [filterMode, setFilterMode] = useState<'blacklist' | 'whitelist'>('blacklist');
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [importOpen, setImportOpen] = useState(false);
-  const [importText, setImportText] = useState('');
-  const [editingMac, setEditingMac] = useState<MacEntry | null>(null);
-  const [form, setForm] = useState({
-    mac: '', description: '', listType: 'blacklist' as const,
-    linkedType: 'guest' as const, expires: '',
-  });
-
-  const fetchMacs = useCallback(async () => {
-    try {
-      setLoading(true);
-      const res = await apiFetch<Record<string, unknown>[]>('/api/wifi/firewall/mac-filter');
-      if (res.success && res.data) {
-        setMacs(res.data.map(mapMacFromApi));
-      }
-    } catch (e) {
-      console.error(e);
-      toast({ title: 'Error', description: 'Failed to load MAC filter entries', variant: 'destructive' });
-    } finally {
-      setLoading(false);
-    }
-  }, [toast]);
-
-  useEffect(() => { fetchMacs(); }, [fetchMacs]);
-
-  const whitelist = macs.filter(m => m.listType === 'whitelist');
-  const blacklist = macs.filter(m => m.listType === 'blacklist');
-
-  const openAdd = () => {
-    setEditingMac(null);
-    setForm({ mac: '', description: '', listType: 'blacklist', linkedType: 'guest', expires: '' });
-    setDialogOpen(true);
-  };
-
-  const openEdit = (m: MacEntry) => {
-    setEditingMac(m);
-    setForm({ mac: m.mac, description: m.description, listType: m.listType, linkedType: m.linkedType, expires: m.expires });
-    setDialogOpen(true);
-  };
-
-  const saveMac = async () => {
-    try {
-      setSaving(true);
-      if (editingMac) {
-        await apiFetch(`/api/wifi/firewall/mac-filter/${editingMac.id}`, {
-          method: 'PUT',
-          body: JSON.stringify(form),
-        });
-        toast({ title: 'Entry Updated', description: 'MAC filter entry updated.' });
-      } else {
-        await apiFetch('/api/wifi/firewall/mac-filter', {
-          method: 'POST',
-          body: JSON.stringify({ ...form, macAddress: form.mac }),
-        });
-        toast({ title: 'Entry Created', description: 'New MAC filter entry added.' });
-      }
-      setDialogOpen(false);
-      await fetchMacs();
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Failed to save MAC entry';
-      toast({ title: 'Error', description: msg, variant: 'destructive' });
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const deleteMac = async (id: string) => {
-    try {
-      await apiFetch(`/api/wifi/firewall/mac-filter/${id}`, { method: 'DELETE' });
-      toast({ title: 'Entry Deleted', description: 'MAC filter entry removed.' });
-      await fetchMacs();
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Failed to delete MAC entry';
-      toast({ title: 'Error', description: msg, variant: 'destructive' });
-    }
-  };
-
-  const toggleBlock = async (m: MacEntry) => {
-    const newType = m.listType === 'whitelist' ? 'blacklist' : 'whitelist';
-    try {
-      await apiFetch(`/api/wifi/firewall/mac-filter/${m.id}`, {
-        method: 'PUT',
-        body: JSON.stringify({ listType: newType }),
-      });
-      setMacs(macs.map(x => x.id === m.id ? { ...x, listType: newType } : x));
-    } catch {
-      toast({ title: 'Error', description: 'Failed to toggle MAC entry', variant: 'destructive' });
-    }
-  };
-
-  const handleImport = async () => {
-    try {
-      const lines = importText.trim().split('\n').filter(l => l.trim());
-      for (const line of lines) {
-        const parts = line.split(',').map(s => s.trim());
-        await apiFetch('/api/wifi/firewall/mac-filter', {
-          method: 'POST',
-          body: JSON.stringify({
-            macAddress: parts[0],
-            description: parts[1] || 'Imported',
-            listType: filterMode,
-            linkedType: 'device',
-          }),
-        });
-      }
-      toast({ title: 'Import Complete', description: `${lines.length} MAC entries imported.` });
-      setImportOpen(false);
-      setImportText('');
-      await fetchMacs();
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Failed to import MAC entries';
-      toast({ title: 'Error', description: msg, variant: 'destructive' });
-    }
-  };
-
-  if (loading) return <div className="grid gap-4 md:grid-cols-2"><TableSkeleton cols={6} rows={4} /><TableSkeleton cols={6} rows={4} /></div>;
-
-  return (
-    <div className="space-y-4">
-      {/* Mode Selector & Counts */}
-      <Card>
-        <CardContent className="p-4">
-          <div className="flex flex-wrap items-center gap-4">
-            <div className="flex items-center gap-2">
-              <ShieldAlert className="h-5 w-5 text-amber-600" />
-              <span className="font-medium text-sm">Active Filter Mode:</span>
-            </div>
-            <RadioGroup value={filterMode} onValueChange={v => setFilterMode(v as 'blacklist' | 'whitelist')} className="flex gap-4">
-              <div className="flex items-center gap-2">
-                <RadioGroupItem value="blacklist" id="bl" />
-                <Label htmlFor="bl" className="flex items-center gap-1.5 cursor-pointer">
-                  <ShieldBan className="h-3.5 w-3.5 text-red-500" />
-                  Blacklist
-                  <Badge variant="secondary" className="text-xs">{blacklist.length}</Badge>
-                </Label>
-              </div>
-              <div className="flex items-center gap-2">
-                <RadioGroupItem value="whitelist" id="wl" />
-                <Label htmlFor="wl" className="flex items-center gap-1.5 cursor-pointer">
-                  <ShieldCheck className="h-3.5 w-3.5 text-emerald-500" />
-                  Whitelist
-                  <Badge variant="secondary" className="text-xs">{whitelist.length}</Badge>
-                </Label>
-              </div>
-            </RadioGroup>
-            <div className="flex-1" />
-            <Button variant="outline" size="sm" onClick={() => setImportOpen(true)}>
-              <Upload className="h-4 w-4 mr-2" />
-              Import
-            </Button>
-            <Button onClick={openAdd} size="sm">
-              <Plus className="h-4 w-4 mr-2" />
-              Add MAC
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Split Tables */}
-      <div className="grid gap-4 md:grid-cols-2">
-        <MacFilterTable entries={whitelist} title="Whitelisted" accent="green" onToggle={toggleBlock} onEdit={openEdit} onDelete={deleteMac} />
-        <MacFilterTable entries={blacklist} title="Blacklisted" accent="red" onToggle={toggleBlock} onEdit={openEdit} onDelete={deleteMac} />
+        <TableSkeleton cols={7} rows={4} />
       </div>
-
-      {/* Add/Edit Dialog */}
-      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>{editingMac ? 'Edit MAC Entry' : 'Add MAC Entry'}</DialogTitle>
-            <DialogDescription>Add or modify a MAC address filter entry</DialogDescription>
-          </DialogHeader>
-          <div className="space-y-3 py-4">
-            <div className="space-y-1">
-              <Label className="text-xs">MAC Address</Label>
-              <Input value={form.mac} onChange={e => setForm(p => ({ ...p, mac: e.target.value }))} placeholder="XX:XX:XX:XX:XX:XX" className="font-mono" />
-            </div>
-            <div className="space-y-1">
-              <Label className="text-xs">Description</Label>
-              <Input value={form.description} onChange={e => setForm(p => ({ ...p, description: e.target.value }))} placeholder="Device description" />
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1">
-                <Label className="text-xs">List Type</Label>
-                <Select value={form.listType} onValueChange={v => setForm(p => ({ ...p, listType: v }))}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="whitelist">Whitelist</SelectItem>
-                    <SelectItem value="blacklist">Blacklist</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="space-y-1">
-                <Label className="text-xs">Linked Type</Label>
-                <Select value={form.linkedType} onValueChange={v => setForm(p => ({ ...p, linkedType: v }))}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="guest">Guest</SelectItem>
-                    <SelectItem value="device">Device</SelectItem>
-                    <SelectItem value="staff">Staff</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-            </div>
-            <div className="space-y-1">
-              <Label className="text-xs">Expires</Label>
-              <Input value={form.expires} onChange={e => setForm(p => ({ ...p, expires: e.target.value }))} placeholder="Never or YYYY-MM-DD" />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setDialogOpen(false)}>Cancel</Button>
-            <Button onClick={saveMac} disabled={saving}>
-              {saving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-              {editingMac ? 'Update' : 'Add'} Entry
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Import Dialog */}
-      <Dialog open={importOpen} onOpenChange={setImportOpen}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>Import MAC List</DialogTitle>
-            <DialogDescription>Paste MAC addresses, one per line. Format: MAC, Description</DialogDescription>
-          </DialogHeader>
-          <div className="py-4">
-            <Textarea
-              value={importText}
-              onChange={e => setImportText(e.target.value)}
-              placeholder="AA:BB:CC:DD:EE:FF, Device description&#10;11:22:33:44:55:66, Another device"
-              className="font-mono text-xs min-h-[200px]"
-            />
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setImportOpen(false)}>Cancel</Button>
-            <Button onClick={handleImport}>Import ({importText.trim().split('\n').filter(l => l.trim()).length} entries)</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </div>
-  );
-}
-
-// ─── Tab 4: Bandwidth Policies ───────────────────────────────────
-
-function BwPoliciesTab() {
-  const { toast } = useToast();
-  const [policies, setPolicies] = useState<BandwidthPolicy[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [editingPolicy, setEditingPolicy] = useState<BandwidthPolicy | null>(null);
-  const [form, setForm] = useState({
-    name: '', downloadKbps: 10240, uploadKbps: 10240,
-    burstDownKbps: 20480, burstUpKbps: 20480,
-    priority: 5, linkedPlan: 'Standard Plan', enabled: true,
-  });
-
-  const fetchPolicies = useCallback(async () => {
-    try {
-      setLoading(true);
-      const res = await apiFetch<Record<string, unknown>[]>('/api/wifi/firewall/bandwidth-policies');
-      if (res.success && res.data) {
-        setPolicies(res.data.map(mapPolicyFromApi));
-      }
-    } catch (e) {
-      console.error(e);
-      toast({ title: 'Error', description: 'Failed to load bandwidth policies', variant: 'destructive' });
-    } finally {
-      setLoading(false);
-    }
-  }, [toast]);
-
-  useEffect(() => { fetchPolicies(); }, [fetchPolicies]);
-
-  const openAdd = () => {
-    setEditingPolicy(null);
-    setForm({ name: '', downloadKbps: 10240, uploadKbps: 10240, burstDownKbps: 20480, burstUpKbps: 20480, priority: 5, linkedPlan: 'Standard Plan', enabled: true });
-    setDialogOpen(true);
-  };
-
-  const openEdit = (p: BandwidthPolicy) => {
-    setEditingPolicy(p);
-    setForm({ name: p.name, downloadKbps: p.downloadKbps, uploadKbps: p.uploadKbps, burstDownKbps: p.burstDownKbps, burstUpKbps: p.burstUpKbps, priority: p.priority, linkedPlan: p.linkedPlan, enabled: p.enabled });
-    setDialogOpen(true);
-  };
-
-  const savePolicy = async () => {
-    try {
-      setSaving(true);
-      if (editingPolicy) {
-        await apiFetch(`/api/wifi/firewall/bandwidth-policies/${editingPolicy.id}`, {
-          method: 'PUT',
-          body: JSON.stringify(form),
-        });
-        toast({ title: 'Policy Updated', description: `${form.name} policy updated.` });
-      } else {
-        await apiFetch('/api/wifi/firewall/bandwidth-policies', {
-          method: 'POST',
-          body: JSON.stringify(form),
-        });
-        toast({ title: 'Policy Created', description: `${form.name} policy created.` });
-      }
-      setDialogOpen(false);
-      await fetchPolicies();
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Failed to save policy';
-      toast({ title: 'Error', description: msg, variant: 'destructive' });
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const deletePolicy = async (id: string) => {
-    try {
-      await apiFetch(`/api/wifi/firewall/bandwidth-policies/${id}`, { method: 'DELETE' });
-      toast({ title: 'Policy Deleted', description: 'Bandwidth policy removed.' });
-      await fetchPolicies();
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Failed to delete policy';
-      toast({ title: 'Error', description: msg, variant: 'destructive' });
-    }
-  };
-
-  const toggleEnabled = async (policy: BandwidthPolicy, enabled: boolean) => {
-    try {
-      await apiFetch(`/api/wifi/firewall/bandwidth-policies/${policy.id}`, {
-        method: 'PUT',
-        body: JSON.stringify({ enabled }),
-      });
-      setPolicies(policies.map(p => p.id === policy.id ? { ...p, enabled } : p));
-    } catch {
-      toast({ title: 'Error', description: 'Failed to toggle policy', variant: 'destructive' });
-    }
-  };
-
-  const toMbps = (kbps: number) => (kbps / 1024).toFixed(1);
-
-  const priorityColors = ['bg-red-500', 'bg-orange-500', 'bg-amber-500', 'bg-yellow-500', 'bg-lime-500', 'bg-green-500', 'bg-emerald-500', 'bg-teal-500', 'bg-cyan-500', 'bg-slate-400', 'bg-teal-600'];
-
-  if (loading) return <TabSkeleton />;
+    );
+  }
 
   return (
     <div className="space-y-4">
+      {/* Toolbar */}
       <div className="flex items-center justify-between">
-        <h3 className="text-lg font-semibold">Bandwidth Shaping Policies</h3>
-        <Button onClick={openAdd} size="sm">
-          <Plus className="h-4 w-4 mr-2" />
-          Add Policy
-        </Button>
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <Route className="h-4 w-4" />
+          {forwards.length} port forward{forwards.length !== 1 ? 's' : ''} configured
+        </div>
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={fetchForwards}>
+            <RefreshCw className="h-4 w-4 mr-2" />
+            Refresh
+          </Button>
+          <Button onClick={openAdd} size="sm">
+            <Plus className="h-4 w-4 mr-2" />
+            Add Port Forward
+          </Button>
+        </div>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-        {policies.map(policy => {
-          const maxKbps = 51200;
-          return (
-            <Card key={policy.id} className={cn('transition-all hover:shadow-md', !policy.enabled && 'opacity-60')}>
-              <CardHeader className="pb-3">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <div className="p-2 rounded-lg bg-teal-100">
-                      <Gauge className="h-4 w-4 text-teal-600" />
-                    </div>
-                    <div>
-                      <CardTitle className="text-base">{policy.name}</CardTitle>
-                      <CardDescription className="text-xs">{policy.linkedPlan}</CardDescription>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-1">
-                    <Switch checked={policy.enabled} onCheckedChange={c => toggleEnabled(policy, c)} className="scale-75" />
-                    <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openEdit(policy)}>
-                      <Edit2 className="h-3.5 w-3.5" />
-                    </Button>
-                    <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => deletePolicy(policy.id)}>
-                      <Trash2 className="h-3.5 w-3.5 text-destructive" />
-                    </Button>
-                  </div>
-                </div>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                {/* Speed bars */}
-                <div className="space-y-2">
-                  <div className="flex items-center gap-2">
-                    <Download className="h-3.5 w-3.5 text-emerald-600" />
-                    <span className="text-xs text-muted-foreground w-12">Down</span>
-                    <div className="flex-1 h-3 bg-muted rounded-full overflow-hidden">
-                      <div
-                        className="h-full bg-gradient-to-r from-emerald-500 to-teal-500 rounded-full transition-all"
-                        style={{ width: `${Math.min(100, (policy.downloadKbps / maxKbps) * 100)}%` }}
-                      />
-                    </div>
-                    <span className="text-xs font-mono font-semibold w-20 text-right">{toMbps(policy.downloadKbps)} Mbps</span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <Upload className="h-3.5 w-3.5 text-amber-600" />
-                    <span className="text-xs text-muted-foreground w-12">Up</span>
-                    <div className="flex-1 h-3 bg-muted rounded-full overflow-hidden">
-                      <div
-                        className="h-full bg-gradient-to-r from-amber-500 to-orange-500 rounded-full transition-all"
-                        style={{ width: `${Math.min(100, (policy.uploadKbps / maxKbps) * 100)}%` }}
-                      />
-                    </div>
-                    <span className="text-xs font-mono font-semibold w-20 text-right">{toMbps(policy.uploadKbps)} Mbps</span>
-                  </div>
-                </div>
-
-                {/* Burst */}
-                <div className="flex justify-between text-xs text-muted-foreground">
-                  <span>Burst: ↓{toMbps(policy.burstDownKbps)} / ↑{toMbps(policy.burstUpKbps)} Mbps</span>
-                </div>
-
-                <Separator />
-
-                {/* Priority */}
-                <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="text-xs text-muted-foreground">Priority</span>
-                    <span className="text-xs font-bold">{policy.priority}/10</span>
-                  </div>
-                  <div className="flex gap-1">
-                    {Array.from({ length: 10 }).map((_, i) => (
-                      <div
-                        key={i}
-                        className={cn(
-                          'h-2 flex-1 rounded-full transition-all',
-                          i < policy.priority ? priorityColors[policy.priority] : 'bg-muted'
-                        )}
-                      />
-                    ))}
-                  </div>
-                </div>
-
-                {/* Applied to */}
-                <div className="flex items-center gap-1.5 pt-1">
-                  <Wifi className="h-3 w-3 text-muted-foreground" />
-                  <span className="text-xs text-muted-foreground">Applied to:</span>
-                  <Badge variant="outline" className="text-xs">{policy.linkedPlan}</Badge>
-                </div>
-              </CardContent>
-            </Card>
-          );
-        })}
-      </div>
+      {/* Table */}
+      {forwards.length === 0 ? (
+        <EmptyState
+          icon={Route}
+          title="No port forwarding rules"
+          description="Set up port forwarding to route external traffic to internal services like RDP, CCTV, or PMS."
+          action={{ label: 'Add Port Forward', onClick: openAdd }}
+        />
+      ) : (
+        <Card>
+          <CardContent className="p-0">
+            <div className="max-h-96 overflow-y-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Name</TableHead>
+                    <TableHead>Protocol</TableHead>
+                    <TableHead>Ext Port</TableHead>
+                    <TableHead>Internal IP</TableHead>
+                    <TableHead>Int Port</TableHead>
+                    <TableHead>Source Restriction</TableHead>
+                    <TableHead className="w-16">On</TableHead>
+                    <TableHead className="w-24 text-right">Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {forwards.map((fwd) => (
+                    <TableRow key={fwd.id} className={cn(!fwd.enabled && 'opacity-50')}>
+                      <TableCell className="font-medium text-sm">{fwd.name}</TableCell>
+                      <TableCell>
+                        <Badge variant="outline" className="text-xs font-mono">{fwd.protocol.toUpperCase()}</Badge>
+                      </TableCell>
+                      <TableCell className="font-mono text-sm">{fwd.externalPort}</TableCell>
+                      <TableCell className="font-mono text-sm">{fwd.internalIp}</TableCell>
+                      <TableCell className="font-mono text-sm">{fwd.internalPort}</TableCell>
+                      <TableCell className="font-mono text-xs">{fwd.sourceIp || '—'}</TableCell>
+                      <TableCell>
+                        <Switch checked={fwd.enabled} onCheckedChange={() => toggleForward(fwd.id)} />
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <div className="flex items-center justify-end gap-1">
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openEdit(fwd)}>
+                                <Edit2 className="h-3.5 w-3.5" />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Edit</TooltipContent>
+                          </Tooltip>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-7 w-7 text-destructive"
+                                onClick={() => setDeleteId(fwd.id)}
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Delete</TooltipContent>
+                          </Tooltip>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Add/Edit Dialog */}
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
         <DialogContent className="max-w-lg">
           <DialogHeader>
-            <DialogTitle>{editingPolicy ? 'Edit Policy' : 'Add Policy'}</DialogTitle>
-            <DialogDescription>Configure bandwidth shaping parameters</DialogDescription>
+            <DialogTitle>{editingFwd ? 'Edit Port Forward' : 'Add Port Forward'}</DialogTitle>
+            <DialogDescription>
+              Configure DNAT port forwarding rule for external-to-internal traffic routing.
+            </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-2">
-              <Label>Policy Name</Label>
-              <Input value={form.name} onChange={e => setForm(p => ({ ...p, name: e.target.value }))} placeholder="e.g. Premium" />
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1">
-                <Label className="text-xs">Download (Kbps)</Label>
-                <Input type="number" value={form.downloadKbps} onChange={e => setForm(p => ({ ...p, downloadKbps: parseInt(e.target.value) || 0 }))} />
-                <p className="text-[10px] text-muted-foreground">{toMbps(form.downloadKbps)} Mbps</p>
-              </div>
-              <div className="space-y-1">
-                <Label className="text-xs">Upload (Kbps)</Label>
-                <Input type="number" value={form.uploadKbps} onChange={e => setForm(p => ({ ...p, uploadKbps: parseInt(e.target.value) || 0 }))} />
-                <p className="text-[10px] text-muted-foreground">{toMbps(form.uploadKbps)} Mbps</p>
-              </div>
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1">
-                <Label className="text-xs">Burst Download (Kbps)</Label>
-                <Input type="number" value={form.burstDownKbps} onChange={e => setForm(p => ({ ...p, burstDownKbps: parseInt(e.target.value) || 0 }))} />
-              </div>
-              <div className="space-y-1">
-                <Label className="text-xs">Burst Upload (Kbps)</Label>
-                <Input type="number" value={form.burstUpKbps} onChange={e => setForm(p => ({ ...p, burstUpKbps: parseInt(e.target.value) || 0 }))} />
-              </div>
+              <Label>Name *</Label>
+              <Input
+                value={form.name}
+                onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))}
+                placeholder="e.g. RDP to Front Desk"
+              />
             </div>
             <div className="space-y-2">
-              <Label className="text-xs">Priority ({form.priority}/10)</Label>
-              <Slider value={[form.priority]} onValueChange={v => setForm(p => ({ ...p, priority: v[0] }))} min={0} max={10} step={1} />
-              <div className="flex justify-between text-[10px] text-muted-foreground">
-                <span>Lowest</span>
-                <span>Highest</span>
-              </div>
-            </div>
-            <div className="space-y-2">
-              <Label className="text-xs">Link to WiFi Plan</Label>
-              <Select value={form.linkedPlan} onValueChange={v => setForm(p => ({ ...p, linkedPlan: v }))}>
+              <Label>Protocol</Label>
+              <Select value={form.protocol} onValueChange={(v) => setForm((p) => ({ ...p, protocol: v }))}>
                 <SelectTrigger><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  {WIFI_PLANS.map(p => <SelectItem key={p} value={p}>{p}</SelectItem>)}
+                  <SelectItem value="tcp">TCP</SelectItem>
+                  <SelectItem value="udp">UDP</SelectItem>
+                  <SelectItem value="both">Both</SelectItem>
                 </SelectContent>
               </Select>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>External Port *</Label>
+                <Input
+                  type="number"
+                  value={form.externalPort}
+                  onChange={(e) => setForm((p) => ({ ...p, externalPort: e.target.value }))}
+                  placeholder="e.g. 3389"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label>Internal Port *</Label>
+                <Input
+                  type="number"
+                  value={form.internalPort}
+                  onChange={(e) => setForm((p) => ({ ...p, internalPort: e.target.value }))}
+                  placeholder="e.g. 3389"
+                />
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label>Internal IP *</Label>
+              <Input
+                value={form.internalIp}
+                onChange={(e) => setForm((p) => ({ ...p, internalIp: e.target.value }))}
+                placeholder="e.g. 10.0.0.50"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Source IP Restriction (optional)</Label>
+              <Input
+                value={form.sourceIp}
+                onChange={(e) => setForm((p) => ({ ...p, sourceIp: e.target.value }))}
+                placeholder="e.g. 203.0.113.0/24"
+              />
+            </div>
+            <div className="flex items-center justify-between">
+              <Label>Enabled</Label>
+              <Switch checked={form.enabled} onCheckedChange={(c) => setForm((p) => ({ ...p, enabled: c }))} />
             </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDialogOpen(false)}>Cancel</Button>
-            <Button onClick={savePolicy} disabled={saving}>
+            <Button onClick={saveForward} disabled={!form.name.trim() || !form.externalPort || !form.internalIp || !form.internalPort || saving}>
               {saving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-              {editingPolicy ? 'Update' : 'Create'} Policy
+              {editingFwd ? 'Update' : 'Create'}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Delete Confirmation */}
+      <AlertDialog open={!!deleteId} onOpenChange={() => setDeleteId(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete Port Forward</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to delete this port forwarding rule? External traffic will no longer be routed.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={deleteForward} className="bg-destructive text-white hover:bg-destructive/90">
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
 
-// ─── Tab 5: Bandwidth Monitor ────────────────────────────────────
+// ─── Tab 3: Rate Limiting ───────────────────────────────────────────
 
-function SpeedBar({ value, max, color }: { value: number; max: number; color: string }) {
-  return (
-    <div className="w-20 h-2 bg-muted rounded-full overflow-hidden">
-      <div className={cn('h-full rounded-full', color)} style={{ width: `${Math.min(100, (value / max) * 100)}%` }} />
-    </div>
-  );
-}
-
-function BwMonitorTab() {
+function RateLimitTab() {
   const { toast } = useToast();
-  const [users, setUsers] = useState<BandwidthUser[]>([]);
-  const [pools, setPools] = useState<BandwidthPool[]>([]);
+  const [limits, setLimits] = useState<RateLimit[]>([]);
   const [loading, setLoading] = useState(true);
-  const [tick, setTick] = useState(0);
-  const [sparklineHistory, setSparklineHistory] = useState<number[]>([]);
-  const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [editingLimit, setEditingLimit] = useState<RateLimit | null>(null);
+  const [deleteId, setDeleteId] = useState<string | null>(null);
 
-  const fetchData = useCallback(async () => {
+  const [form, setForm] = useState({
+    name: '',
+    targetIp: '',
+    downloadRate: '5mbit',
+    uploadRate: '2mbit',
+    protocol: 'all',
+    enabled: true,
+  });
+
+  const fetchLimits = useCallback(async () => {
     try {
-      const [usersRes, poolsRes] = await Promise.all([
-        apiFetch<Record<string, unknown>[]>('/api/wifi/firewall/bandwidth-usage?type=session'),
-        apiFetch<Record<string, unknown>[]>('/api/wifi/firewall/bandwidth-pools'),
-      ]);
-      if (usersRes.success && usersRes.data) {
-        setUsers(usersRes.data.map(mapSessionFromApi));
-      }
-      if (poolsRes.success && poolsRes.data) {
-        setPools(poolsRes.data.map(mapPoolFromApi));
-      }
-      // Update sparkline history with real total bandwidth usage
-      const poolsData = poolsRes.success && poolsRes.data ? poolsRes.data.map(mapPoolFromApi) : [];
-      const totalDown = poolsData.reduce((s: number, p: BandwidthPool) => s + p.usedDownKbps, 0);
-      const totalUp = poolsData.reduce((s: number, p: BandwidthPool) => s + p.usedUpKbps, 0);
-      const totalKbps = totalDown + totalUp;
-      const maxExpected = poolsData.reduce((s: number, p: BandwidthPool) => s + p.totalDownKbps + p.totalUpKbps, 0) || 1;
-      const pct = Math.round((totalKbps / maxExpected) * 100);
-      setSparklineHistory(prev => [...prev.slice(-19), pct]);
-      setTick(t => t + 1);
-      setLoading(false);
+      setLoading(true);
+      const res = await apiFetch<RateLimit[]>(`${API_BASE}/rate-limits`);
+      if (res.success && res.data) setLimits(res.data);
     } catch {
-      // Silently fail on background refresh; initial load error is handled below
+      toast({ title: 'Error', description: 'Failed to load rate limits', variant: 'destructive' });
+    } finally {
+      setLoading(false);
     }
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    const load = async () => {
-      try {
-        const [usersRes, poolsRes] = await Promise.all([
-          apiFetch<Record<string, unknown>[]>('/api/wifi/firewall/bandwidth-usage?type=session'),
-          apiFetch<Record<string, unknown>[]>('/api/wifi/firewall/bandwidth-pools'),
-        ]);
-        if (cancelled) return;
-        if (usersRes.success && usersRes.data) {
-          setUsers(usersRes.data.map(mapSessionFromApi));
-        }
-        if (poolsRes.success && poolsRes.data) {
-          setPools(poolsRes.data.map(mapPoolFromApi));
-        }
-        // Initialize sparkline
-        const poolsData = poolsRes.success && poolsRes.data ? poolsRes.data.map(mapPoolFromApi) : [];
-        const totalDown = poolsData.reduce((s: number, p: BandwidthPool) => s + p.usedDownKbps, 0);
-        const totalUp = poolsData.reduce((s: number, p: BandwidthPool) => s + p.usedUpKbps, 0);
-        const totalKbps = totalDown + totalUp;
-        const maxExpected = poolsData.reduce((s: number, p: BandwidthPool) => s + p.totalDownKbps + p.totalUpKbps, 0) || 1;
-        const pct = Math.round((totalKbps / maxExpected) * 100);
-        setSparklineHistory([pct]);
-        setLoading(false);
-      } catch (e) {
-        if (!cancelled) {
-          console.error(e);
-          toast({ title: 'Error', description: 'Failed to load bandwidth data', variant: 'destructive' });
-          setLoading(false);
-        }
-      }
-    };
-    load();
-    return () => { cancelled = true; };
   }, [toast]);
 
-  const startRefresh = useCallback(() => {
-    if (tickRef.current) return;
-    tickRef.current = setInterval(() => {
-      fetchData();
-    }, 5000);
-  }, [fetchData]);
-
-  const stopRefresh = useCallback(() => {
-    if (tickRef.current) {
-      clearInterval(tickRef.current);
-      tickRef.current = null;
-    }
-  }, []);
-
   useEffect(() => {
-    startRefresh();
-    return () => stopRefresh();
-  }, [startRefresh, stopRefresh]);
+    fetchLimits();
+  }, [fetchLimits]);
 
-  const wanDown = pools.reduce((s, p) => s + p.usedDownKbps, 0);
-  const wanUp = pools.reduce((s, p) => s + p.usedUpKbps, 0);
-  const totalUsers = pools.reduce((s, p) => s + p.activeUsers, 0);
-  const totalDownGB = users.reduce((s, u) => s + u.dataDown, 0) / 1024;
-  const totalUpGB = users.reduce((s, u) => s + u.dataUp, 0) / 1024;
-  const peakMbps = Math.max(...users.map(u => u.downloadSpeed)) / 1024;
-
-  const topConsumers = [...users].sort((a, b) => b.dataDown - a.dataDown).slice(0, 10);
-  const maxData = Math.max(...topConsumers.map(u => u.dataDown), 1);
-
-  const formatSpeed = (kbps: number) => {
-    if (kbps >= 1024) return `${(kbps / 1024).toFixed(1)} Mbps`;
-    return `${kbps} Kbps`;
+  const openAdd = () => {
+    setEditingLimit(null);
+    setForm({ name: '', targetIp: '', downloadRate: '5mbit', uploadRate: '2mbit', protocol: 'all', enabled: true });
+    setDialogOpen(true);
   };
 
-  const formatTime = (seconds: number) => {
-    const h = Math.floor(seconds / 3600);
-    const m = Math.floor((seconds % 3600) / 60);
-    return h > 0 ? `${h}h ${m}m` : `${m}m`;
+  const openEdit = (l: RateLimit) => {
+    setEditingLimit(l);
+    setForm({
+      name: l.name,
+      targetIp: l.targetIp,
+      downloadRate: l.downloadRate,
+      uploadRate: l.uploadRate,
+      protocol: l.protocol,
+      enabled: l.enabled,
+    });
+    setDialogOpen(true);
   };
 
-  // Sparkline data from real bandwidth history
-  const sparklineData = sparklineHistory.length > 0 ? sparklineHistory : Array.from({ length: 20 }, () => 0);
+  const saveLimit = async () => {
+    if (!form.name.trim() || !form.targetIp.trim()) {
+      toast({ title: 'Validation Error', description: 'Name and target IP/CIDR are required', variant: 'destructive' });
+      return;
+    }
+    try {
+      setSaving(true);
+      if (editingLimit) {
+        await apiFetch(`${API_BASE}/rate-limits/${editingLimit.id}`, { method: 'PUT', body: JSON.stringify(form) });
+        toast({ title: 'Rate Limit Updated', description: `${form.name} has been updated.` });
+      } else {
+        await apiFetch(`${API_BASE}/rate-limits`, { method: 'POST', body: JSON.stringify(form) });
+        toast({ title: 'Rate Limit Created', description: `${form.name} has been created.` });
+      }
+      setDialogOpen(false);
+      await fetchLimits();
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Failed to save rate limit';
+      toast({ title: 'Error', description: msg, variant: 'destructive' });
+    } finally {
+      setSaving(false);
+    }
+  };
 
-  if (loading) return <TabSkeleton />;
+  const deleteLimit = async () => {
+    if (!deleteId) return;
+    try {
+      await apiFetch(`${API_BASE}/rate-limits/${deleteId}`, { method: 'DELETE' });
+      toast({ title: 'Rate Limit Deleted' });
+      await fetchLimits();
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Failed to delete';
+      toast({ title: 'Error', description: msg, variant: 'destructive' });
+    } finally {
+      setDeleteId(null);
+    }
+  };
+
+  const toggleLimit = async (id: string) => {
+    const limit = limits.find((l) => l.id === id);
+    if (!limit) return;
+    try {
+      await apiFetch(`${API_BASE}/rate-limits/${id}/toggle`, {
+        method: 'PATCH',
+        body: JSON.stringify({ enabled: !limit.enabled }),
+      });
+      setLimits(limits.map((l) => (l.id === id ? { ...l, enabled: !limit.enabled } : l)));
+    } catch {
+      toast({ title: 'Error', description: 'Failed to toggle rate limit', variant: 'destructive' });
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="space-y-4">
+        <div className="flex items-center justify-between">
+          <Skeleton className="h-8 w-48" />
+          <Skeleton className="h-9 w-40" />
+        </div>
+        <TableSkeleton cols={6} rows={4} />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-4">
-      {/* Stats Row */}
-      <div className="grid gap-3 grid-cols-2 md:grid-cols-4">
-        <Card className="bg-slate-900 text-white border-slate-800">
-          <CardContent className="p-4">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-xs text-slate-400">WAN Usage</span>
-              <div className="flex items-center gap-1">
-                <span className="relative flex h-2 w-2">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
-                </span>
-                <span className="text-[10px] text-emerald-400">LIVE</span>
-              </div>
-            </div>
-            <div className="flex items-center gap-4">
-              <div>
-                <Download className="h-3 w-3 text-emerald-400 mb-1" />
-                <p className="text-lg font-bold">{(wanDown / 1024).toFixed(1)} <span className="text-xs font-normal">Mbps</span></p>
-              </div>
-              <div>
-                <Upload className="h-3 w-3 text-amber-400 mb-1" />
-                <p className="text-lg font-bold">{(wanUp / 1024).toFixed(1)} <span className="text-xs font-normal">Mbps</span></p>
-              </div>
-            </div>
-            {/* Sparkline */}
-            <div className="flex items-end gap-0.5 mt-2 h-4">
-              {sparklineData.map((v, i) => (
-                <div key={i} className="flex-1 bg-emerald-500/60 rounded-t-sm" style={{ height: `${v}%` }} />
-              ))}
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card className="bg-slate-900 text-white border-slate-800">
-          <CardContent className="p-4">
-            <div className="flex items-center gap-2 mb-2">
-              <Users className="h-3.5 w-3.5 text-teal-400" />
-              <span className="text-xs text-slate-400">Active Users</span>
-            </div>
-            <p className="text-3xl font-bold">{totalUsers}</p>
-            <div className="flex items-center gap-1 mt-1">
-              <TrendingUp className="h-3 w-3 text-emerald-400" />
-              <span className="text-xs text-emerald-400">Live data</span>
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card className="bg-slate-900 text-white border-slate-800">
-          <CardContent className="p-4">
-            <div className="flex items-center gap-2 mb-2">
-              <Activity className="h-3.5 w-3.5 text-amber-400" />
-              <span className="text-xs text-slate-400">Peak Today</span>
-            </div>
-            <p className="text-3xl font-bold">{peakMbps.toFixed(1)} <span className="text-sm font-normal">Mbps</span></p>
-            <span className="text-xs text-slate-500">Single user peak download</span>
-          </CardContent>
-        </Card>
-
-        <Card className="bg-slate-900 text-white border-slate-800">
-          <CardContent className="p-4">
-            <div className="flex items-center gap-2 mb-2">
-              <BarChart3 className="h-3.5 w-3.5 text-cyan-400" />
-              <span className="text-xs text-slate-400">Total Today</span>
-            </div>
-            <div className="flex items-center gap-3">
-              <div>
-                <span className="text-xl font-bold">{totalDownGB.toFixed(1)} <span className="text-xs font-normal">GB↓</span></span>
-              </div>
-              <div>
-                <span className="text-xl font-bold">{totalUpGB.toFixed(1)} <span className="text-xs font-normal">GB↑</span></span>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
+      {/* Toolbar */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <Gauge className="h-4 w-4" />
+          {limits.length} rate limit{limits.length !== 1 ? 's' : ''} configured
+        </div>
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={fetchLimits}>
+            <RefreshCw className="h-4 w-4 mr-2" />
+            Refresh
+          </Button>
+          <Button onClick={openAdd} size="sm">
+            <Plus className="h-4 w-4 mr-2" />
+            Add Rate Limit
+          </Button>
+        </div>
       </div>
 
-      {/* Per-User Live Table */}
-      <Card className="bg-slate-900 text-white border-slate-800">
-        <CardHeader className="pb-3">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <CardTitle className="text-base text-slate-300">Live User Activity</CardTitle>
-              <div className="flex items-center gap-1">
-                <span className="relative flex h-2 w-2">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
-                </span>
-                <span className="text-[10px] text-emerald-400">Auto-refresh 5s</span>
+      {/* Table */}
+      {limits.length === 0 ? (
+        <EmptyState
+          icon={Gauge}
+          title="No rate limits"
+          description="Control bandwidth usage per IP or subnet for guests, IoT devices, or specific networks."
+          action={{ label: 'Add Rate Limit', onClick: openAdd }}
+        />
+      ) : (
+        <Card>
+          <CardContent className="p-0">
+            <div className="max-h-96 overflow-y-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Name</TableHead>
+                    <TableHead>Target IP/CIDR</TableHead>
+                    <TableHead>Download</TableHead>
+                    <TableHead>Upload</TableHead>
+                    <TableHead>Protocol</TableHead>
+                    <TableHead className="w-16">On</TableHead>
+                    <TableHead className="w-24 text-right">Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {limits.map((limit) => (
+                    <TableRow key={limit.id} className={cn(!limit.enabled && 'opacity-50')}>
+                      <TableCell className="font-medium text-sm">{limit.name}</TableCell>
+                      <TableCell className="font-mono text-sm">{limit.targetIp}</TableCell>
+                      <TableCell>
+                        <div className="flex items-center gap-1.5">
+                          <ArrowDown className="h-3 w-3 text-emerald-500" />
+                          <span className="text-sm font-mono">{limit.downloadRate}</span>
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex items-center gap-1.5">
+                          <ArrowUp className="h-3 w-3 text-blue-500" />
+                          <span className="text-sm font-mono">{limit.uploadRate}</span>
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <Badge variant="outline" className="text-xs font-mono">{limit.protocol.toUpperCase()}</Badge>
+                      </TableCell>
+                      <TableCell>
+                        <Switch checked={limit.enabled} onCheckedChange={() => toggleLimit(limit.id)} />
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <div className="flex items-center justify-end gap-1">
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openEdit(limit)}>
+                                <Edit2 className="h-3.5 w-3.5" />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Edit</TooltipContent>
+                          </Tooltip>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                className="h-7 w-7 text-destructive"
+                                onClick={() => setDeleteId(limit.id)}
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Delete</TooltipContent>
+                          </Tooltip>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Add/Edit Dialog */}
+      <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>{editingLimit ? 'Edit Rate Limit' : 'Add Rate Limit'}</DialogTitle>
+            <DialogDescription>
+              Configure bandwidth limits for a specific IP address or subnet.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label>Name *</Label>
+              <Input
+                value={form.name}
+                onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))}
+                placeholder="e.g. Limit IoT devices"
+              />
+            </div>
+            <div className="space-y-2">
+              <Label>Target IP/CIDR *</Label>
+              <Input
+                value={form.targetIp}
+                onChange={(e) => setForm((p) => ({ ...p, targetIp: e.target.value }))}
+                placeholder="e.g. 10.0.2.0/24"
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Download Rate</Label>
+                <Select value={form.downloadRate} onValueChange={(v) => setForm((p) => ({ ...p, downloadRate: v }))}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {RATE_PRESETS.map((p) => (
+                      <SelectItem key={p.value} value={p.value}>{p.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <Label>Upload Rate</Label>
+                <Select value={form.uploadRate} onValueChange={(v) => setForm((p) => ({ ...p, uploadRate: v }))}>
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {RATE_PRESETS.map((p) => (
+                      <SelectItem key={p.value} value={p.value}>{p.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
             </div>
-            <Badge variant="outline" className="text-xs border-slate-700 text-slate-400">
-              Updated {tick} times
-            </Badge>
+            <div className="space-y-2">
+              <Label>Protocol</Label>
+              <Select value={form.protocol} onValueChange={(v) => setForm((p) => ({ ...p, protocol: v }))}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All</SelectItem>
+                  <SelectItem value="tcp">TCP</SelectItem>
+                  <SelectItem value="udp">UDP</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex items-center justify-between">
+              <Label>Enabled</Label>
+              <Switch checked={form.enabled} onCheckedChange={(c) => setForm((p) => ({ ...p, enabled: c }))} />
+            </div>
           </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDialogOpen(false)}>Cancel</Button>
+            <Button onClick={saveLimit} disabled={!form.name.trim() || !form.targetIp.trim() || saving}>
+              {saving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+              {editingLimit ? 'Update' : 'Create'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete Confirmation */}
+      <AlertDialog open={!!deleteId} onOpenChange={() => setDeleteId(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete Rate Limit</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to remove this bandwidth limit?
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={deleteLimit} className="bg-destructive text-white hover:bg-destructive/90">
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
+  );
+}
+
+// ─── Tab 4: Quick Block ─────────────────────────────────────────────
+
+function QuickBlockTab() {
+  const { toast } = useToast();
+  const [blocks, setBlocks] = useState<QuickBlock[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [blocking, setBlocking] = useState(false);
+  const [type, setType] = useState('ip');
+  const [value, setValue] = useState('');
+  const [reason, setReason] = useState('');
+  const [deleteId, setDeleteId] = useState<string | null>(null);
+
+  const fetchBlocks = useCallback(async () => {
+    try {
+      setLoading(true);
+      const res = await apiFetch<QuickBlock[]>(`${API_BASE}/quick-blocks`);
+      if (res.success && res.data) setBlocks(res.data);
+    } catch {
+      toast({ title: 'Error', description: 'Failed to load quick blocks', variant: 'destructive' });
+    } finally {
+      setLoading(false);
+    }
+  }, [toast]);
+
+  useEffect(() => {
+    fetchBlocks();
+  }, [fetchBlocks]);
+
+  const handleBlock = async () => {
+    if (!value.trim()) {
+      toast({ title: 'Validation Error', description: 'Please enter a value to block', variant: 'destructive' });
+      return;
+    }
+    try {
+      setBlocking(true);
+      await apiFetch(`${API_BASE}/quick-blocks`, {
+        method: 'POST',
+        body: JSON.stringify({ type, value: value.trim(), reason: reason.trim() || 'Manual block' }),
+      });
+      toast({ title: 'Blocked', description: `${type.toUpperCase()} ${value} has been blocked.` });
+      setValue('');
+      setReason('');
+      await fetchBlocks();
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Failed to block';
+      toast({ title: 'Error', description: msg, variant: 'destructive' });
+    } finally {
+      setBlocking(false);
+    }
+  };
+
+  const unblock = async () => {
+    if (!deleteId) return;
+    try {
+      await apiFetch(`${API_BASE}/quick-blocks/${deleteId}`, { method: 'DELETE' });
+      toast({ title: 'Unblocked', description: 'Block has been removed.' });
+      await fetchBlocks();
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Failed to unblock';
+      toast({ title: 'Error', description: msg, variant: 'destructive' });
+    } finally {
+      setDeleteId(null);
+    }
+  };
+
+  const typePlaceholder: Record<string, string> = {
+    ip: 'e.g. 103.21.44.5',
+    subnet: 'e.g. 198.51.100.0/24',
+    mac: 'e.g. AA:BB:CC:DD:EE:FF',
+  };
+
+  if (loading) {
+    return (
+      <div className="space-y-4">
+        <Skeleton className="h-24 w-full rounded-lg" />
+        <TableSkeleton cols={5} rows={4} />
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Quick Add Form */}
+      <Card className="border-teal-200 bg-teal-50/30 dark:bg-teal-950/10 dark:border-teal-800">
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base flex items-center gap-2">
+            <Ban className="h-4 w-4 text-teal-600" />
+            Quick Block
+          </CardTitle>
+          <CardDescription>
+            Instantly block an IP address, subnet, or MAC address from accessing the network.
+          </CardDescription>
         </CardHeader>
-        <CardContent className="p-0">
-          <div className="max-h-[350px] overflow-y-auto">
-            <Table>
-              <TableHeader>
-                <TableRow className="border-slate-800 hover:bg-slate-800/50">
-                  <TableHead className="text-slate-400">User / IP</TableHead>
-                  <TableHead className="text-slate-400">MAC</TableHead>
-                  <TableHead className="text-slate-400">Plan</TableHead>
-                  <TableHead className="text-slate-400">↓ Speed</TableHead>
-                  <TableHead className="text-slate-400">↑ Speed</TableHead>
-                  <TableHead className="text-slate-400">Session</TableHead>
-                  <TableHead className="text-slate-400">Data</TableHead>
-                  <TableHead className="text-slate-400 text-right">Actions</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {users.map(user => (
-                  <TableRow key={user.id} className="border-slate-800/50 hover:bg-slate-800/30">
-                    <TableCell>
-                      <div>
-                        <p className="text-sm font-medium">{user.username}</p>
-                        <p className="text-xs text-slate-500 font-mono">{user.ip}</p>
-                      </div>
-                    </TableCell>
-                    <TableCell className="font-mono text-xs text-slate-400">{user.mac}</TableCell>
-                    <TableCell>
-                      <Badge variant="outline" className="text-xs border-slate-700 text-slate-300">{user.plan}</Badge>
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex items-center gap-2">
-                        <SpeedBar value={user.downloadSpeed} max={15000} color="bg-emerald-500" />
-                        <span className="text-xs font-mono text-emerald-400 w-16">{formatSpeed(user.downloadSpeed)}</span>
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex items-center gap-2">
-                        <SpeedBar value={user.uploadSpeed} max={8000} color="bg-amber-500" />
-                        <span className="text-xs font-mono text-amber-400 w-16">{formatSpeed(user.uploadSpeed)}</span>
-                      </div>
-                    </TableCell>
-                    <TableCell className="text-xs text-slate-400">{formatTime(user.sessionTime)}</TableCell>
-                    <TableCell>
-                      <div className="text-xs">
-                        <span className="text-emerald-400">↓{(user.dataDown / 1024).toFixed(1)} GB</span>
-                        {' '}
-                        <span className="text-slate-600">/</span>
-                        {' '}
-                        <span className="text-amber-400">↑{(user.dataUp / 1024).toFixed(1)} GB</span>
-                      </div>
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <div className="flex items-center justify-end gap-1">
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Button variant="ghost" size="icon" className="h-7 w-7 text-red-400 hover:text-red-300 hover:bg-red-900/20">
-                              <XCircle className="h-3.5 w-3.5" />
-                            </Button>
-                          </TooltipTrigger>
-                          <TooltipContent>Disconnect</TooltipContent>
-                        </Tooltip>
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Button variant="ghost" size="icon" className="h-7 w-7 text-amber-400 hover:text-amber-300 hover:bg-amber-900/20">
-                              <AlertTriangle className="h-3.5 w-3.5" />
-                            </Button>
-                          </TooltipTrigger>
-                          <TooltipContent>Limit</TooltipContent>
-                        </Tooltip>
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+        <CardContent>
+          <div className="flex flex-col sm:flex-row gap-3">
+            <Select value={type} onValueChange={setType}>
+              <SelectTrigger className="w-full sm:w-32">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="ip">IP</SelectItem>
+                <SelectItem value="subnet">Subnet</SelectItem>
+                <SelectItem value="mac">MAC</SelectItem>
+              </SelectContent>
+            </Select>
+            <Input
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+              placeholder={typePlaceholder[type]}
+              className="flex-1"
+              onKeyDown={(e) => e.key === 'Enter' && handleBlock()}
+            />
+            <Input
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              placeholder="Reason (optional)"
+              className="flex-1"
+              onKeyDown={(e) => e.key === 'Enter' && handleBlock()}
+            />
+            <Button onClick={handleBlock} disabled={blocking || !value.trim()}>
+              {blocking ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Ban className="h-4 w-4 mr-2" />}
+              Block
+            </Button>
           </div>
         </CardContent>
       </Card>
 
-      {/* Bottom Row: Top Consumers + Subnets */}
-      <div className="grid gap-4 md:grid-cols-2">
-        {/* Top Consumers */}
-        <Card className="bg-slate-900 text-white border-slate-800">
-          <CardHeader className="pb-3">
-            <CardTitle className="text-base text-slate-300">Top 10 Bandwidth Consumers</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-2">
-            {topConsumers.map((u, i) => (
-              <div key={u.id} className="flex items-center gap-2">
-                <span className="text-xs text-slate-500 w-4 text-right">{i + 1}</span>
-                <span className="text-xs text-slate-300 w-24 truncate">{u.username}</span>
-                <div className="flex-1 h-4 bg-slate-800 rounded overflow-hidden">
-                  <div
-                    className="h-full bg-gradient-to-r from-teal-600 to-emerald-500 rounded"
-                    style={{ width: `${(u.dataDown / maxData) * 100}%` }}
-                  />
-                </div>
-                <span className="text-xs font-mono text-slate-400 w-20 text-right">{(u.dataDown / 1024).toFixed(2)} GB</span>
-              </div>
-            ))}
-          </CardContent>
-        </Card>
-
-        {/* Per-Subnet Aggregate */}
-        <Card className="bg-slate-900 text-white border-slate-800">
-          <CardHeader className="pb-3">
-            <CardTitle className="text-base text-slate-300">Per-Subnet Throughput</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {pools.map(pool => {
-              const downPct = (pool.usedDownKbps / pool.totalDownKbps) * 100;
-              const upPct = (pool.usedUpKbps / pool.totalUpKbps) * 100;
-              return (
-                <div key={pool.id} className="space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <Network className="h-3.5 w-3.5 text-teal-400" />
-                      <span className="text-sm font-medium">{pool.name}</span>
-                      <Badge variant="outline" className="text-[10px] border-slate-700 text-slate-400">VLAN {pool.vlan}</Badge>
-                    </div>
-                    <span className="text-xs text-slate-400">{pool.activeUsers} users</span>
-                  </div>
-                  <div className="space-y-1">
-                    <div className="flex items-center gap-2">
-                      <Download className="h-3 w-3 text-emerald-400" />
-                      <div className="flex-1 h-2.5 bg-slate-800 rounded-full overflow-hidden">
-                        <div className="h-full bg-gradient-to-r from-emerald-600 to-teal-500 rounded-full transition-all duration-500" style={{ width: `${Math.min(100, downPct)}%` }} />
-                      </div>
-                      <span className="text-xs font-mono text-slate-400 w-28 text-right">{formatSpeed(pool.usedDownKbps)} / {formatSpeed(pool.totalDownKbps)}</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <Upload className="h-3 w-3 text-amber-400" />
-                      <div className="flex-1 h-2.5 bg-slate-800 rounded-full overflow-hidden">
-                        <div className="h-full bg-gradient-to-r from-amber-600 to-orange-500 rounded-full transition-all duration-500" style={{ width: `${Math.min(100, upPct)}%` }} />
-                      </div>
-                      <span className="text-xs font-mono text-slate-400 w-28 text-right">{formatSpeed(pool.usedUpKbps)} / {formatSpeed(pool.totalUpKbps)}</span>
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </CardContent>
-        </Card>
+      {/* Recent Blocks */}
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-semibold flex items-center gap-2">
+          <ShieldBan className="h-4 w-4 text-muted-foreground" />
+          Recent Blocks
+          <Badge variant="secondary" className="text-xs">{blocks.length}</Badge>
+        </h3>
+        <Button variant="outline" size="sm" onClick={fetchBlocks}>
+          <RefreshCw className="h-4 w-4 mr-2" />
+          Refresh
+        </Button>
       </div>
 
-      {/* Bandwidth Pools */}
-      <div>
-        <div className="flex items-center justify-between mb-3">
-          <h3 className="text-lg font-semibold">Bandwidth Pools</h3>
-          <Button variant="outline" size="sm">
-            <Plus className="h-4 w-4 mr-2" />
-            Add Pool
-          </Button>
-        </div>
-        <div className="grid gap-4 md:grid-cols-3">
-          {pools.map(pool => {
-            const downPct = (pool.usedDownKbps / pool.totalDownKbps) * 100;
-            const upPct = (pool.usedUpKbps / pool.totalUpKbps) * 100;
-            return (
-              <Card key={pool.id} className="bg-slate-900 text-white border-slate-800">
-                <CardContent className="p-4 space-y-3">
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <Monitor className="h-4 w-4 text-teal-400" />
-                      <span className="font-medium text-sm">{pool.name}</span>
-                    </div>
-                    <Badge variant="outline" className="text-xs border-slate-700 text-slate-400">VLAN {pool.vlan}</Badge>
-                  </div>
+      {blocks.length === 0 ? (
+        <EmptyState
+          icon={ShieldBan}
+          title="No active blocks"
+          description="Blocked IPs, subnets, and MAC addresses will appear here. Use the form above to add one."
+        />
+      ) : (
+        <Card>
+          <CardContent className="p-0">
+            <div className="max-h-96 overflow-y-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Type</TableHead>
+                    <TableHead>Value</TableHead>
+                    <TableHead>Reason</TableHead>
+                    <TableHead>Blocked At</TableHead>
+                    <TableHead className="w-24 text-right">Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {blocks.map((block) => (
+                    <TableRow key={block.id}>
+                      <TableCell>
+                        <BlockTypeBadge type={block.type} />
+                      </TableCell>
+                      <TableCell className="font-mono text-sm">{block.value}</TableCell>
+                      <TableCell className="text-sm">{block.reason}</TableCell>
+                      <TableCell className="text-xs text-muted-foreground">
+                        {block.blockedAt ? new Date(block.blockedAt).toLocaleString() : '—'}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="text-teal-600 hover:text-teal-700 hover:bg-teal-50"
+                              onClick={() => setDeleteId(block.id)}
+                            >
+                              <Unlock className="h-3.5 w-3.5 mr-1" />
+                              Unblock
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>Remove block</TooltipContent>
+                        </Tooltip>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
-                  <div className="space-y-2">
-                    <div>
-                      <div className="flex justify-between text-xs mb-1">
-                        <span className="text-slate-400">Download Capacity</span>
-                        <span className={cn('font-mono', downPct > 80 ? 'text-red-400' : 'text-emerald-400')}>{downPct.toFixed(0)}%</span>
-                      </div>
-                      <div className="h-3 bg-slate-800 rounded-full overflow-hidden">
-                        <div className={cn('h-full rounded-full transition-all duration-500', downPct > 80 ? 'bg-gradient-to-r from-red-600 to-orange-500' : 'bg-gradient-to-r from-emerald-600 to-teal-500')} style={{ width: `${Math.min(100, downPct)}%` }} />
-                      </div>
-                    </div>
-                    <div>
-                      <div className="flex justify-between text-xs mb-1">
-                        <span className="text-slate-400">Upload Capacity</span>
-                        <span className={cn('font-mono', upPct > 80 ? 'text-red-400' : 'text-amber-400')}>{upPct.toFixed(0)}%</span>
-                      </div>
-                      <div className="h-3 bg-slate-800 rounded-full overflow-hidden">
-                        <div className={cn('h-full rounded-full transition-all duration-500', upPct > 80 ? 'bg-gradient-to-r from-red-600 to-orange-500' : 'bg-gradient-to-r from-amber-600 to-orange-500')} style={{ width: `${Math.min(100, upPct)}%` }} />
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="flex justify-between text-xs text-slate-500 pt-2 border-t border-slate-800">
-                    <span>Per-user: ↓{formatSpeed(pool.perUserDownKbps)} / ↑{formatSpeed(pool.perUserUpKbps)}</span>
-                    <span className="flex items-center gap-1">
-                      <Users className="h-3 w-3" />
-                      {pool.activeUsers} active
-                    </span>
-                  </div>
-                </CardContent>
-              </Card>
-            );
-          })}
-        </div>
-      </div>
+      {/* Unblock Confirmation */}
+      <AlertDialog open={!!deleteId} onOpenChange={() => setDeleteId(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Unblock Entry</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to remove this block? The entry will be able to access the network again.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={unblock}>
+              Unblock
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
 
-// ─── Tab 6: Time Schedules ───────────────────────────────────────
+// ─── Tab 5: Schedules ───────────────────────────────────────────────
 
 function SchedulesTab() {
   const { toast } = useToast();
-  const [schedules, setSchedules] = useState<TimeSchedule[]>([]);
+  const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [dialogOpen, setDialogOpen] = useState(false);
-  const [editingSchedule, setEditingSchedule] = useState<TimeSchedule | null>(null);
+  const [editingSchedule, setEditingSchedule] = useState<Schedule | null>(null);
+
   const [form, setForm] = useState({
     name: '',
-    days: [true, true, true, true, true, false, false] as boolean[],
-    startTime: '08:00',
+    days: [true, true, true, true, true, false, false],
+    startTime: '09:00',
     endTime: '18:00',
     enabled: true,
   });
@@ -2273,47 +1634,82 @@ function SchedulesTab() {
   const fetchSchedules = useCallback(async () => {
     try {
       setLoading(true);
-      const res = await apiFetch<Record<string, unknown>[]>('/api/wifi/firewall/schedules');
-      if (res.success && res.data) {
-        setSchedules(res.data.map(mapScheduleFromApi));
+      const res = await fetch('/api/wifi/firewall/schedules');
+      if (res.ok) {
+        const result = await res.json();
+        if (result.success && result.data) {
+          setSchedules(result.data);
+        }
       }
-    } catch (e) {
-      console.error(e);
+    } catch {
       toast({ title: 'Error', description: 'Failed to load schedules', variant: 'destructive' });
     } finally {
       setLoading(false);
     }
   }, [toast]);
 
-  useEffect(() => { fetchSchedules(); }, [fetchSchedules]);
+  useEffect(() => {
+    fetchSchedules();
+  }, [fetchSchedules]);
 
   const openAdd = () => {
     setEditingSchedule(null);
-    setForm({ name: '', days: [true, true, true, true, true, false, false], startTime: '08:00', endTime: '18:00', enabled: true });
+    setForm({ name: '', days: [true, true, true, true, true, false, false], startTime: '09:00', endTime: '18:00', enabled: true });
     setDialogOpen(true);
   };
 
-  const openEdit = (s: TimeSchedule) => {
+  const openEdit = (s: Schedule) => {
     setEditingSchedule(s);
-    setForm({ name: s.name, days: [...s.days], startTime: s.startTime, endTime: s.endTime, enabled: s.enabled });
+    const daysArr = typeof s.days === 'string'
+      ? s.days.split(',').map((d) => d === '1')
+      : Array.isArray(s.days)
+        ? s.days
+        : [true, true, true, true, true, false, false];
+    setForm({
+      name: s.name,
+      days: daysArr.length === 7 ? daysArr : [true, true, true, true, true, false, false],
+      startTime: s.startTime || '09:00',
+      endTime: s.endTime || '18:00',
+      enabled: s.enabled,
+    });
     setDialogOpen(true);
   };
 
   const saveSchedule = async () => {
+    if (!form.name.trim()) {
+      toast({ title: 'Validation Error', description: 'Schedule name is required', variant: 'destructive' });
+      return;
+    }
     try {
       setSaving(true);
+      const body = {
+        ...form,
+        days: form.days.join(','),
+      };
       if (editingSchedule) {
-        await apiFetch(`/api/wifi/firewall/schedules/${editingSchedule.id}`, {
+        const res = await fetch(`/api/wifi/firewall/schedules/${editingSchedule.id}`, {
           method: 'PUT',
-          body: JSON.stringify(form),
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
         });
-        toast({ title: 'Schedule Updated', description: `${form.name} schedule updated.` });
+        if (res.ok) {
+          toast({ title: 'Schedule Updated', description: `${form.name} has been updated.` });
+        } else {
+          const err = await res.json();
+          throw new Error(err.error?.message || 'Update failed');
+        }
       } else {
-        await apiFetch('/api/wifi/firewall/schedules', {
+        const res = await fetch('/api/wifi/firewall/schedules', {
           method: 'POST',
-          body: JSON.stringify({ ...form, linkedRuleCount: 0 }),
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
         });
-        toast({ title: 'Schedule Created', description: `${form.name} schedule created.` });
+        if (res.ok) {
+          toast({ title: 'Schedule Created', description: `${form.name} has been created.` });
+        } else {
+          const err = await res.json();
+          throw new Error(err.error?.message || 'Create failed');
+        }
       }
       setDialogOpen(false);
       await fetchSchedules();
@@ -2325,252 +1721,214 @@ function SchedulesTab() {
     }
   };
 
-  const deleteSchedule = async (id: string) => {
-    try {
-      await apiFetch(`/api/wifi/firewall/schedules/${id}`, { method: 'DELETE' });
-      toast({ title: 'Schedule Deleted', description: 'Time schedule removed.' });
-      await fetchSchedules();
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Failed to delete schedule';
-      toast({ title: 'Error', description: msg, variant: 'destructive' });
-    }
-  };
-
-  const toggleEnabled = async (schedule: TimeSchedule, enabled: boolean) => {
-    try {
-      await apiFetch(`/api/wifi/firewall/schedules/${schedule.id}`, {
-        method: 'PUT',
-        body: JSON.stringify({ enabled }),
-      });
-      setSchedules(schedules.map(s => s.id === schedule.id ? { ...s, enabled } : s));
-    } catch {
-      toast({ title: 'Error', description: 'Failed to toggle schedule', variant: 'destructive' });
-    }
-  };
-
   const toggleDay = (idx: number) => {
-    setForm(prev => {
-      const days = [...prev.days];
-      days[idx] = !days[idx];
-      return { ...prev, days };
-    });
+    setForm((prev) => ({
+      ...prev,
+      days: prev.days.map((d, i) => (i === idx ? !d : d)),
+    }));
   };
 
-  // Time blocks for visual week view (24h timeline)
-  const hours = Array.from({ length: 24 }, (_, i) => i);
+  const isScheduleActiveNow = (schedule: Schedule) => {
+    if (!schedule.enabled) return false;
+    const now = new Date();
+    const dayOfWeek = now.getDay();
+    // JS: 0=Sun, 1=Mon... our array: [Mon, Tue, Wed, Thu, Fri, Sat, Sun]
+    const mappedDay = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+    const daysArr = typeof schedule.days === 'string'
+      ? schedule.days.split(',').map((d) => d === '1')
+      : Array.isArray(schedule.days) ? schedule.days : [true, true, true, true, true, false, false];
+    if (!daysArr[mappedDay]) return false;
+    const currentTime = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    return currentTime >= (schedule.startTime || '00:00') && currentTime <= (schedule.endTime || '23:59');
+  };
 
-  if (loading) return <TableSkeleton cols={7} rows={5} />;
+  if (loading) {
+    return (
+      <div className="space-y-4">
+        <div className="flex items-center justify-between">
+          <Skeleton className="h-8 w-48" />
+          <Skeleton className="h-9 w-40" />
+        </div>
+        <TableSkeleton cols={5} rows={3} />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-4">
+      {/* Toolbar */}
       <div className="flex items-center justify-between">
-        <h3 className="text-lg font-semibold">Time Schedules</h3>
-        <Button onClick={openAdd} size="sm">
-          <Plus className="h-4 w-4 mr-2" />
-          Add Schedule
-        </Button>
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <Timer className="h-4 w-4" />
+          Time-based rule scheduling (linking to rules coming soon)
+        </div>
+        <div className="flex gap-2">
+          <Button variant="outline" size="sm" onClick={fetchSchedules}>
+            <RefreshCw className="h-4 w-4 mr-2" />
+            Refresh
+          </Button>
+          <Button onClick={openAdd} size="sm">
+            <Plus className="h-4 w-4 mr-2" />
+            Add Schedule
+          </Button>
+        </div>
       </div>
 
-      {/* Schedules Table */}
-      <Card>
-        <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Name</TableHead>
-                <TableHead>Days Active</TableHead>
-                <TableHead>Time Range</TableHead>
-                <TableHead>Linked Rules</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead className="w-12" />
-                <TableHead className="text-right">Actions</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {schedules.map(schedule => (
-                <TableRow key={schedule.id} className={cn(!schedule.enabled && 'opacity-50')}>
-                  <TableCell className="font-medium">{schedule.name}</TableCell>
-                  <TableCell>
-                    <div className="flex gap-1">
-                      {DAY_LABELS.map((day, i) => (
-                        <div
-                          key={day}
-                          className={cn(
-                            'w-7 h-7 rounded flex items-center justify-center text-[10px] font-bold',
-                            schedule.days[i]
-                              ? 'bg-teal-100 text-teal-700 border border-teal-200'
-                              : 'bg-muted text-muted-foreground'
-                          )}
-                        >
-                          {day}
-                        </div>
-                      ))}
-                    </div>
-                  </TableCell>
-                  <TableCell className="font-mono text-sm">{schedule.startTime} — {schedule.endTime}</TableCell>
-                  <TableCell>
-                    <Badge variant="outline" className="text-xs">
-                      <ShieldCheck className="h-2.5 w-2.5 mr-1" />
-                      {schedule.linkedRuleCount} rules
-                    </Badge>
-                  </TableCell>
-                  <TableCell>
-                    <Badge variant={schedule.enabled ? 'default' : 'secondary'} className="text-xs">
-                      {schedule.enabled ? 'Active' : 'Disabled'}
-                    </Badge>
-                  </TableCell>
-                  <TableCell>
-                    <Switch checked={schedule.enabled} onCheckedChange={c => toggleEnabled(schedule, c)} className="scale-75" />
-                  </TableCell>
-                  <TableCell className="text-right">
-                    <div className="flex items-center justify-end gap-1">
-                      <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openEdit(schedule)}>
-                        <Edit2 className="h-3.5 w-3.5" />
-                      </Button>
-                      <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => deleteSchedule(schedule.id)}>
-                        <Trash2 className="h-3.5 w-3.5 text-destructive" />
-                      </Button>
-                    </div>
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
-
-      {/* Visual Week View */}
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-base flex items-center gap-2">
-            <Calendar className="h-4 w-4 text-teal-600" />
-            Week Schedule View
-          </CardTitle>
-          <CardDescription>Visual representation of active time blocks across the week</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="overflow-x-auto">
-            {/* Header row */}
-            <div className="flex gap-0 min-w-[700px]">
-              <div className="w-16 flex-shrink-0" />
-              {DAY_LABELS.map(day => (
-                <div key={day} className="flex-1 text-center text-xs font-medium text-muted-foreground pb-1">
-                  {day}
-                </div>
-              ))}
-            </div>
-
-            {/* Hour rows */}
-            <div className="space-y-px min-w-[700px]">
-              {hours.filter(h => h % 2 === 0).map(hour => (
-                <div key={hour} className="flex gap-0 items-center">
-                  <div className="w-16 flex-shrink-0 text-[10px] text-muted-foreground font-mono text-right pr-2">
-                    {hour.toString().padStart(2, '0')}:00
-                  </div>
-                  {DAY_LABELS.map((_, dayIdx) => {
-                    // Check if any schedule covers this day+hour
-                    const activeSchedules = schedules.filter(s =>
-                      s.enabled && s.days[dayIdx] &&
-                      parseInt(s.startTime.split(':')[0]) <= hour &&
-                      parseInt(s.endTime.split(':')[0]) > hour
-                    );
-                    const isHourEnd = schedules.filter(s =>
-                      s.enabled && s.days[dayIdx] &&
-                      parseInt(s.endTime.split(':')[0]) === hour
-                    );
-
+      {/* Table */}
+      {schedules.length === 0 ? (
+        <EmptyState
+          icon={Clock}
+          title="No schedules"
+          description="Create time-based schedules to automatically enable or disable firewall rules at specific times."
+          action={{ label: 'Add Schedule', onClick: openAdd }}
+        />
+      ) : (
+        <Card>
+          <CardContent className="p-0">
+            <div className="max-h-96 overflow-y-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Name</TableHead>
+                    <TableHead>Days</TableHead>
+                    <TableHead>Start Time</TableHead>
+                    <TableHead>End Time</TableHead>
+                    <TableHead>Status</TableHead>
+                    <TableHead>Linked Rules</TableHead>
+                    <TableHead className="w-24 text-right">Actions</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {schedules.map((schedule) => {
+                    const activeNow = isScheduleActiveNow(schedule);
+                    const daysArr = typeof schedule.days === 'string'
+                      ? schedule.days.split(',').map((d) => (d === '1' ? DAY_LABELS : '·'))
+                      : Array.isArray(schedule.days)
+                        ? schedule.days.map((d, i) => (d ? DAY_LABELS[i] : '·'))
+                        : DAY_LABELS;
                     return (
-                      <div key={dayIdx} className="flex-1 h-6 flex items-center justify-center">
-                        <div
-                          className={cn(
-                            'w-full h-full rounded-sm transition-colors',
-                            activeSchedules.length > 0
-                              ? isHourEnd.length > 0
-                                ? 'bg-gradient-to-r from-teal-500/30 to-teal-500/10'
-                                : 'bg-teal-500/30'
-                              : 'bg-muted/30'
-                          )}
-                        >
-                          {activeSchedules.length > 0 && (
-                            <span className="text-[8px] text-teal-700 font-medium truncate block text-center leading-6">
-                              {activeSchedules.map(s => s.name).join(', ')}
-                            </span>
-                          )}
-                        </div>
-                      </div>
+                      <TableRow key={schedule.id}>
+                        <TableCell className="font-medium text-sm">{schedule.name}</TableCell>
+                        <TableCell>
+                          <div className="flex gap-1">
+                            {daysArr.map((d, i) => (
+                              <span
+                                key={i}
+                                className={cn(
+                                  'text-xs px-1.5 py-0.5 rounded font-mono',
+                                  d !== '·' ? 'bg-muted text-foreground' : 'text-muted-foreground/40'
+                                )}
+                              >
+                                {d}
+                              </span>
+                            ))}
+                          </div>
+                        </TableCell>
+                        <TableCell className="font-mono text-sm">{schedule.startTime || '—'}</TableCell>
+                        <TableCell className="font-mono text-sm">{schedule.endTime || '—'}</TableCell>
+                        <TableCell>
+                          <Badge
+                            variant="outline"
+                            className={cn(
+                              'text-xs',
+                              activeNow
+                                ? 'bg-emerald-100 text-emerald-700 border-emerald-200'
+                                : schedule.enabled
+                                  ? 'bg-amber-100 text-amber-700 border-amber-200'
+                                  : 'bg-gray-100 text-gray-500 border-gray-200'
+                            )}
+                          >
+                            {activeNow ? 'Active' : schedule.enabled ? 'Scheduled' : 'Disabled'}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-sm text-muted-foreground">
+                          {schedule.linkedRules ?? 0} rules
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => openEdit(schedule)}>
+                                <Edit2 className="h-3.5 w-3.5" />
+                              </Button>
+                            </TooltipTrigger>
+                            <TooltipContent>Edit</TooltipContent>
+                          </Tooltip>
+                        </TableCell>
+                      </TableRow>
                     );
                   })}
-                </div>
-              ))}
+                </TableBody>
+              </Table>
             </div>
-          </div>
-
-          {/* Legend */}
-          <div className="flex items-center gap-4 mt-4 pt-3 border-t">
-            <div className="flex items-center gap-2">
-              <div className="w-4 h-3 rounded-sm bg-teal-500/30" />
-              <span className="text-xs text-muted-foreground">Active Time Block</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <div className="w-4 h-3 rounded-sm bg-muted/30" />
-              <span className="text-xs text-muted-foreground">Inactive</span>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Add/Edit Dialog */}
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent className="max-w-md">
+        <DialogContent className="max-w-lg">
           <DialogHeader>
             <DialogTitle>{editingSchedule ? 'Edit Schedule' : 'Add Schedule'}</DialogTitle>
-            <DialogDescription>Configure time-based firewall schedule</DialogDescription>
+            <DialogDescription>
+              Define a time window for rule activation. Days are Mon through Sun.
+            </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-4">
             <div className="space-y-2">
-              <Label>Schedule Name</Label>
-              <Input value={form.name} onChange={e => setForm(p => ({ ...p, name: e.target.value }))} placeholder="e.g. Business Hours" />
+              <Label>Schedule Name *</Label>
+              <Input
+                value={form.name}
+                onChange={(e) => setForm((p) => ({ ...p, name: e.target.value }))}
+                placeholder="e.g. Business Hours"
+              />
             </div>
-
-            {/* Day Picker */}
             <div className="space-y-2">
               <Label>Active Days</Label>
-              <div className="flex gap-2 flex-wrap">
-                {DAY_LABELS.map((day, i) => (
-                  <button
+              <div className="flex gap-2">
+                {DAY_LABELS.map((day, idx) => (
+                  <Button
                     key={day}
-                    type="button"
-                    onClick={() => toggleDay(i)}
-                    className={cn(
-                      'w-12 h-10 rounded-lg text-xs font-bold transition-all border',
-                      form.days[i]
-                        ? 'bg-teal-100 text-teal-700 border-teal-300 shadow-sm'
-                        : 'bg-background text-muted-foreground border-muted hover:border-muted-foreground/30'
-                    )}
+                    variant={form.days[idx] ? 'default' : 'outline'}
+                    size="sm"
+                    className="w-12"
+                    onClick={() => toggleDay(idx)}
                   >
                     {day}
-                  </button>
+                  </Button>
                 ))}
               </div>
             </div>
-
-            {/* Time Range */}
-            <div className="grid grid-cols-2 gap-3">
-              <div className="space-y-1">
-                <Label className="text-xs">Start Time</Label>
-                <Input type="time" value={form.startTime} onChange={e => setForm(p => ({ ...p, startTime: e.target.value }))} />
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Start Time</Label>
+                <Input
+                  type="time"
+                  value={form.startTime}
+                  onChange={(e) => setForm((p) => ({ ...p, startTime: e.target.value }))}
+                />
               </div>
-              <div className="space-y-1">
-                <Label className="text-xs">End Time</Label>
-                <Input type="time" value={form.endTime} onChange={e => setForm(p => ({ ...p, endTime: e.target.value }))} />
+              <div className="space-y-2">
+                <Label>End Time</Label>
+                <Input
+                  type="time"
+                  value={form.endTime}
+                  onChange={(e) => setForm((p) => ({ ...p, endTime: e.target.value }))}
+                />
               </div>
             </div>
+            <div className="flex items-center justify-between">
+              <Label>Enabled</Label>
+              <Switch checked={form.enabled} onCheckedChange={(c) => setForm((p) => ({ ...p, enabled: c }))} />
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Schedule-to-rule attachment will be available in a future update.
+            </p>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDialogOpen(false)}>Cancel</Button>
-            <Button onClick={saveSchedule} disabled={!form.name || saving}>
+            <Button onClick={saveSchedule} disabled={!form.name.trim() || saving}>
               {saving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-              {editingSchedule ? 'Update' : 'Create'} Schedule
+              {editingSchedule ? 'Update' : 'Create'}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -2579,289 +1937,131 @@ function SchedulesTab() {
   );
 }
 
-// ─── Tab 7: Content Filtering ───────────────────────────────────────
+// ─── Tab 6: Presets ─────────────────────────────────────────────────
 
-const CONTENT_CATEGORIES = [
-  { value: 'social_media', label: 'Social Media', color: 'bg-blue-100 text-blue-700 border-blue-200' },
-  { value: 'streaming', label: 'Streaming', color: 'bg-purple-100 text-purple-700 border-purple-200' },
-  { value: 'adult', label: 'Adult', color: 'bg-red-100 text-red-700 border-red-200' },
-  { value: 'gaming', label: 'Gaming', color: 'bg-orange-100 text-orange-700 border-orange-200' },
-  { value: 'malware', label: 'Malware', color: 'bg-emerald-100 text-emerald-700 border-emerald-200' },
-  { value: 'ads', label: 'Ads/Trackers', color: 'bg-amber-100 text-amber-700 border-amber-200' },
-  { value: 'custom', label: 'Custom', color: 'bg-slate-100 text-slate-700 border-slate-200' },
-] as const;
-
-interface ContentFilterEntry {
-  id: string;
-  name: string;
-  category: string;
-  domains: string[];
-  enabled: boolean;
-}
-
-interface CategorySummary {
-  category: string;
-  count: number;
-}
-
-function mapContentFilterFromApi(d: Record<string, unknown>): ContentFilterEntry {
-  return {
-    id: d.id as string,
-    name: (d.name || '') as string,
-    category: (d.category || 'custom') as string,
-    domains: typeof d.domains === 'string' ? JSON.parse(d.domains) : ((d.domains as string[]) || []),
-    enabled: !!(d.enabled),
-  };
-}
-
-function ContentFilterTab() {
+function PresetsTab() {
   const { toast } = useToast();
-  const { propertyId } = usePropertyId();
-  const [filters, setFilters] = useState<ContentFilterEntry[]>([]);
-  const [categorySummary, setCategorySummary] = useState<CategorySummary[]>([]);
+  const [presets, setPresets] = useState<Preset[]>([]);
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [editDialogOpen, setEditDialogOpen] = useState(false);
-  const [addDialogOpen, setAddDialogOpen] = useState(false);
-  const [selectedFilter, setSelectedFilter] = useState<ContentFilterEntry | null>(null);
-  const [editFilterDomains, setEditFilterDomains] = useState('');
-  const [newFilter, setNewFilter] = useState({ name: '', category: 'custom', enabled: true });
+  const [applyId, setApplyId] = useState<string | null>(null);
+  const [sourceIp, setSourceIp] = useState('');
+  const [applying, setApplying] = useState(false);
 
-  const fetchContentFilters = useCallback(async () => {
+  const fetchPresets = useCallback(async () => {
     try {
       setLoading(true);
-      const params = new URLSearchParams();
-      if (propertyId) params.set('propertyId', propertyId);
-      const qs = params.toString();
-      const res = await apiFetch<{ data?: Record<string, unknown>[]; categorySummary?: CategorySummary[] }>(
-        `/api/wifi/firewall/content-filter${qs ? `?${qs}` : ''}`
-      );
-      if (res.success && res.data) {
-        setFilters(res.data.map(mapContentFilterFromApi));
-      }
-      if (res.success && (res as Record<string, unknown>).categorySummary) {
-        setCategorySummary((res as Record<string, unknown>).categorySummary as CategorySummary[]);
-      }
-    } catch (e) {
-      console.error(e);
-      toast({ title: 'Error', description: 'Failed to load content filters', variant: 'destructive' });
+      const res = await apiFetch<Preset[]>(`${API_BASE}/presets`);
+      if (res.success && res.data) setPresets(res.data);
+    } catch {
+      toast({ title: 'Error', description: 'Failed to load presets', variant: 'destructive' });
     } finally {
       setLoading(false);
     }
-  }, [toast, propertyId]);
+  }, [toast]);
 
-  useEffect(() => { fetchContentFilters(); }, [fetchContentFilters]);
+  useEffect(() => {
+    fetchPresets();
+  }, [fetchPresets]);
 
-  const toggleFilter = async (filter: ContentFilterEntry) => {
-    const prev = [...filters];
-    const newEnabled = !filter.enabled;
-    // Optimistic update
-    setFilters(filters.map(f => f.id === filter.id ? { ...f, enabled: newEnabled } : f));
+  const applyPreset = async () => {
+    if (!applyId) return;
     try {
-      await apiFetch(`/api/wifi/firewall/content-filter/${filter.id}`, {
-        method: 'PUT',
-        body: JSON.stringify({ enabled: newEnabled }),
-      });
-      toast({ title: newEnabled ? 'Filter Enabled' : 'Filter Disabled', description: `${filter.name} has been ${newEnabled ? 'enabled' : 'disabled'}.` });
-    } catch {
-      // Rollback
-      setFilters(prev);
-      toast({ title: 'Error', description: 'Failed to toggle filter', variant: 'destructive' });
-    }
-  };
-
-  const openEditDialog = (filter: ContentFilterEntry) => {
-    setSelectedFilter(filter);
-    setEditFilterDomains(filter.domains.join('\n'));
-    setEditDialogOpen(true);
-  };
-
-  const saveFilterDomains = async () => {
-    if (!selectedFilter) return;
-    try {
-      setSaving(true);
-      const domains = editFilterDomains.split('\n').map(d => d.trim()).filter(Boolean);
-      const res = await apiFetch(`/api/wifi/firewall/content-filter/${selectedFilter.id}`, {
-        method: 'PUT',
-        body: JSON.stringify({ domains }),
-      });
-      if (res.success) {
-        toast({ title: 'Filter Updated', description: `${selectedFilter.name} domains updated.` });
-        setEditDialogOpen(false);
-        setSelectedFilter(null);
-        await fetchContentFilters();
-      }
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Failed to update filter';
-      toast({ title: 'Error', description: msg, variant: 'destructive' });
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const openAddDialog = () => {
-    setNewFilter({ name: '', category: 'custom', enabled: true });
-    setAddDialogOpen(true);
-  };
-
-  const createFilter = async () => {
-    if (!newFilter.name || !propertyId) {
-      toast({ title: 'Error', description: 'Name and property are required', variant: 'destructive' });
-      return;
-    }
-    try {
-      setSaving(true);
-      const res = await apiFetch('/api/wifi/firewall/content-filter', {
+      setApplying(true);
+      const res = await apiFetch<{ message: string }>(`${API_BASE}/presets/${applyId}/apply`, {
         method: 'POST',
-        body: JSON.stringify({
-          propertyId,
-          name: newFilter.name,
-          category: newFilter.category,
-          domains: [],
-          enabled: newFilter.enabled,
-        }),
+        body: JSON.stringify({ sourceIp: sourceIp.trim() || undefined }),
       });
-      if (res.success) {
-        toast({ title: 'Filter Created', description: `${newFilter.name} content filter has been created.` });
-        setAddDialogOpen(false);
-        await fetchContentFilters();
-      }
+      toast({ title: 'Preset Applied', description: res.data?.message || 'Preset has been applied successfully.' });
+      setApplyId(null);
+      setSourceIp('');
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Failed to create filter';
+      const msg = e instanceof Error ? e.message : 'Failed to apply preset';
       toast({ title: 'Error', description: msg, variant: 'destructive' });
     } finally {
-      setSaving(false);
+      setApplying(false);
     }
   };
 
-  const deleteFilter = async (id: string) => {
-    const filter = filters.find(f => f.id === id);
-    try {
-      await apiFetch(`/api/wifi/firewall/content-filter/${id}`, { method: 'DELETE' });
-      toast({ title: 'Filter Deleted', description: `${filter?.name || 'Content filter'} has been removed.` });
-      await fetchContentFilters();
-    } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Failed to delete filter';
-      toast({ title: 'Error', description: msg, variant: 'destructive' });
-    }
+  const selectedPreset = presets.find((p) => p.id === applyId);
+
+  const categoryIcons: Record<string, React.ElementType> = {
+    networking: Network,
+    'remote-access': Globe,
+    security: Lock,
+    'content-filter': ShieldAlert,
   };
 
-  const getCategoryInfo = (category: string) => {
-    return CONTENT_CATEGORIES.find(c => c.value === category) || CONTENT_CATEGORIES[6];
-  };
-
-  if (loading) return <TabSkeleton />;
+  if (loading) {
+    return (
+      <div className="space-y-4">
+        <Skeleton className="h-8 w-48" />
+        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+          {Array.from({ length: 6 }).map((_, i) => (
+            <Card key={i}>
+              <CardHeader className="pb-3">
+                <Skeleton className="h-5 w-32" />
+                <Skeleton className="h-4 w-48" />
+              </CardHeader>
+              <CardContent>
+                <Skeleton className="h-9 w-20" />
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
       {/* Header */}
       <div className="flex items-center justify-between">
-        <h3 className="text-lg font-semibold">Content Filtering</h3>
-        <Button onClick={openAddDialog} size="sm">
-          <Plus className="h-4 w-4 mr-2" />
-          Add Filter
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <LayoutGrid className="h-4 w-4" />
+          {presets.length} preset templates available
+        </div>
+        <Button variant="outline" size="sm" onClick={fetchPresets}>
+          <RefreshCw className="h-4 w-4 mr-2" />
+          Refresh
         </Button>
       </div>
 
-      {/* Category Summary */}
-      <Card>
-        <CardHeader className="pb-3">
-          <CardTitle className="text-base flex items-center gap-2">
-            <ShieldAlert className="h-4 w-4 text-teal-600" />
-            Category Summary
-          </CardTitle>
-          <CardDescription>Content filter distribution across categories</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-7 gap-3">
-            {CONTENT_CATEGORIES.map(cat => {
-              const summary = categorySummary.find(s => s.category === cat.value);
-              const count = summary?.count || 0;
-              return (
-                <div key={cat.value} className="flex flex-col items-center gap-1 p-3 rounded-lg border bg-card">
-                  <Badge variant="outline" className={cn('text-xs font-medium', cat.color)}>
-                    {cat.label}
-                  </Badge>
-                  <span className="text-2xl font-bold">{count}</span>
-                  <span className="text-[10px] text-muted-foreground">filter{count !== 1 ? 's' : ''}</span>
-                </div>
-              );
-            })}
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Filter Cards */}
-      {filters.length === 0 ? (
-        <Card>
-          <CardContent className="flex flex-col items-center justify-center py-12">
-            <ShieldAlert className="h-12 w-12 text-muted-foreground/30 mb-4" />
-            <h4 className="text-base font-medium text-muted-foreground">No Content Filters</h4>
-            <p className="text-sm text-muted-foreground/70 mt-1 mb-4">Create content filters to block or allow specific website categories</p>
-            <Button onClick={openAddDialog} size="sm">
-              <Plus className="h-4 w-4 mr-2" />
-              Add Filter
-            </Button>
-          </CardContent>
-        </Card>
+      {/* Preset Cards Grid */}
+      {presets.length === 0 ? (
+        <EmptyState
+          icon={LayoutGrid}
+          title="No presets available"
+          description="Preset templates will appear here when the nftables-service is running."
+        />
       ) : (
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-          {filters.map(filter => {
-            const catInfo = getCategoryInfo(filter.category);
+          {presets.map((preset) => {
+            const Icon = categoryIcons[preset.category] || Shield;
             return (
-              <Card key={filter.id} className={cn('border transition-all hover:shadow-md', !filter.enabled && 'opacity-60')}>
+              <Card
+                key={preset.id}
+                className="transition-all hover:shadow-md hover:border-teal-300 dark:hover:border-teal-700"
+              >
                 <CardHeader className="pb-3">
-                  <div className="flex items-center justify-between">
+                  <div className="flex items-start justify-between gap-2">
                     <div className="flex items-center gap-2">
-                      <div className="p-2 rounded-lg bg-teal-50">
-                        <ShieldAlert className="h-4 w-4 text-teal-600" />
+                      <div className="p-2 rounded-lg bg-muted">
+                        <Icon className="h-4 w-4 text-muted-foreground" />
                       </div>
-                      <div>
-                        <CardTitle className="text-base">{filter.name}</CardTitle>
-                        <CardDescription>{filter.domains.length} domain{filter.domains.length !== 1 ? 's' : ''}</CardDescription>
-                      </div>
+                      <CardTitle className="text-base">{preset.name}</CardTitle>
                     </div>
-                    <Switch checked={filter.enabled} onCheckedChange={() => toggleFilter(filter)} />
+                    <CategoryBadge category={preset.category} />
                   </div>
+                  <CardDescription className="mt-2">{preset.description}</CardDescription>
                 </CardHeader>
-                <CardContent className="space-y-3">
+                <CardContent>
                   <div className="flex items-center justify-between">
-                    <Badge variant="outline" className={cn('text-xs font-medium', catInfo.color)}>
-                      {catInfo.label}
-                    </Badge>
-                    <Badge variant={filter.enabled ? 'default' : 'secondary'} className="text-xs">
-                      {filter.enabled ? 'Active' : 'Disabled'}
-                    </Badge>
-                  </div>
-
-                  {/* Domain Preview */}
-                  {filter.domains.length > 0 && (
-                    <div className="space-y-1">
-                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">Domains</p>
-                      <div className="max-h-24 overflow-y-auto space-y-0.5">
-                        {filter.domains.slice(0, 5).map((domain, idx) => (
-                          <div key={idx} className="text-xs font-mono text-muted-foreground truncate">
-                            {domain}
-                          </div>
-                        ))}
-                        {filter.domains.length > 5 && (
-                          <div className="text-xs text-muted-foreground/60">
-                            +{filter.domains.length - 5} more
-                          </div>
-                        )}
-                      </div>
+                    <div className="text-xs text-muted-foreground">
+                      {preset.rules.length} rule{preset.rules.length !== 1 ? 's' : ''}
                     </div>
-                  )}
-
-                  {/* Actions */}
-                  <div className="flex items-center gap-1 pt-2 border-t">
-                    <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => openEditDialog(filter)}>
-                      <Edit2 className="h-3 w-3 mr-1" />
-                      Edit Domains
-                    </Button>
-                    <div className="flex-1" />
-                    <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => deleteFilter(filter.id)}>
-                      <Trash2 className="h-3.5 w-3.5 text-destructive" />
+                    <Button size="sm" onClick={() => setApplyId(preset.id)}>
+                      <Zap className="h-3.5 w-3.5 mr-1" />
+                      Apply
                     </Button>
                   </div>
                 </CardContent>
@@ -2871,87 +2071,55 @@ function ContentFilterTab() {
         </div>
       )}
 
-      {/* Edit Domains Dialog */}
-      <Dialog open={editDialogOpen} onOpenChange={setEditDialogOpen}>
-        <DialogContent className="max-w-lg">
-          <DialogHeader>
-            <DialogTitle>Edit Domains — {selectedFilter?.name}</DialogTitle>
-            <DialogDescription>One domain per line. These domains will be blocked when the filter is active.</DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <Label>Category</Label>
-              <Badge variant="outline" className={cn('text-xs font-medium', selectedFilter && getCategoryInfo(selectedFilter.category).color)}>
-                {selectedFilter && getCategoryInfo(selectedFilter.category).label}
-              </Badge>
-            </div>
-            <div className="space-y-2">
-              <Label>Domains (one per line)</Label>
-              <Textarea
-                value={editFilterDomains}
-                onChange={e => setEditFilterDomains(e.target.value)}
-                placeholder={"facebook.com\ninstagram.com\ntiktok.com"}
-                className="min-h-[200px] font-mono text-sm"
-              />
-              <p className="text-xs text-muted-foreground">
-                {editFilterDomains.split('\n').filter(d => d.trim()).length} domain(s)
-              </p>
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setEditDialogOpen(false)}>Cancel</Button>
-            <Button onClick={saveFilterDomains} disabled={saving}>
-              {saving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-              Save Domains
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Add Filter Dialog */}
-      <Dialog open={addDialogOpen} onOpenChange={setAddDialogOpen}>
+      {/* Apply Preset Dialog */}
+      <Dialog open={!!applyId} onOpenChange={() => { setApplyId(null); setSourceIp(''); }}>
         <DialogContent className="max-w-md">
           <DialogHeader>
-            <DialogTitle>Add Content Filter</DialogTitle>
-            <DialogDescription>Create a new content filter category for blocking websites</DialogDescription>
+            <DialogTitle>Apply Preset</DialogTitle>
+            <DialogDescription>
+              Review and apply the selected preset template.
+            </DialogDescription>
           </DialogHeader>
-          <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <Label>Filter Name</Label>
-              <Input
-                value={newFilter.name}
-                onChange={e => setNewFilter(p => ({ ...p, name: e.target.value }))}
-                placeholder="e.g. Social Media Block"
-              />
-            </div>
-            <div className="space-y-2">
-              <Label>Category</Label>
-              <Select value={newFilter.category} onValueChange={v => setNewFilter(p => ({ ...p, category: v }))}>
-                <SelectTrigger>
-                  <SelectValue placeholder="Select category" />
-                </SelectTrigger>
-                <SelectContent>
-                  {CONTENT_CATEGORIES.map(cat => (
-                    <SelectItem key={cat.value} value={cat.value}>
-                      {cat.label}
-                    </SelectItem>
+          {selectedPreset && (
+            <div className="space-y-4 py-4">
+              <div className="space-y-3 p-3 rounded-lg bg-muted/50">
+                <div className="flex items-center gap-2">
+                  <span className="font-semibold">{selectedPreset.name}</span>
+                  <CategoryBadge category={selectedPreset.category} />
+                </div>
+                <p className="text-sm text-muted-foreground">{selectedPreset.description}</p>
+                <div className="space-y-1">
+                  <p className="text-xs font-medium text-muted-foreground">Rules to be created:</p>
+                  {selectedPreset.rules.map((rule, i) => (
+                    <div key={i} className="text-xs font-mono text-muted-foreground flex items-center gap-2">
+                      <Badge variant="outline" className="text-[10px]">{rule.protocol.toUpperCase()}</Badge>
+                      <span>port {rule.destPort}</span>
+                      <ActionBadge action={rule.action} />
+                    </div>
                   ))}
-                </SelectContent>
-              </Select>
+                </div>
+              </div>
+              <div className="space-y-2">
+                <Label>Source IP (optional)</Label>
+                <Input
+                  value={sourceIp}
+                  onChange={(e) => setSourceIp(e.target.value)}
+                  placeholder="e.g. 10.0.0.50"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Restrict these rules to a specific source IP or CIDR. Leave empty for any source.
+                </p>
+              </div>
             </div>
-            <div className="flex items-center justify-between">
-              <Label>Enabled</Label>
-              <Switch
-                checked={newFilter.enabled}
-                onCheckedChange={c => setNewFilter(p => ({ ...p, enabled: c }))}
-              />
-            </div>
-          </div>
+          )}
           <DialogFooter>
-            <Button variant="outline" onClick={() => setAddDialogOpen(false)}>Cancel</Button>
-            <Button onClick={createFilter} disabled={!newFilter.name || saving}>
-              {saving && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
-              Create Filter
+            <Button variant="outline" onClick={() => { setApplyId(null); setSourceIp(''); }}>
+              Cancel
+            </Button>
+            <Button onClick={applyPreset} disabled={applying}>
+              {applying && <Loader2 className="h-4 w-4 mr-2 animate-spin" />}
+              <Zap className="h-4 w-4 mr-2" />
+              Confirm Apply
             </Button>
           </DialogFooter>
         </DialogContent>
