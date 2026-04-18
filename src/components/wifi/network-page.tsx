@@ -1217,14 +1217,17 @@ export default function NetworkPage() {
 
   const handleDeleteVlan = async (id: string) => {
     try {
-      // Use the OS endpoint to actually delete the nmcli connection
-      const res = await fetch(`/api/network/os/vlans?name=${encodeURIComponent(id)}`, { method: 'DELETE' });
+      // Use the DB endpoint which also handles OS-level nmcli deletion
+      // The OS-only endpoint (/api/network/os/vlans) expects a connection name,
+      // but we have a DB CUID — so use the DB endpoint that resolves CUID → subInterface → nmcli
+      const res = await fetch(`/api/wifi/network/vlans/${encodeURIComponent(id)}`, { method: 'DELETE' });
       const result = await res.json();
       if (result.success) {
-        toast({ title: 'VLAN Deleted', description: 'The VLAN has been removed.' });
+        toast({ title: 'VLAN Deleted', description: result.message || 'The VLAN has been removed.' });
         setVlans(prev => prev.filter(v => v.id !== id));
-        // Refresh interfaces to pick up the deletion
+        // Refresh interfaces and VLAN list to pick up the deletion
         fetchInterfaces();
+        fetchVlans();
       } else {
         toast({ title: 'Error', description: result.error?.message || 'Failed to delete VLAN', variant: 'destructive' });
       }

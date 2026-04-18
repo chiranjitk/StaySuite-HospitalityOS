@@ -32,10 +32,15 @@ async function resolveVlan(id: string, tenantId: string) {
   return vlan;
 }
 
-/** Inline fallback: delete VLAN via raw nmcli commands */
-function fallbackDeleteVlan(ifaceName: string): void {
-  execSync(`sudo nmcli con down "${ifaceName}" 2>/dev/null || true`, { encoding: 'utf-8', timeout: 10000 });
-  execSync(`sudo nmcli con delete "${ifaceName}" 2>/dev/null`, { encoding: 'utf-8', timeout: 10000 });
+/** Inline fallback: delete VLAN via raw nmcli commands — never throws */
+function fallbackDeleteVlan(ifaceName: string): { deleted: boolean; message: string } {
+  try { execSync(`sudo nmcli con down "${ifaceName}" 2>/dev/null || true`, { encoding: 'utf-8', timeout: 10000 }); } catch {}
+  try {
+    execSync(`sudo nmcli con delete "${ifaceName}" 2>/dev/null || true`, { encoding: 'utf-8', timeout: 10000 });
+    return { deleted: true, message: '' };
+  } catch (e: any) {
+    return { deleted: false, message: e.stderr?.trim() || e.message };
+  }
 }
 
 // GET /api/wifi/network/vlans/[id] - Get single VLAN
@@ -147,22 +152,13 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
     const existing = await resolveVlan(id, tenantId);
 
     if (!existing) {
-      // Even if not in DB, try to remove the OS-level VLAN interface
-      try {
-        nmcliDeleteVlan(id);
-        return NextResponse.json({ success: true, message: `VLAN interface ${id} removed from OS.` });
-      } catch (err) {
-        // nmcli wrapper failed, try inline fallback
-        try {
-          fallbackDeleteVlan(id);
-          return NextResponse.json({ success: true, message: `VLAN interface ${id} removed from OS via fallback.` });
-        } catch (fbErr) {
-          console.error(`Failed to delete VLAN ${id} via fallback:`, fbErr);
-        }
-      }
+      // Not in DB — try OS-level removal and report
+      const fb = fallbackDeleteVlan(id);
       return NextResponse.json(
-        { success: false, error: { code: 'NOT_FOUND', message: 'VLAN not found in DB or OS' } },
-        { status: 404 },
+        fb.deleted
+          ? { success: true, message: `VLAN interface ${id} removed from OS.` }
+          : { success: false, error: { code: 'NOT_FOUND', message: 'VLAN not found in DB or OS' } },
+        { status: fb.deleted ? 200 : 404 },
       );
     }
 
@@ -179,23 +175,19 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
       );
     }
 
-    // Remove from OS via nmcli wrapper (with inline fallback)
+    // Best-effort OS removal (non-throwing)
     const ifaceName = existing.subInterface;
     try {
       nmcliDeleteVlan(ifaceName);
     } catch (err) {
-      console.warn(`OS VLAN removal failed for ${ifaceName} via nmcli wrapper:`, err instanceof Error ? err.message : err);
-      // Inline fallback
-      try {
-        fallbackDeleteVlan(ifaceName);
-      } catch (fbErr) {
-        console.error(`Failed to delete VLAN ${ifaceName} via fallback:`, fbErr);
-      }
+      console.warn(`OS VLAN removal failed for ${ifaceName}:`, err instanceof Error ? err.message : err);
+      fallbackDeleteVlan(ifaceName);
     }
 
+    // Always remove from DB (even if OS removal failed — phantom VLAN entry)
     await db.vlanConfig.delete({ where: { id: existing.id } });
 
-    return NextResponse.json({ success: true, message: `VLAN ${ifaceName} deleted from DB and OS.` });
+    return NextResponse.json({ success: true, message: `VLAN ${ifaceName} deleted.` });
   } catch (error) {
     console.error('Error deleting VLAN:', error);
     return NextResponse.json(
