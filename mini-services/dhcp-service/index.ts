@@ -144,10 +144,14 @@ function subnetToPrefix(subnet: string): number {
 }
 
 function prefixToNetmask(prefix: number): string {
-  if (prefix === 16) return '255.255.0.0';
-  if (prefix === 24) return '255.255.255.0';
-  if (prefix === 8) return '255.0.0.0';
-  return '255.255.255.0';
+  // Correctly compute netmask for any prefix (0-32)
+  const mask = prefix === 0 ? 0 : (~0 << (32 - prefix)) >>> 0;
+  return [
+    (mask >>> 24) & 0xFF,
+    (mask >>> 16) & 0xFF,
+    (mask >>> 8) & 0xFF,
+    mask & 0xFF,
+  ].join('.');
 }
 
 function generateTag(name: string, id: string): string {
@@ -163,6 +167,31 @@ function ipToSubnetId(ip: string, subnets: any[]): string {
     if (ipInSubnet(ip, network, mask)) return sub.id;
   }
   return 'unknown';
+}
+
+function getSystemInterfaces(): Array<{ name: string; ip: string; prefix: number }> {
+  try {
+    const result = safeExec("ip -4 addr show | awk '/^[0-9]+:/{iface=$2; gsub(/:/,\"\",iface)} /inet /{split($2,a,\"/\"); print iface\",\"a[1]\",\"a[2]}'");
+    return result.trim().split('\n').filter(Boolean).map((line: string) => {
+      const parts = line.split(',');
+      return { name: parts[0] || '', ip: parts[1] || '', prefix: parseInt(parts[2]) || 24 };
+    });
+  } catch {
+    return [];
+  }
+}
+
+function findInterfaceForSubnet(subnetCidr: string, interfaces: Array<{ name: string; ip: string; prefix: number }>): string {
+  const network = subnetToNetwork(subnetCidr);
+  const prefix = subnetToPrefix(subnetCidr);
+  const netmask = prefixToNetmask(prefix);
+
+  for (const iface of interfaces) {
+    if (iface.ip && ipInSubnet(iface.ip, network, netmask)) {
+      return iface.name;
+    }
+  }
+  return '';
 }
 
 function ipInSubnet(ip: string, network: string, mask: string): boolean {
@@ -271,6 +300,28 @@ function generateConfig(): { success: boolean; message: string; lines: number } 
     config += `# Last updated: ${new Date().toISOString()}\n`;
     config += `# DO NOT EDIT MANUALLY - Managed by StaySuite dhcp-service\n\n`;
 
+    // Auto-detect system interfaces for subnet binding
+    const systemInterfaces = getSystemInterfaces();
+    const seenInterfaces = new Set<string>();
+
+    // Interface bindings — only bind to interfaces that have IPs in our subnets
+    if (subnets.length > 0) {
+      config += `# ─────────────────────────────────────────────\n`;
+      config += `# Interface Bindings\n`;
+      config += `# ─────────────────────────────────────────────\n\n`;
+      config += `bind-interfaces\n`;
+
+      for (const sub of subnets) {
+        const cidr = subnetToCidr(sub.subnet);
+        const ifaceName = findInterfaceForSubnet(cidr, systemInterfaces);
+        if (ifaceName && !seenInterfaces.has(ifaceName)) {
+          config += `interface=${ifaceName}\n`;
+          seenInterfaces.add(ifaceName);
+        }
+      }
+      config += `\n`;
+    }
+
     // DHCP subnets
     if (subnets.length > 0) {
       config += `# ─────────────────────────────────────────────\n`;
@@ -278,30 +329,29 @@ function generateConfig(): { success: boolean; message: string; lines: number } 
       config += `# ─────────────────────────────────────────────\n\n`;
 
       for (const sub of subnets) {
-        const tag = generateTag(sub.name, sub.id);
         const cidr = subnetToCidr(sub.subnet);
         const netmask = prefixToNetmask(subnetToPrefix(cidr));
         config += `# Subnet: ${sub.name} (${cidr})\n`;
         config += `# ID: ${sub.id}\n`;
 
-        // dhcp-range: set:<tag>,<start>,<end>,<netmask>,<lease>
+        // dhcp-range: <start>,<end>,<netmask>,<lease>
         const leaseDisplay = leaseSecondsToDisplay(sub.leaseTime || 3600);
-        config += `dhcp-range=set:${tag},${sub.poolStart},${sub.poolEnd},${netmask},${leaseDisplay}\n`;
+        config += `dhcp-range=${sub.poolStart},${sub.poolEnd},${netmask},${leaseDisplay}\n`;
 
         // Gateway (router option)
         if (sub.gateway) {
-          config += `dhcp-option=set:${tag},option:router,${sub.gateway}\n`;
+          config += `dhcp-option=option:router,${sub.gateway}\n`;
         }
 
         // DNS servers
         const dns = parseDnsList(sub.dnsServers);
         if (dns.length > 0) {
-          config += `dhcp-option=set:${tag},option:dns-server,${dns.join(',')}\n`;
+          config += `dhcp-option=option:dns-server,${dns.join(',')}\n`;
         }
 
         // Domain name
         if (sub.domainName) {
-          config += `dhcp-option=set:${tag},option:domain-name,${sub.domainName}\n`;
+          config += `dhcp-option=option:domain-name,${sub.domainName}\n`;
         }
 
         config += `\n`;
@@ -327,8 +377,7 @@ function generateConfig(): { success: boolean; message: string; lines: number } 
       }
     }
 
-    // Interface bindings are managed by NetworkManager / .nmconnection files
-    // dnsmasq listens on all interfaces by default; VLAN interfaces are created by NM
+    // Interface auto-detected above — no manual interface management needed
 
     fs.writeFileSync(DNSMASQ_CONF_FILE, config, 'utf-8');
     const lineCount = config.split('\n').filter((l: string) => l.trim() && !l.startsWith('#')).length;
@@ -611,16 +660,18 @@ app.get('/api/subnets', (c) => {
   try {
     const subnets = db.query('SELECT * FROM DhcpSubnet ORDER BY vlanId ASC, name ASC').all() as any[];
     const leases = parseLeasesFile();
+    const systemInterfaces = getSystemInterfaces();
 
     const enriched = subnets.map((sub: any) => {
       const dns = parseDnsList(sub.dnsServers);
       const activeLeases = leases.filter((l: any) => l.subnetId === sub.id && l.state === 'active').length;
       const cidr = subnetToCidr(sub.subnet);
       const netmask = prefixToNetmask(subnetToPrefix(cidr));
+      const detectedInterface = findInterfaceForSubnet(cidr, systemInterfaces);
       return {
         id: sub.id,
         name: sub.name,
-        interface: '',
+        interface: detectedInterface,
         tag: generateTag(sub.name, sub.id),
         cidr,
         gateway: sub.gateway || '',
