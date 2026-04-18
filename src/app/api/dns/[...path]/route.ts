@@ -26,7 +26,7 @@ async function proxyRequest(request: NextRequest, method: string) {
       .replace('/api/dns/', '')
       .replace('/api/dns', '');
     const searchParams = request.nextUrl.searchParams.toString();
-    const targetUrl = `/?XTransformPort=${DNS_SERVICE_PORT}/api/${pathSegments}${searchParams ? '?' + searchParams : ''}`;
+    const targetUrl = `/api/${pathSegments}?XTransformPort=${DNS_SERVICE_PORT}${searchParams ? '&' + searchParams : ''}`;
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',

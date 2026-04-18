@@ -34,7 +34,7 @@ async function proxyRequest(request: NextRequest, method: string) {
       .replace('/api/nftables/', '')
       .replace('/api/nftables', '');
     const searchParams = request.nextUrl.searchParams.toString();
-    const targetUrl = `/?XTransformPort=${NFTABLES_SERVICE_PORT}/api/${pathSegments}${searchParams ? '?' + searchParams : ''}`;
+    const targetUrl = `/api/${pathSegments}?XTransformPort=${NFTABLES_SERVICE_PORT}${searchParams ? '&' + searchParams : ''}`;
 
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
