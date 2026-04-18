@@ -252,7 +252,7 @@ export default function DnsPage() {
 
   const fetchStatus = useCallback(async () => {
     try {
-      const s = await apiFetch<DnsStatus>('/api/status');
+      const s = await apiFetch<DnsStatus>('/status');
       setStatus(s);
     } catch {
       // silent
@@ -273,7 +273,7 @@ export default function DnsPage() {
 
   const handleQuickAction = async (action: string) => {
     try {
-      await apiMutate(`/api/service/${action}`, {});
+      await apiMutate(`/service/${action}`, {});
       await fetchStatus();
     } catch {
       // silent
@@ -342,7 +342,7 @@ export default function DnsPage() {
         <Separator orientation="vertical" className="h-5" />
         <Button size="sm" variant="outline" className="h-7 text-xs gap-1" onClick={async () => {
           try {
-            await apiMutate('/api/sync', {});
+            await apiMutate('/sync', {});
             await fetchStatus();
           } catch { /* silent */ }
         }}>
@@ -350,7 +350,7 @@ export default function DnsPage() {
         </Button>
         <Button size="sm" variant="outline" className="h-7 text-xs gap-1" onClick={async () => {
           try {
-            await apiMutate('/api/cache/flush', {});
+            await apiMutate('/cache/flush', {});
             await fetchStatus();
           } catch { /* silent */ }
         }}>
@@ -411,7 +411,7 @@ function ServerTab() {
 
   const fetchData = useCallback(async () => {
     try {
-      const [s, f] = await Promise.all([apiFetch<DnsStatus>('/api/status'), apiFetch<DnsForwarder[]>('/api/forwarders')]);
+      const [s, f] = await Promise.all([apiFetch<DnsStatus>('/status'), apiFetch<DnsForwarder[]>('/forwarders')]);
       setStatus(s);
       setForwarders(f);
     } catch (error) {
@@ -426,7 +426,7 @@ function ServerTab() {
   const handleAction = async (action: string) => {
     setActionLoading(true);
     try {
-      await apiMutate(`/api/service/${action}`, {});
+      await apiMutate(`/service/${action}`, {});
       toast({ title: `DNS service ${action}ed`, description: `dnsmasq ${action} initiated` });
       await fetchData();
     } catch (error: unknown) {
@@ -438,7 +438,7 @@ function ServerTab() {
 
   const handleAddForwarder = async () => {
     try {
-      await apiMutate('/api/forwarders', newFwd);
+      await apiMutate('/forwarders', newFwd);
       toast({ title: 'Forwarder added', description: `${newFwd.address}:${newFwd.port}` });
       setAddFwdOpen(false);
       setNewFwd({ address: '', port: 53, description: '' });
@@ -450,7 +450,7 @@ function ServerTab() {
 
   const handleDeleteForwarder = async (id: string) => {
     try {
-      await apiDelete(`/api/forwarders/${id}`);
+      await apiDelete(`/forwarders/${id}`);
       toast({ title: 'Forwarder removed' });
       fetchData();
     } catch (error: unknown) {
@@ -609,7 +609,7 @@ function ZonesTab() {
 
   const fetchZones = useCallback(async () => {
     try {
-      const [z, r] = await Promise.all([apiFetch<DnsZone[]>('/api/zones'), apiFetch<DnsRecord[]>('/api/records')]);
+      const [z, r] = await Promise.all([apiFetch<DnsZone[]>('/zones'), apiFetch<DnsRecord[]>('/records')]);
       setZones(z);
       setRecords(r);
     } catch { /* silent */ } finally { setLoading(false); }
@@ -625,10 +625,10 @@ function ZonesTab() {
   const handleSave = async () => {
     try {
       if (editZone) {
-        await apiMutate(`/api/zones/${editZone.id}`, form, 'PUT');
+        await apiMutate(`/zones/${editZone.id}`, form, 'PUT');
         toast({ title: 'Zone updated' });
       } else {
-        await apiMutate('/api/zones', form);
+        await apiMutate('/zones', form);
         toast({ title: 'Zone created' });
       }
       setDialogOpen(false);
@@ -643,7 +643,7 @@ function ZonesTab() {
   const handleDelete = async (id: string) => {
     setConfirmAction(() => async () => {
       try {
-        await apiDelete(`/api/zones/${id}`);
+        await apiDelete(`/zones/${id}`);
         toast({ title: 'Zone deleted' });
         fetchZones();
       } catch (error: unknown) {
@@ -658,7 +658,7 @@ function ZonesTab() {
     if (selectedIds.size === 0) return;
     setConfirmAction(() => async () => {
       try {
-        await apiMutate('/api/zones/bulk-delete', { ids: Array.from(selectedIds) });
+        await apiMutate('/zones/bulk-delete', { ids: Array.from(selectedIds) });
         toast({ title: `${selectedIds.size} zones deleted` });
         setSelectedIds(new Set());
         fetchZones();
@@ -892,7 +892,7 @@ function RecordsTab() {
 
   const fetchData = useCallback(async () => {
     try {
-      const [r, z] = await Promise.all([apiFetch<DnsRecord[]>('/api/records'), apiFetch<DnsZone[]>('/api/zones')]);
+      const [r, z] = await Promise.all([apiFetch<DnsRecord[]>('/records'), apiFetch<DnsZone[]>('/zones')]);
       setRecords(r);
       setZones(z);
     } catch { /* silent */ } finally { setLoading(false); }
@@ -914,10 +914,10 @@ function RecordsTab() {
     try {
       const body = { ...form, priority: form.priority ? parseInt(form.priority) : null };
       if (editRecord) {
-        await apiMutate(`/api/records/${editRecord.id}`, body, 'PUT');
+        await apiMutate(`/records/${editRecord.id}`, body, 'PUT');
         toast({ title: 'Record updated' });
       } else {
-        await apiMutate('/api/records', body);
+        await apiMutate('/records', body);
         toast({ title: 'Record created' });
       }
       setDialogOpen(false);
@@ -932,7 +932,7 @@ function RecordsTab() {
   const handleDelete = async (id: string) => {
     setConfirmAction(() => async () => {
       try {
-        await apiDelete(`/api/records/${id}`);
+        await apiDelete(`/records/${id}`);
         toast({ title: 'Record deleted' });
         fetchData();
       } catch (error: unknown) {
@@ -947,7 +947,7 @@ function RecordsTab() {
     if (selectedIds.size === 0) return;
     setConfirmAction(() => async () => {
       try {
-        await apiMutate('/api/records/bulk-delete', { ids: Array.from(selectedIds) });
+        await apiMutate('/records/bulk-delete', { ids: Array.from(selectedIds) });
         toast({ title: `${selectedIds.size} records deleted` });
         setSelectedIds(new Set());
         fetchData();
@@ -1181,7 +1181,7 @@ function RedirectsTab() {
 
   const fetchRedirects = useCallback(async () => {
     try {
-      const data = await apiFetch<DnsRedirect[]>('/api/redirects');
+      const data = await apiFetch<DnsRedirect[]>('/redirects');
       setRedirects(data);
     } catch { /* silent */ } finally { setLoading(false); }
   }, []);
@@ -1191,10 +1191,10 @@ function RedirectsTab() {
   const handleSave = async () => {
     try {
       if (editRedirect) {
-        await apiMutate(`/api/redirects/${editRedirect.id}`, form, 'PUT');
+        await apiMutate(`/redirects/${editRedirect.id}`, form, 'PUT');
         toast({ title: 'Redirect updated' });
       } else {
-        await apiMutate('/api/redirects', form);
+        await apiMutate('/redirects', form);
         toast({ title: 'Redirect created' });
       }
       setDialogOpen(false);
@@ -1209,7 +1209,7 @@ function RedirectsTab() {
   const handleDelete = async (id: string) => {
     setConfirmAction(() => async () => {
       try {
-        await apiDelete(`/api/redirects/${id}`);
+        await apiDelete(`/redirects/${id}`);
         toast({ title: 'Redirect deleted' });
         fetchRedirects();
       } catch (error: unknown) {
@@ -1366,7 +1366,7 @@ function DhcpDnsTab() {
 
   const fetchData = useCallback(async () => {
     try {
-      const data = await apiFetch<DhcpDnsEntry[]>('/api/dhcp-dns');
+      const data = await apiFetch<DhcpDnsEntry[]>('/dhcp-dns');
       setEntries(data);
     } catch { /* silent */ } finally { setLoading(false); }
   }, []);
@@ -1458,7 +1458,7 @@ function CacheTab() {
 
   const fetchCache = useCallback(async () => {
     try {
-      const data = await apiFetch<{ size: number; maxSize: number; inserts: number; evictions: number; hitRate: string }>('/api/cache');
+      const data = await apiFetch<{ size: number; maxSize: number; inserts: number; evictions: number; hitRate: string }>('/cache');
       setCacheStats(data);
     } catch { /* silent */ } finally { setLoading(false); }
   }, []);
@@ -1467,7 +1467,7 @@ function CacheTab() {
 
   const handleFlush = async () => {
     try {
-      await apiMutate('/api/cache/flush', {});
+      await apiMutate('/cache/flush', {});
       toast({ title: 'Cache flushed', description: 'DNS cache has been cleared' });
       fetchCache();
     } catch (error: unknown) {
@@ -1574,7 +1574,7 @@ function ActivityTab() {
 
   const fetchLogs = useCallback(async () => {
     try {
-      const data = await apiFetch<ActivityLogEntry[]>('/api/activity');
+      const data = await apiFetch<ActivityLogEntry[]>('/activity');
       setLogs(data);
     } catch { /* silent */ } finally { setLoading(false); }
   }, []);
@@ -1688,7 +1688,7 @@ function ConfigTab() {
 
   const fetchConfig = useCallback(async () => {
     try {
-      const data = await apiFetch<{ path: string; content: string }>('/api/config');
+      const data = await apiFetch<{ path: string; content: string }>('/config');
       setConfig(data.content);
     } catch { /* silent */ } finally { setLoading(false); }
   }, []);
@@ -1698,7 +1698,7 @@ function ConfigTab() {
   const handleSave = async () => {
     setSaving(true);
     try {
-      await apiMutate('/api/config', { content: config });
+      await apiMutate('/config', { content: config });
       toast({ title: 'Config saved', description: 'dnsmasq configuration updated and reloaded' });
     } catch (error: unknown) {
       toast({ title: 'Error', description: error instanceof Error ? error.message : 'Unknown error', variant: 'destructive' });
@@ -1709,7 +1709,7 @@ function ConfigTab() {
 
   const handleSync = async () => {
     try {
-      await apiMutate('/api/sync', {});
+      await apiMutate('/sync', {});
       toast({ title: 'Sync complete', description: 'Database synced to dnsmasq config' });
       fetchConfig();
     } catch (error: unknown) {
