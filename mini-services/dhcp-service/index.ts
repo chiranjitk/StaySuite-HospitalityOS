@@ -130,6 +130,42 @@ function computePoolSize(start: string, end: string): number {
   } catch { return 0; }
 }
 
+function ipToNum(ip: string): number {
+  return ip.split('.').map(Number).reduce((a: number, b: number) => (a << 8) + b, 0) >>> 0;
+}
+
+function numToIp(n: number): string {
+  return `${(n >>> 24) & 0xFF}.${(n >>> 16) & 0xFF}.${(n >>> 8) & 0xFF}.${n & 0xFF}`;
+}
+
+/** Compute the smallest CIDR that covers poolStart..poolEnd, and auto-repair DB */
+function deriveSubnetCidr(sub: any): string {
+  if (sub.subnet) return sub.subnet;
+  if (!sub.poolStart || !sub.poolEnd) return '';
+
+  const startNum = ipToNum(sub.poolStart);
+  const endNum = ipToNum(sub.poolEnd);
+  const networkPart = sub.poolStart.split('.').slice(0, 3).join('.');
+  let detectedPrefix = 24;
+
+  for (let p = 32; p >= 16; p--) {
+    const mask = (~0 << (32 - p)) >>> 0;
+    const net = (startNum & mask) >>> 0;
+    const broadcast = (net | (~mask >>> 0)) >>> 0;
+    if (startNum >= net && endNum <= broadcast) {
+      detectedPrefix = p;
+      break;
+    }
+  }
+
+  const cidr = `${networkPart}.0/${detectedPrefix}`;
+
+  // Auto-repair: write back to DB so future reads don't recompute
+  try { db.run('UPDATE DhcpSubnet SET subnet = ? WHERE id = ?', [cidr, sub.id]); } catch {}
+
+  return cidr;
+}
+
 function subnetToCidr(subnet: string): string {
   // Prisma stores '192.168.1.0/24' format
   return subnet || '192.168.1.0/24';
@@ -329,26 +365,7 @@ function generateConfig(): { success: boolean; message: string; lines: number } 
       config += `# ─────────────────────────────────────────────\n\n`;
 
       for (const sub of subnets) {
-        // Auto-repair: if subnet column is null, compute from pool range
-        let cidr = sub.subnet || '';
-        if (!cidr && sub.poolStart && sub.poolEnd) {
-          cidr = `${sub.poolStart.split('.').slice(0, 3).join('.')}.0/24`;
-          // Try to detect prefix from pool size
-          const poolStart = sub.poolStart.split('.').map(Number).reduce((a: number, b: number) => (a << 8) + b, 0) >>> 0;
-          const poolEnd = sub.poolEnd.split('.').map(Number).reduce((a: number, b: number) => (a << 8) + b, 0) >>> 0;
-          const networkPart = sub.poolStart.split('.').slice(0, 3).join('.');
-          for (let p = 32; p >= 16; p--) {
-            const mask = (~0 << (32 - p)) >>> 0;
-            const net = (poolStart & mask) >>> 0;
-            const broadcast = (net | (~mask >>> 0)) >>> 0;
-            if (poolStart >= net && poolEnd <= broadcast) {
-              cidr = `${networkPart}.0/${p}`;
-              break;
-            }
-          }
-          // Update DB with computed CIDR for future use
-          try { db.run('UPDATE DhcpSubnet SET subnet = ? WHERE id = ?', [cidr, sub.id]); } catch {}
-        }
+        const cidr = deriveSubnetCidr(sub);
         const netmask = prefixToNetmask(subnetToPrefix(cidr));
         config += `# Subnet: ${sub.name} (${cidr})\n`;
         config += `# ID: ${sub.id}\n`;
@@ -437,8 +454,8 @@ function parseLeasesFile(): any[] {
       const lines = content.trim().split('\n').filter((l: string) => l.trim());
       if (lines.length === 0) continue;
 
-      // Get subnets for mapping
-      const subnets = db.query('SELECT id, name, subnet FROM DhcpSubnet WHERE enabled = 1').all() as any[];
+      // Get subnets for mapping (need poolStart/poolEnd for CIDR fallback)
+      const subnets = db.query('SELECT id, name, subnet, poolStart, poolEnd FROM DhcpSubnet WHERE enabled = 1').all() as any[];
 
       return lines.map((line: string) => {
         const parts = line.split(/\s+/);
@@ -455,19 +472,11 @@ function parseLeasesFile(): any[] {
 
         // Match lease IP to a subnet: by CIDR if available, else by pool range
         const sub = subnets.find((s: any) => {
-          if (s.subnet) {
-            const network = subnetToNetwork(s.subnet);
-            const mask = prefixToNetmask(subnetToPrefix(s.subnet));
-            return ipInSubnet(ip, network, mask);
-          }
-          // Fallback: check if IP falls within pool range
-          if (s.poolStart && s.poolEnd) {
-            const ipNum = ip.split('.').reduce((a: number, b: string) => (a << 8) + parseInt(b), 0) >>> 0;
-            const startNum = s.poolStart.split('.').reduce((a: number, b: string) => (a << 8) + parseInt(b), 0) >>> 0;
-            const endNum = s.poolEnd.split('.').reduce((a: number, b: string) => (a << 8) + parseInt(b), 0) >>> 0;
-            return ipNum >= startNum && ipNum <= endNum;
-          }
-          return false;
+          const cidr = deriveSubnetCidr(s);
+          if (!cidr) return false;
+          const network = subnetToNetwork(cidr);
+          const mask = prefixToNetmask(subnetToPrefix(cidr));
+          return ipInSubnet(ip, network, mask);
         });
 
         const validLifetime = expiry > 0 ? 14400 : 0; // default 4h
@@ -698,14 +707,7 @@ app.get('/api/subnets', (c) => {
     const enriched = subnets.map((sub: any) => {
       const dns = parseDnsList(sub.dnsServers);
       const activeLeases = leases.filter((l: any) => l.subnetId === sub.id && l.state === 'active').length;
-      // Derive CIDR: from subnet column if available, else from pool range
-      let cidr = sub.subnet || '';
-      if (!cidr && sub.poolStart) {
-        // Use poolStart + netmask to derive CIDR (netmask column might not exist,
-        // so compute from prefix stored in subnet if available, or assume /24)
-        const prefix = sub.subnet ? subnetToPrefix(sub.subnet) : 24;
-        cidr = `${sub.poolStart.split('.').slice(0, 3).join('.')}.0/${prefix}`;
-      }
+      const cidr = deriveSubnetCidr(sub);
       const netmask = prefixToNetmask(subnetToPrefix(cidr));
       const detectedInterface = findInterfaceForSubnet(cidr, systemInterfaces);
       return {
