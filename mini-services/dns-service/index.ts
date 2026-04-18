@@ -1066,7 +1066,8 @@ app.get('/api/cache', (c) => {
     return c.json({
       success: true,
       data: {
-        size: cacheSize,
+        capacity: cacheSize,        // configured max cache entries
+        entries: 0,                 // actual entries not available (no --dump-cache)
         maxSize: cacheSize,
         inserts: 0,
         evictions: 0,

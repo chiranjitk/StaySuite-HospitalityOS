@@ -262,12 +262,11 @@ export default function DnsPage() {
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { fetchStatus(); }, [fetchStatus]);
 
-  // Auto-refresh every 10 seconds
+  // Auto-refresh status every 15 seconds (only status, no full page reload)
   useEffect(() => {
     const interval = setInterval(() => {
       fetchStatus();
-      setRefreshKey((k) => k + 1);
-    }, 10000);
+    }, 15000);
     return () => clearInterval(interval);
   }, [fetchStatus]);
 
@@ -384,12 +383,12 @@ export default function DnsPage() {
       </div>
 
       {/* Tab Content */}
-      {activeTab === 0 && <ServerTab key={refreshKey} />}
+      {activeTab === 0 && <ServerTab />}
       {activeTab === 1 && <ZonesTab />}
       {activeTab === 2 && <RecordsTab />}
       {activeTab === 3 && <RedirectsTab />}
       {activeTab === 4 && <DhcpDnsTab />}
-      {activeTab === 5 && <CacheTab key={refreshKey} />}
+      {activeTab === 5 && <CacheTab />}
       {activeTab === 6 && <ActivityTab />}
       {activeTab === 7 && <ConfigTab />}
     </div>
@@ -1451,14 +1450,14 @@ function DhcpDnsTab() {
 // ============================================================================
 
 function CacheTab() {
-  const [cacheStats, setCacheStats] = useState<{ size: number; maxSize: number; inserts: number; evictions: number; hitRate: string } | null>(null);
+  const [cacheStats, setCacheStats] = useState<{ capacity: number; entries: number; maxSize: number; inserts: number; evictions: number; hitRate: string; dnsmasqRunning?: boolean; coldQueryMs?: number; hotQueryMs?: number } | null>(null);
   const [loading, setLoading] = useState(true);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const { toast } = useToast();
 
   const fetchCache = useCallback(async () => {
     try {
-      const data = await apiFetch<{ size: number; maxSize: number; inserts: number; evictions: number; hitRate: string }>('/cache');
+      const data = await apiFetch<{ capacity: number; entries: number; maxSize: number; inserts: number; evictions: number; hitRate: string; dnsmasqRunning?: boolean; coldQueryMs?: number; hotQueryMs?: number }>('/cache');
       setCacheStats(data);
     } catch { /* silent */ } finally { setLoading(false); }
   }, []);
@@ -1478,7 +1477,7 @@ function CacheTab() {
 
   if (loading) return <TabSkeleton />;
 
-  const utilization = cacheStats ? Math.round((cacheStats.size / (cacheStats.maxSize || 10000)) * 100) : 0;
+  const utilization = cacheStats && cacheStats.capacity > 0 ? Math.round((cacheStats.entries / cacheStats.capacity) * 100) : 0;
 
   return (
     <div className="space-y-6">
@@ -1491,10 +1490,10 @@ function CacheTab() {
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
-          { label: 'Cached Entries', value: cacheStats?.size || 0, icon: Database, color: 'text-teal-500', bg: 'bg-teal-50 dark:bg-teal-950' },
-          { label: 'Max Cache Size', value: cacheStats?.maxSize || 10000, icon: Server, color: 'text-emerald-500', bg: 'bg-emerald-50 dark:bg-emerald-950' },
+          { label: 'Cache Capacity', value: cacheStats?.capacity || 0, icon: Database, color: 'text-teal-500', bg: 'bg-teal-50 dark:bg-teal-950' },
           { label: 'Status', value: cacheStats?.hitRate || 'N/A', icon: Activity, color: 'text-amber-500', bg: 'bg-amber-50 dark:bg-amber-950', isText: true },
-          { label: 'Evictions', value: cacheStats?.evictions || 0, icon: AlertTriangle, color: 'text-orange-500', bg: 'bg-orange-50 dark:bg-orange-950' },
+          { label: 'Cold Query', value: `${cacheStats?.coldQueryMs || 0}ms`, icon: Clock, color: 'text-blue-500', bg: 'bg-blue-50 dark:bg-blue-950', isText: true },
+          { label: 'Hot Query', value: `${cacheStats?.hotQueryMs || 0}ms`, icon: Zap, color: 'text-green-500', bg: 'bg-green-50 dark:bg-green-950', isText: true },
         ].map((stat) => (
           <Card key={stat.label}>
             <CardContent className="p-4 text-center">
@@ -1518,7 +1517,7 @@ function CacheTab() {
           <div className="space-y-3">
             <div className="flex justify-between py-2 border-b">
               <span className="text-sm text-muted-foreground">Cache Size</span>
-              <span className="text-sm font-medium">{cacheStats?.size || 0} / {cacheStats?.maxSize || 10000}</span>
+              <span className="text-sm font-medium">{cacheStats?.capacity || 0} entries max</span>
             </div>
             <div className="space-y-2">
               <div className="flex justify-between">
@@ -1534,7 +1533,7 @@ function CacheTab() {
             </div>
             <div className="flex justify-between py-2">
               <span className="text-sm text-muted-foreground">Status</span>
-              <Badge variant={cacheStats?.size && cacheStats.size > 0 ? 'default' : 'secondary'} className={cacheStats?.size && cacheStats.size > 0 ? 'bg-emerald-500' : ''}>
+              <Badge variant={cacheStats?.dnsmasqRunning ? 'default' : 'secondary'} className={cacheStats?.dnsmasqRunning ? 'bg-emerald-500' : ''}>
                 {cacheStats?.hitRate || 'Unknown'}
               </Badge>
             </div>
