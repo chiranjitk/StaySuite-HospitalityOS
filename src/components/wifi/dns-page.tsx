@@ -28,7 +28,7 @@ import {
   AlertTriangle, CheckCircle2, XCircle, Save, Search,
   Wifi, FileText, Zap, ChevronDown, ChevronRight, Clock,
   MonitorSmartphone, ArrowRight, Trash,
-  HardDrive, ArrowDownToLine, ArrowUpFromLine, BarChart3,
+  HardDrive, ArrowUpRight,
 } from 'lucide-react';
 
 // ============================================================================
@@ -1451,14 +1451,23 @@ function DhcpDnsTab() {
 // ============================================================================
 
 function CacheTab() {
-  const [cacheStats, setCacheStats] = useState<{ capacity: number; entries: number; maxSize: number; inserts: number; evictions: number; hitRate: string; dnsmasqRunning?: boolean; coldQueryMs?: number; hotQueryMs?: number } | null>(null);
+  type CacheData = {
+    capacity: number; status: string; dnsmasqRunning?: boolean;
+    coldQueryMs?: number; hotQueryMs?: number;
+    upstreamQueries: number; upstreamRetried: number; upstreamFailed: number;
+    nxdomainReplies: number; avgLatencyMs: number;
+    forwarders: { address: string; port: number; queries: number; retried: number; failed: number; nxdomain: number; latency: number }[];
+    poolMemoryUsed: number; poolMemoryMax: number;
+    cacheEntriesAvailable: boolean;
+  };
+  const [cacheStats, setCacheStats] = useState<CacheData | null>(null);
   const [loading, setLoading] = useState(true);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const { toast } = useToast();
 
   const fetchCache = useCallback(async () => {
     try {
-      const data = await apiFetch<{ capacity: number; entries: number; maxSize: number; inserts: number; evictions: number; hitRate: string; dnsmasqRunning?: boolean; coldQueryMs?: number; hotQueryMs?: number }>('/cache');
+      const data = await apiFetch<CacheData>('/cache');
       setCacheStats(data);
     } catch { /* silent */ } finally { setLoading(false); }
   }, []);
@@ -1468,7 +1477,7 @@ function CacheTab() {
   const handleFlush = async () => {
     try {
       await apiMutate('/cache/flush', {});
-      toast({ title: 'Cache flushed', description: 'DNS cache has been cleared' });
+      toast({ title: 'Cache flushed', description: 'DNS cache has been cleared (dnsmasq restarted)' });
       fetchCache();
     } catch (error: unknown) {
       toast({ title: 'Error', description: error instanceof Error ? error.message : 'Unknown error', variant: 'destructive' });
@@ -1478,27 +1487,22 @@ function CacheTab() {
 
   if (loading) return <TabSkeleton />;
 
-  const utilization = cacheStats && cacheStats.capacity > 0 ? Math.round((cacheStats.entries / cacheStats.capacity) * 100) : 0;
-
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h3 className="text-lg font-semibold">DNS Cache</h3>
+        <h3 className="text-lg font-semibold">DNS Cache & Performance</h3>
         <Button size="sm" variant="outline" onClick={() => setConfirmOpen(true)}>
           <RefreshCw className="h-4 w-4 mr-1" /> Flush Cache
         </Button>
       </div>
 
+      {/* Top stats cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
-          { label: 'Cached Entries', value: cacheStats?.entries || 0, icon: Database, color: 'text-teal-500', bg: 'bg-teal-50 dark:bg-teal-950' },
-          { label: 'Capacity', value: cacheStats?.capacity || 0, icon: HardDrive, color: 'text-slate-500', bg: 'bg-slate-50 dark:bg-slate-950' },
-          { label: 'Insertions', value: cacheStats?.inserts || 0, icon: ArrowDownToLine, color: 'text-green-500', bg: 'bg-green-50 dark:bg-green-950' },
-          { label: 'Evictions', value: cacheStats?.evictions || 0, icon: ArrowUpFromLine, color: 'text-red-500', bg: 'bg-red-50 dark:bg-red-950' },
-          { label: 'Status', value: cacheStats?.hitRate || 'N/A', icon: Activity, color: 'text-amber-500', bg: 'bg-amber-50 dark:bg-amber-950', isText: true },
-          { label: 'Cold Query', value: `${cacheStats?.coldQueryMs || 0}ms`, icon: Clock, color: 'text-blue-500', bg: 'bg-blue-50 dark:bg-blue-950', isText: true },
-          { label: 'Hot Query', value: `${cacheStats?.hotQueryMs || 0}ms`, icon: Zap, color: 'text-green-500', bg: 'bg-green-50 dark:bg-green-950', isText: true },
-          { label: 'Utilization', value: `${utilization}%`, icon: BarChart3, color: 'text-purple-500', bg: 'bg-purple-50 dark:bg-purple-950', isText: true },
+          { label: 'Cache Capacity', value: cacheStats?.capacity || 0, icon: Database, color: 'text-teal-500', bg: 'bg-teal-50 dark:bg-teal-950', suffix: ' entries' },
+          { label: 'Cache Status', value: cacheStats?.status || 'N/A', icon: Activity, color: 'text-emerald-500', bg: 'bg-emerald-50 dark:bg-emerald-950', isText: true },
+          { label: 'Upstream Queries', value: cacheStats?.upstreamQueries || 0, icon: ArrowUpRight, color: 'text-blue-500', bg: 'bg-blue-50 dark:bg-blue-950', suffix: '' },
+          { label: 'Avg Latency', value: cacheStats?.avgLatencyMs || 0, icon: Clock, color: 'text-amber-500', bg: 'bg-amber-50 dark:bg-amber-950', suffix: 'ms', isText: true },
         ].map((stat) => (
           <Card key={stat.label}>
             <CardContent className="p-4 text-center">
@@ -1506,7 +1510,11 @@ function CacheTab() {
                 <stat.icon className={`h-5 w-5 ${stat.color}`} />
               </div>
               <p className="text-2xl font-bold">
-                {stat.isText ? stat.value : <AnimatedNumber value={typeof stat.value === 'number' ? stat.value : 0} />}
+                {stat.isText
+                  ? <span className={typeof stat.value === 'string' && stat.value === 'Active' ? 'text-emerald-600' : ''}>{stat.value}</span>
+                  : <AnimatedNumber value={typeof stat.value === 'number' ? stat.value : 0} />
+                }
+                {stat.suffix && typeof stat.value === 'number' && <span className="text-sm font-normal text-muted-foreground ml-1">{stat.suffix}</span>}
               </p>
               <p className="text-xs text-muted-foreground mt-1">{stat.label}</p>
             </CardContent>
@@ -1514,41 +1522,134 @@ function CacheTab() {
         ))}
       </div>
 
+      {/* Cache timing test */}
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Cache Utilization</CardTitle>
+          <CardTitle className="text-base flex items-center gap-2">
+            <Zap className="h-4 w-4 text-amber-500" />
+            Cache Verification (Timing Test)
+          </CardTitle>
+          <CardDescription>DNS queries were sent twice — if the second query is faster, caching is working</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <div className="text-center p-3 rounded-lg bg-blue-50 dark:bg-blue-950">
+              <p className="text-xs text-muted-foreground">Cold Query</p>
+              <p className="text-xl font-bold text-blue-600">{cacheStats?.coldQueryMs || 0}ms</p>
+              <p className="text-xs text-muted-foreground">First lookup (upstream)</p>
+            </div>
+            <div className="text-center p-3 rounded-lg bg-green-50 dark:bg-green-950">
+              <p className="text-xs text-muted-foreground">Hot Query</p>
+              <p className="text-xl font-bold text-green-600">{cacheStats?.hotQueryMs || 0}ms</p>
+              <p className="text-xs text-muted-foreground">Cached lookup</p>
+            </div>
+            <div className="text-center p-3 rounded-lg bg-purple-50 dark:bg-purple-950">
+              <p className="text-xs text-muted-foreground">Speed Improvement</p>
+              <p className="text-xl font-bold text-purple-600">
+                {(cacheStats?.coldQueryMs && cacheStats?.hotQueryMs && cacheStats.coldQueryMs > 0)
+                  ? `${Math.round((1 - cacheStats.hotQueryMs / cacheStats.coldQueryMs) * 100)}%`
+                  : 'N/A'}
+              </p>
+              <p className="text-xs text-muted-foreground">Cache speedup</p>
+            </div>
+            <div className="text-center p-3 rounded-lg bg-emerald-50 dark:bg-emerald-950">
+              <p className="text-xs text-muted-foreground">Status</p>
+              <Badge variant={cacheStats?.dnsmasqRunning ? 'default' : 'secondary'} className={`mt-1 ${cacheStats?.dnsmasqRunning ? 'bg-emerald-500' : ''}`}>
+                {cacheStats?.status || 'Unknown'}
+              </Badge>
+              <p className="text-xs text-muted-foreground mt-1">dnsmasq {cacheStats?.dnsmasqRunning ? 'running' : 'stopped'}</p>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Upstream forwarder stats */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            <Server className="h-4 w-4 text-blue-500" />
+            Upstream Forwarder Statistics
+          </CardTitle>
+          <CardDescription>Real-time stats from dnsmasq via SIGUSR1 signal</CardDescription>
+        </CardHeader>
+        <CardContent>
+          {cacheStats && cacheStats.forwarders.length > 0 ? (
+            <div className="space-y-4">
+              {cacheStats.forwarders.map((fw) => (
+                <div key={`${fw.address}:${fw.port}`} className="p-4 rounded-lg border">
+                  <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center gap-2">
+                      <Globe className="h-4 w-4 text-blue-500" />
+                      <span className="font-medium">{fw.address}:{fw.port}</span>
+                      {fw.failed > 0 && <Badge variant="destructive" className="text-xs">{fw.failed} failures</Badge>}
+                      {fw.failed === 0 && <Badge variant="outline" className="text-xs bg-emerald-50 text-emerald-700">Healthy</Badge>}
+                    </div>
+                    <span className="text-sm text-muted-foreground">Avg: {fw.latency}ms</span>
+                  </div>
+                  <div className="grid grid-cols-2 md:grid-cols-5 gap-3 text-center">
+                    <div>
+                      <p className="text-lg font-bold">{fw.queries}</p>
+                      <p className="text-xs text-muted-foreground">Queries Sent</p>
+                    </div>
+                    <div>
+                      <p className="text-lg font-bold text-amber-600">{fw.retried}</p>
+                      <p className="text-xs text-muted-foreground">Retries</p>
+                    </div>
+                    <div>
+                      <p className="text-lg font-bold text-red-600">{fw.failed}</p>
+                      <p className="text-xs text-muted-foreground">Failed</p>
+                    </div>
+                    <div>
+                      <p className="text-lg font-bold text-slate-500">{fw.nxdomain}</p>
+                      <p className="text-xs text-muted-foreground">NXDomain</p>
+                    </div>
+                    <div>
+                      <p className="text-lg font-bold text-emerald-600">{fw.latency}ms</p>
+                      <p className="text-xs text-muted-foreground">Avg Latency</p>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="text-center py-8 text-muted-foreground">
+              <Server className="h-8 w-8 mx-auto mb-2 opacity-50" />
+              <p>No forwarder stats available</p>
+              <p className="text-xs mt-1">Configure upstream DNS forwarders to see statistics</p>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Memory & Process Info */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            <HardDrive className="h-4 w-4 text-slate-500" />
+            Process Info
+          </CardTitle>
         </CardHeader>
         <CardContent>
           <div className="space-y-3">
             <div className="flex justify-between py-2 border-b">
-              <span className="text-sm text-muted-foreground">Cached Entries</span>
-              <span className="text-sm font-medium">{cacheStats?.entries || 0} / {cacheStats?.capacity || 0}</span>
+              <span className="text-sm text-muted-foreground">Cache Capacity</span>
+              <span className="text-sm font-medium">{cacheStats?.capacity || 0} entries configured</span>
             </div>
             <div className="flex justify-between py-2 border-b">
-              <span className="text-sm text-muted-foreground">Insertions</span>
-              <span className="text-sm font-medium text-green-600">{cacheStats?.inserts || 0}</span>
+              <span className="text-sm text-muted-foreground">Pool Memory Usage</span>
+              <span className="text-sm font-medium">{cacheStats?.poolMemoryUsed || 0} / {cacheStats?.poolMemoryMax || 0} bytes</span>
             </div>
             <div className="flex justify-between py-2 border-b">
-              <span className="text-sm text-muted-foreground">Evictions</span>
-              <span className="text-sm font-medium text-red-600">{cacheStats?.evictions || 0}</span>
+              <span className="text-sm text-muted-foreground">Total Upstream Queries</span>
+              <span className="text-sm font-medium">{cacheStats?.upstreamQueries || 0}</span>
             </div>
-            <div className="space-y-2">
-              <div className="flex justify-between">
-                <span className="text-sm text-muted-foreground">Utilization</span>
-                <span className="text-sm font-medium">{utilization}%</span>
-              </div>
-              <div className="h-3 bg-muted rounded-full overflow-hidden">
-                <div
-                  className="h-full bg-gradient-to-r from-teal-500 to-emerald-500 rounded-full transition-all duration-500"
-                  style={{ width: `${Math.min(utilization, 100)}%` }}
-                />
-              </div>
+            <div className="flex justify-between py-2 border-b">
+              <span className="text-sm text-muted-foreground">NXDomain Replies</span>
+              <span className="text-sm font-medium text-slate-600">{cacheStats?.nxdomainReplies || 0}</span>
             </div>
             <div className="flex justify-between py-2">
-              <span className="text-sm text-muted-foreground">Status</span>
-              <Badge variant={cacheStats?.dnsmasqRunning ? 'default' : 'secondary'} className={cacheStats?.dnsmasqRunning ? 'bg-emerald-500' : ''}>
-                {cacheStats?.hitRate || 'Unknown'}
-              </Badge>
+              <span className="text-sm text-muted-foreground">Retries</span>
+              <span className="text-sm font-medium text-amber-600">{cacheStats?.upstreamRetried || 0}</span>
             </div>
           </div>
         </CardContent>

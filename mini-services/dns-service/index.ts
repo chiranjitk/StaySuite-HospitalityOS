@@ -155,13 +155,27 @@ function isDnsmasqRunning(): boolean {
   } catch { return false; }
 }
 
-function getDnsmasqCacheStats(): { entries: number; inserts: number; evictions: number; size: number } {
-  const defaultResult = { entries: 0, inserts: 0, evictions: 0, size: 0 };
+function getDnsmasqStats(): {
+  upstreamQueries: number; upstreamRetried: number; upstreamFailed: number;
+  nxdomainReplies: number; avgLatencyMs: number; forwarders: { address: string; port: number; queries: number; retried: number; failed: number; nxdomain: number; latency: number }[];
+  dnssecCryptoHwm: number; dnssecSigFails: number;
+  poolMemoryUsed: number; poolMemoryMax: number; poolMemoryAllocated: number;
+  tcpInUse: number; tcpMaxAllowed: number;
+  cacheEntriesAvailable: boolean;
+} {
+  const defaultResult = {
+    upstreamQueries: 0, upstreamRetried: 0, upstreamFailed: 0,
+    nxdomainReplies: 0, avgLatencyMs: 0, forwarders: [],
+    dnssecCryptoHwm: 0, dnssecSigFails: 0,
+    poolMemoryUsed: 0, poolMemoryMax: 0, poolMemoryAllocated: 0,
+    tcpInUse: 0, tcpMaxAllowed: 0,
+    cacheEntriesAvailable: false,
+  };
   try {
     const pid = getDnsmasqPid();
     if (!pid) return defaultResult;
 
-    // Send SIGUSR1 to dnsmasq - it dumps cache stats to syslog
+    // Send SIGUSR1 to dnsmasq — it dumps runtime stats to syslog
     safeExec(`kill -USR1 ${pid} 2>/dev/null`);
 
     // Wait briefly for syslog write
@@ -169,53 +183,72 @@ function getDnsmasqCacheStats(): { entries: number; inserts: number; evictions: 
 
     // Read recent dnsmasq log entries from journalctl or /var/log/messages
     const logOutput = safeExec(
-      'journalctl -t dnsmasq --no-pager -n 10 2>/dev/null || ' +
-      'journalctl --no-pager -n 10 --grep=dnsmasq 2>/dev/null || ' +
-      'tail -10 /var/log/messages 2>/dev/null || ' +
-      'tail -10 /var/log/syslog 2>/dev/null'
+      'journalctl -t dnsmasq --no-pager -n 20 2>/dev/null || ' +
+      'journalctl --no-pager -n 20 --grep=dnsmasq 2>/dev/null || ' +
+      'tail -20 /var/log/messages 2>/dev/null || ' +
+      'tail -20 /var/log/syslog 2>/dev/null'
     );
 
     if (!logOutput) return defaultResult;
 
-    // Parse cache stats from syslog output
-    // dnsmasq formats vary by version, common patterns:
-    // "cache size N, X/N cache entries"
-    // "cache size N, X/N cache entries, I insertions, E evictions"
-    // "X entries, N cache-size"
+    const result = { ...defaultResult };
+
     for (const line of logOutput.split('\n')) {
-      // Pattern: cache size N, X/N cache entries[, I insertions, E evictions]
-      const fullMatch = line.match(/cache size\s+(\d+),\s*(\d+)\/(\d+)\s*cache entries(?:,\s*(\d+)\s*insertions?,\s*(\d+)\s*evictions?)?/);
-      if (fullMatch) {
-        return {
-          entries: parseInt(fullMatch[2]),
-          size: parseInt(fullMatch[3]),
-          inserts: fullMatch[4] ? parseInt(fullMatch[4]) : 0,
-          evictions: fullMatch[5] ? parseInt(fullMatch[5]) : 0,
-        };
+      // "DNSSEC per-query crypto work HWM N"
+      const dnssecCrypto = line.match(/DNSSEC per-query crypto work HWM\s+(\d+)/);
+      if (dnssecCrypto) { result.dnssecCryptoHwm = parseInt(dnssecCrypto[1]); continue; }
+
+      // "DNSSEC per-RRSet signature fails HWM N"
+      const dnssecSig = line.match(/DNSSEC per-RRSet signature fails HWM\s+(\d+)/);
+      if (dnssecSig) { result.dnssecSigFails = parseInt(dnssecSig[1]); continue; }
+
+      // "pool memory in use N, max N, allocated N"
+      const poolMem = line.match(/pool memory in use\s+(\d+),\s*max\s+(\d+),\s*allocated\s+(\d+)/);
+      if (poolMem) {
+        result.poolMemoryUsed = parseInt(poolMem[1]);
+        result.poolMemoryMax = parseInt(poolMem[2]);
+        result.poolMemoryAllocated = parseInt(poolMem[3]);
+        continue;
       }
 
-      // Alternative pattern: X entries, N cache-size
-      const altMatch = line.match(/(\d+)\s+entries?,\s*(\d+)\s*cache-size/);
-      if (altMatch) {
-        return {
-          entries: parseInt(altMatch[1]),
-          size: parseInt(altMatch[2]),
-          inserts: 0,
-          evictions: 0,
-        };
+      // "child processes for TCP requests: in use N, highest since last SIGUSR1 N, max allowed N."
+      const tcpInfo = line.match(/child processes for TCP requests.*in use\s+(\d+).*max allowed\s+(\d+)/);
+      if (tcpInfo) {
+        result.tcpInUse = parseInt(tcpInfo[1]);
+        result.tcpMaxAllowed = parseInt(tcpInfo[2]);
+        continue;
       }
 
-      // Another pattern: dumped cache header with counts
-      const simpleMatch = line.match(/(\d+)\s*\/\s*(\d+)\s*cache/);
-      if (simpleMatch) {
-        return {
-          entries: parseInt(simpleMatch[1]),
-          size: parseInt(simpleMatch[2]),
-          inserts: 0,
-          evictions: 0,
-        };
+      // "server 8.8.8.8#53: queries sent N, retried N, failed N, nxdomain replies N, avg. latency Nms"
+      const serverMatch = line.match(/server\s+([^#]+)#(\d+):\s*queries sent\s+(\d+),\s*retried\s+(\d+),\s*failed\s+(\d+),\s*nxdomain replies?\s+(\d+),\s*avg\.\s*latency\s+(\d+)ms/);
+      if (serverMatch) {
+        result.forwarders.push({
+          address: serverMatch[1],
+          port: parseInt(serverMatch[2]),
+          queries: parseInt(serverMatch[3]),
+          retried: parseInt(serverMatch[4]),
+          failed: parseInt(serverMatch[5]),
+          nxdomain: parseInt(serverMatch[6]),
+          latency: parseInt(serverMatch[7]),
+        });
+        result.upstreamQueries += parseInt(serverMatch[3]);
+        result.upstreamRetried += parseInt(serverMatch[4]);
+        result.upstreamFailed += parseInt(serverMatch[5]);
+        result.nxdomainReplies += parseInt(serverMatch[6]);
+        result.avgLatencyMs = parseInt(serverMatch[7]);
+        continue;
+      }
+
+      // Also check for Debian/Ubuntu style cache entries (in case user upgrades)
+      // "cache size N, X/N cache entries"
+      const cacheMatch = line.match(/cache size\s+(\d+),\s*(\d+)\/(\d+)\s*cache entries/);
+      if (cacheMatch) {
+        result.cacheEntriesAvailable = true;
+        continue;
       }
     }
+
+    return result;
   } catch {}
   return defaultResult;
 }
@@ -1101,17 +1134,30 @@ app.get('/api/cache', (c) => {
     let hitRate = 'Unknown';
     let coldMs = 0;
     let hotMs = 0;
-    let cacheEntries = 0;
-    let cacheInserts = 0;
-    let cacheEvictions = 0;
+
+    // Real dnsmasq stats from SIGUSR1
+    let upstreamQueries = 0;
+    let upstreamRetried = 0;
+    let upstreamFailed = 0;
+    let nxdomainReplies = 0;
+    let avgLatencyMs = 0;
+    let forwarders: { address: string; port: number; queries: number; retried: number; failed: number; nxdomain: number; latency: number }[] = [];
+    let poolMemoryUsed = 0;
+    let poolMemoryMax = 0;
+    let cacheEntriesAvailable = false;
 
     if (running) {
-      // Get real cache stats via SIGUSR1 signal
-      const cacheStats = getDnsmasqCacheStats();
-      cacheEntries = cacheStats.entries;
-      cacheSize = cacheStats.size || 0;
-      cacheInserts = cacheStats.inserts;
-      cacheEvictions = cacheStats.evictions;
+      // Get real dnsmasq runtime stats via SIGUSR1 signal
+      const stats = getDnsmasqStats();
+      upstreamQueries = stats.upstreamQueries;
+      upstreamRetried = stats.upstreamRetried;
+      upstreamFailed = stats.upstreamFailed;
+      nxdomainReplies = stats.nxdomainReplies;
+      avgLatencyMs = stats.avgLatencyMs;
+      forwarders = stats.forwarders;
+      poolMemoryUsed = stats.poolMemoryUsed;
+      poolMemoryMax = stats.poolMemoryMax;
+      cacheEntriesAvailable = stats.cacheEntriesAvailable;
 
       // Test cache with DNS timing: query twice, second should be faster if cached
       const testDomain = 'cache-test.staysuite.internal';
@@ -1138,28 +1184,32 @@ app.get('/api/cache', (c) => {
         hitRate = 'Test failed';
       }
 
-      // Fallback: read cache-size from config file
-      if (!cacheSize) {
-        try {
-          const configContent = fs.readFileSync(DNSMASQ_CONFIG, 'utf-8');
-          const match = configContent.match(/cache-size=(\d+)/);
-          cacheSize = match ? parseInt(match[1]) : 150; // dnsmasq default is 150
-        } catch { cacheSize = 150; }
-      }
+      // Read cache-size from config file
+      try {
+        const configContent = fs.readFileSync(DNSMASQ_CONFIG, 'utf-8');
+        const match = configContent.match(/cache-size=(\d+)/);
+        cacheSize = match ? parseInt(match[1]) : 150; // dnsmasq default is 150
+      } catch { cacheSize = 150; }
     }
 
     return c.json({
       success: true,
       data: {
         capacity: cacheSize,
-        entries: cacheEntries,
-        maxSize: cacheSize,
-        inserts: cacheInserts,
-        evictions: cacheEvictions,
-        hitRate: running ? hitRate : 'dnsmasq not running',
+        status: running ? hitRate : 'dnsmasq not running',
         dnsmasqRunning: running,
         coldQueryMs: coldMs,
         hotQueryMs: hotMs,
+        // Real stats from SIGUSR1
+        upstreamQueries,
+        upstreamRetried,
+        upstreamFailed,
+        nxdomainReplies,
+        avgLatencyMs,
+        forwarders,
+        poolMemoryUsed,
+        poolMemoryMax,
+        cacheEntriesAvailable, // true only on builds that support cache entry counting
       }
     });
   } catch (error) {
