@@ -136,15 +136,88 @@ function safeExec(cmd: string, timeout = 5000): string {
   try { return execSync(cmd, { encoding: 'utf-8', timeout }); } catch { return ''; }
 }
 
+function getDnsmasqPid(): string {
+  try {
+    const result = safeExec('pgrep -x dnsmasq');
+    return result.trim().split('\n')[0] || '';
+  } catch { return ''; }
+}
+
 function isDnsmasqRunning(): boolean {
   try {
-    // Check if dnsmasq process is alive AND listening on port 53
-    const psResult = execSync('ps aux | grep -E "[d]nsmasq"', { encoding: 'utf-8' });
-    if (!psResult.trim()) return false;
+    // Check if dnsmasq process is alive
+    const pid = getDnsmasqPid();
+    if (!pid) return false;
     // Verify it's actually listening on DNS port 53 (UDP)
-    const ssResult = execSync('ss -ulnp | grep ":53 "', { encoding: 'utf-8' });
+    // Use grep -F (fixed string) to avoid regex escape warnings
+    const ssResult = execSync('ss -ulnp | grep -F ":53"', { encoding: 'utf-8' });
     return ssResult.trim().length > 0;
   } catch { return false; }
+}
+
+function getDnsmasqCacheStats(): { entries: number; inserts: number; evictions: number; size: number } {
+  const defaultResult = { entries: 0, inserts: 0, evictions: 0, size: 0 };
+  try {
+    const pid = getDnsmasqPid();
+    if (!pid) return defaultResult;
+
+    // Send SIGUSR1 to dnsmasq - it dumps cache stats to syslog
+    safeExec(`kill -USR1 ${pid} 2>/dev/null`);
+
+    // Wait briefly for syslog write
+    safeExec('sleep 0.3');
+
+    // Read recent dnsmasq log entries from journalctl or /var/log/messages
+    const logOutput = safeExec(
+      'journalctl -t dnsmasq --no-pager -n 10 2>/dev/null || ' +
+      'journalctl --no-pager -n 10 --grep=dnsmasq 2>/dev/null || ' +
+      'tail -10 /var/log/messages 2>/dev/null || ' +
+      'tail -10 /var/log/syslog 2>/dev/null'
+    );
+
+    if (!logOutput) return defaultResult;
+
+    // Parse cache stats from syslog output
+    // dnsmasq formats vary by version, common patterns:
+    // "cache size N, X/N cache entries"
+    // "cache size N, X/N cache entries, I insertions, E evictions"
+    // "X entries, N cache-size"
+    for (const line of logOutput.split('\n')) {
+      // Pattern: cache size N, X/N cache entries[, I insertions, E evictions]
+      const fullMatch = line.match(/cache size\s+(\d+),\s*(\d+)\/(\d+)\s*cache entries(?:,\s*(\d+)\s*insertions?,\s*(\d+)\s*evictions?)?/);
+      if (fullMatch) {
+        return {
+          entries: parseInt(fullMatch[2]),
+          size: parseInt(fullMatch[3]),
+          inserts: fullMatch[4] ? parseInt(fullMatch[4]) : 0,
+          evictions: fullMatch[5] ? parseInt(fullMatch[5]) : 0,
+        };
+      }
+
+      // Alternative pattern: X entries, N cache-size
+      const altMatch = line.match(/(\d+)\s+entries?,\s*(\d+)\s*cache-size/);
+      if (altMatch) {
+        return {
+          entries: parseInt(altMatch[1]),
+          size: parseInt(altMatch[2]),
+          inserts: 0,
+          evictions: 0,
+        };
+      }
+
+      // Another pattern: dumped cache header with counts
+      const simpleMatch = line.match(/(\d+)\s*\/\s*(\d+)\s*cache/);
+      if (simpleMatch) {
+        return {
+          entries: parseInt(simpleMatch[1]),
+          size: parseInt(simpleMatch[2]),
+          inserts: 0,
+          evictions: 0,
+        };
+      }
+    }
+  } catch {}
+  return defaultResult;
 }
 
 function getDnsmasqVersion(): string {
@@ -1028,8 +1101,18 @@ app.get('/api/cache', (c) => {
     let hitRate = 'Unknown';
     let coldMs = 0;
     let hotMs = 0;
+    let cacheEntries = 0;
+    let cacheInserts = 0;
+    let cacheEvictions = 0;
 
     if (running) {
+      // Get real cache stats via SIGUSR1 signal
+      const cacheStats = getDnsmasqCacheStats();
+      cacheEntries = cacheStats.entries;
+      cacheSize = cacheStats.size || 0;
+      cacheInserts = cacheStats.inserts;
+      cacheEvictions = cacheStats.evictions;
+
       // Test cache with DNS timing: query twice, second should be faster if cached
       const testDomain = 'cache-test.staysuite.internal';
       try {
@@ -1055,22 +1138,24 @@ app.get('/api/cache', (c) => {
         hitRate = 'Test failed';
       }
 
-      // Read cache-size from config if possible
-      try {
-        const configContent = fs.readFileSync(DNSMASQ_CONFIG, 'utf-8');
-        const match = configContent.match(/cache-size=(\d+)/);
-        cacheSize = match ? parseInt(match[1]) : 150; // dnsmasq default is 150
-      } catch { cacheSize = 150; }
+      // Fallback: read cache-size from config file
+      if (!cacheSize) {
+        try {
+          const configContent = fs.readFileSync(DNSMASQ_CONFIG, 'utf-8');
+          const match = configContent.match(/cache-size=(\d+)/);
+          cacheSize = match ? parseInt(match[1]) : 150; // dnsmasq default is 150
+        } catch { cacheSize = 150; }
+      }
     }
 
     return c.json({
       success: true,
       data: {
-        capacity: cacheSize,        // configured max cache entries
-        entries: 0,                 // actual entries not available (no --dump-cache)
+        capacity: cacheSize,
+        entries: cacheEntries,
         maxSize: cacheSize,
-        inserts: 0,
-        evictions: 0,
+        inserts: cacheInserts,
+        evictions: cacheEvictions,
         hitRate: running ? hitRate : 'dnsmasq not running',
         dnsmasqRunning: running,
         coldQueryMs: coldMs,
@@ -1084,8 +1169,21 @@ app.get('/api/cache', (c) => {
 
 app.post('/api/cache/flush', (c) => {
   try {
-    const result = reloadDnsmasq();
-    return c.json({ success: result.success, message: result.success ? 'DNS cache flushed' : result.message });
+    if (!isDnsmasqRunning()) {
+      return c.json({ success: false, message: 'dnsmasq is not running' });
+    }
+    // SIGHUP only reloads config but does NOT clear cache.
+    // To actually flush the cache, we must restart dnsmasq.
+    syncConfigToDisk();
+    const stopResult = stopDnsmasq();
+    if (!stopResult.success) {
+      return c.json({ success: false, message: `Failed to stop dnsmasq: ${stopResult.message}` });
+    }
+    const startResult = startDnsmasq();
+    if (!startResult.success) {
+      return c.json({ success: false, message: `Failed to restart dnsmasq: ${startResult.message}` });
+    }
+    return c.json({ success: true, message: 'DNS cache flushed (dnsmasq restarted)', running: true });
   } catch (error) {
     return c.json({ success: false, error: String(error) });
   }

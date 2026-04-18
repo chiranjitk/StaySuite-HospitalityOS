@@ -28,6 +28,7 @@ import {
   AlertTriangle, CheckCircle2, XCircle, Save, Search,
   Wifi, FileText, Zap, ChevronDown, ChevronRight, Clock,
   MonitorSmartphone, ArrowRight, Trash,
+  HardDrive, ArrowDownToLine, ArrowUpFromLine, BarChart3,
 } from 'lucide-react';
 
 // ============================================================================
@@ -1490,10 +1491,14 @@ function CacheTab() {
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
-          { label: 'Cache Capacity', value: cacheStats?.capacity || 0, icon: Database, color: 'text-teal-500', bg: 'bg-teal-50 dark:bg-teal-950' },
+          { label: 'Cached Entries', value: cacheStats?.entries || 0, icon: Database, color: 'text-teal-500', bg: 'bg-teal-50 dark:bg-teal-950' },
+          { label: 'Capacity', value: cacheStats?.capacity || 0, icon: HardDrive, color: 'text-slate-500', bg: 'bg-slate-50 dark:bg-slate-950' },
+          { label: 'Insertions', value: cacheStats?.inserts || 0, icon: ArrowDownToLine, color: 'text-green-500', bg: 'bg-green-50 dark:bg-green-950' },
+          { label: 'Evictions', value: cacheStats?.evictions || 0, icon: ArrowUpFromLine, color: 'text-red-500', bg: 'bg-red-50 dark:bg-red-950' },
           { label: 'Status', value: cacheStats?.hitRate || 'N/A', icon: Activity, color: 'text-amber-500', bg: 'bg-amber-50 dark:bg-amber-950', isText: true },
           { label: 'Cold Query', value: `${cacheStats?.coldQueryMs || 0}ms`, icon: Clock, color: 'text-blue-500', bg: 'bg-blue-50 dark:bg-blue-950', isText: true },
           { label: 'Hot Query', value: `${cacheStats?.hotQueryMs || 0}ms`, icon: Zap, color: 'text-green-500', bg: 'bg-green-50 dark:bg-green-950', isText: true },
+          { label: 'Utilization', value: `${utilization}%`, icon: BarChart3, color: 'text-purple-500', bg: 'bg-purple-50 dark:bg-purple-950', isText: true },
         ].map((stat) => (
           <Card key={stat.label}>
             <CardContent className="p-4 text-center">
@@ -1516,8 +1521,16 @@ function CacheTab() {
         <CardContent>
           <div className="space-y-3">
             <div className="flex justify-between py-2 border-b">
-              <span className="text-sm text-muted-foreground">Cache Size</span>
-              <span className="text-sm font-medium">{cacheStats?.capacity || 0} entries max</span>
+              <span className="text-sm text-muted-foreground">Cached Entries</span>
+              <span className="text-sm font-medium">{cacheStats?.entries || 0} / {cacheStats?.capacity || 0}</span>
+            </div>
+            <div className="flex justify-between py-2 border-b">
+              <span className="text-sm text-muted-foreground">Insertions</span>
+              <span className="text-sm font-medium text-green-600">{cacheStats?.inserts || 0}</span>
+            </div>
+            <div className="flex justify-between py-2 border-b">
+              <span className="text-sm text-muted-foreground">Evictions</span>
+              <span className="text-sm font-medium text-red-600">{cacheStats?.evictions || 0}</span>
             </div>
             <div className="space-y-2">
               <div className="flex justify-between">
