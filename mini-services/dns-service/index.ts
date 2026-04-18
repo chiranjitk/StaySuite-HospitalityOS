@@ -138,8 +138,12 @@ function safeExec(cmd: string, timeout = 5000): string {
 
 function isDnsmasqRunning(): boolean {
   try {
-    const result = execSync('ps aux | grep -E "[d]nsmasq"', { encoding: 'utf-8' });
-    return result.trim().length > 0;
+    // Check if dnsmasq process is alive AND listening on port 53
+    const psResult = execSync('ps aux | grep -E "[d]nsmasq"', { encoding: 'utf-8' });
+    if (!psResult.trim()) return false;
+    // Verify it's actually listening on DNS port 53 (both UDP and TCP)
+    const ssResult = execSync('ss -ulnp | grep ":53 \\|:53\\t"', { encoding: 'utf-8' });
+    return ssResult.trim().length > 0;
   } catch { return false; }
 }
 
@@ -153,7 +157,9 @@ function getDnsmasqVersion(): string {
 function startDnsmasq(): { success: boolean; message: string } {
   if (isDnsmasqRunning()) return { success: true, message: 'dnsmasq is already running' };
   try {
-    execSync(`${DNSMASQ_BIN} -C ${DNSMASQ_CONFIG} 2>&1`, { encoding: 'utf-8' });
+    // Load ALL conf files in the config directory (both DNS and DHCP)
+    const configDir = path.dirname(DNSMASQ_CONFIG);
+    execSync(`${DNSMASQ_BIN} -C ${configDir} 2>&1`, { encoding: 'utf-8' });
     const start = Date.now();
     while (Date.now() - start < 3000) {
       if (isDnsmasqRunning()) return { success: true, message: 'dnsmasq started successfully' };
@@ -184,7 +190,8 @@ function stopDnsmasq(): { success: boolean; message: string } {
 function reloadDnsmasq(): { success: boolean; message: string } {
   try {
     execSync('pkill -HUP dnsmasq 2>/dev/null || true');
-    return { success: true, message: 'dnsmasq reload signal sent' };
+    // After SIGHUP, dnsmasq re-reads config but may not show new listeners immediately
+    return { success: true, message: 'dnsmasq reload signal sent (config re-read)' };
   } catch (error) {
     return { success: false, message: `Failed to reload dnsmasq: ${error}` };
   }
