@@ -55,3 +55,27 @@ Stage Summary:
 - All WiFi GUI tabs should now show real data from PostgreSQL views
 - RADIUS auth tested and confirmed working (Accept/Reject both logged to radpostauth)
 - Test data: 10 users, 5 groups, 5 NAS, 11 accounting sessions, 15 auth logs
+
+---
+Task ID: 3
+Agent: Main Agent
+Task: Fix login — regenerate Prisma client for PostgreSQL, fix PM2 DATABASE_URL, verify all accounts can log in
+
+Work Log:
+- Diagnosed login failure: Prisma Client was generated for SQLite but schema.prisma had PostgreSQL provider
+- Root cause: PM2 had old `DATABASE_URL=file:/home/z/my-project/db/custom.db` (SQLite) baked into environment
+- Regenerated Prisma client: `npx prisma generate` with correct DATABASE_URL
+- Created wrapper script `/tmp/start-dev.sh` that exports `DATABASE_URL=postgresql://z@localhost:5432/staysuite`
+- Started Next.js via PM2 using wrapper script to ensure correct env
+- Verified password hashes in DB are correct bcrypt hashes (admin123, staff123)
+- Tested all 3 login accounts successfully:
+  - admin@royalstay.in / admin123 → SUCCESS (Rajesh Sharma, admin role)
+  - frontdesk@royalstay.in / staff123 → SUCCESS (Priya Das, front_desk role)
+  - platform@staysuite.com / admin123 → SUCCESS (Platform Admin, isPlatformAdmin=true)
+- PM2 process stable: 0 restarts, running on port 3000
+
+Stage Summary:
+- Login fully working on PostgreSQL
+- PM2 managing staysuite-nextjs with correct DATABASE_URL via wrapper script
+- All seed user accounts verified working
+- Server stable under PM2 (0 crashes)
