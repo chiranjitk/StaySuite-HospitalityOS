@@ -161,26 +161,26 @@ function buildSqlConditions(
   const params: unknown[] = []
 
   // ALWAYS filter by acctstarttime to prevent full table scans
-  conditions.push(`acctstarttime >= ?`)
+  conditions.push(`acctstarttime >= $${params.length + 1}`)
   params.push(dateRange.startDate)
-  conditions.push(`acctstarttime <= ?`)
+  conditions.push(`acctstarttime <= $${params.length + 1}`)
   params.push(dateRange.endDate)
 
   // Username LIKE search (case-insensitive substring match)
   if (filters.username) {
-    conditions.push(`username LIKE ?`)
+    conditions.push(`username LIKE $${params.length + 1}`)
     params.push(`%${filters.username}%`)
   }
 
   // NAS IP exact match
   if (filters.nasIp) {
-    conditions.push(`nasipaddress = ?`)
+    conditions.push(`nasipaddress = $${params.length + 1}`)
     params.push(filters.nasIp)
   }
 
   // Calling station ID (MAC address) — case-insensitive contains
   if (filters.callingStationId) {
-    conditions.push(`callingstationid LIKE ?`)
+    conditions.push(`callingstationid LIKE $${params.length + 1}`)
     params.push(`%${filters.callingStationId}%`)
   }
 
@@ -322,7 +322,7 @@ export async function GET(request: NextRequest) {
                wifi_user_status, wifi_mac, session_status
         FROM v_session_history ${whereClause}
         ORDER BY acctstarttime DESC
-        LIMIT ? OFFSET ?
+        LIMIT $${params.length + 1} OFFSET $${params.length + 2}
       `, ...params, limit, offset),
     ])
 
@@ -400,7 +400,7 @@ async function handleCsvExport(
            guest_first_name, guest_last_name, room_number, property_name, plan_name
     FROM v_session_history ${whereClause}
     ORDER BY acctstarttime DESC
-    LIMIT ?
+    LIMIT $${params.length + 1}
   `, ...params, EXPORT_MAX_ROWS)
 
   // Generate CSV

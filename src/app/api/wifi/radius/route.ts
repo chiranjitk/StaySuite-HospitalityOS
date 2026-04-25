@@ -163,8 +163,8 @@ export async function GET(request: NextRequest) {
 
           const conditions: string[] = [];
           const sqlParams: unknown[] = [];
-          if (propertyId) { conditions.push(`propertyId = ?`); sqlParams.push(propertyId); }
-          if (status) { conditions.push(`status = ?`); sqlParams.push(status); }
+          if (propertyId) { conditions.push(`propertyId = $${sqlParams.length + 1}`); sqlParams.push(propertyId); }
+          if (status) { conditions.push(`status = $${sqlParams.length + 1}`); sqlParams.push(status); }
           const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
           const rows = await db.$queryRawUnsafe<Record<string, unknown>[]>(`
@@ -291,9 +291,9 @@ export async function GET(request: NextRequest) {
           // Build SQL conditions on the view
           const conditions: string[] = [];
           const sqlParams: unknown[] = [];
-          if (usernameFilter) { conditions.push(`username LIKE ?`); sqlParams.push(`%${usernameFilter}%`); }
-          if (startDateStr) { conditions.push(`acctstarttime >= ?`); sqlParams.push(startDateStr); }
-          if (endDateStr) { conditions.push(`acctstarttime <= ?`); sqlParams.push(`${endDateStr} 23:59:59`); }
+          if (usernameFilter) { conditions.push(`username LIKE $${sqlParams.length + 1}`); sqlParams.push(`%${usernameFilter}%`); }
+          if (startDateStr) { conditions.push(`acctstarttime >= $${sqlParams.length + 1}`); sqlParams.push(startDateStr); }
+          if (endDateStr) { conditions.push(`acctstarttime <= $${sqlParams.length + 1}`); sqlParams.push(`${endDateStr} 23:59:59`); }
           const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
           sqlParams.push(limit);
 
@@ -323,7 +323,7 @@ export async function GET(request: NextRequest) {
             FROM v_session_history ${whereClause}
             GROUP BY acctuniqueid
             ORDER BY MAX(acctstarttime) DESC
-            LIMIT ?
+            LIMIT $${sqlParams.length}
           `, ...sqlParams);
 
           const logs = authEvents.map((e) => ({
@@ -367,9 +367,9 @@ export async function GET(request: NextRequest) {
           // Build SQL conditions on the view
           const conditions: string[] = [];
           const params: unknown[] = [];
-          if (usernameFilter) { conditions.push(`username LIKE ?`); params.push(`%${usernameFilter}%`); }
-          if (startDateStr) { conditions.push(`acctstarttime >= ?`); params.push(startDateStr); }
-          if (endDateStr) { conditions.push(`acctstarttime <= ?`); params.push(`${endDateStr} 23:59:59`); }
+          if (usernameFilter) { conditions.push(`username LIKE $${params.length + 1}`); params.push(`%${usernameFilter}%`); }
+          if (startDateStr) { conditions.push(`acctstarttime >= $${params.length + 1}`); params.push(startDateStr); }
+          if (endDateStr) { conditions.push(`acctstarttime <= $${params.length + 1}`); params.push(`${endDateStr} 23:59:59`); }
           const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
           const totalAuths = Number((await db.$queryRawUnsafe<{ c: number | bigint }[]>(
@@ -388,14 +388,15 @@ export async function GET(request: NextRequest) {
           const dayBefore = new Date();
           dayBefore.setDate(dayBefore.getDate() - 2);
 
+          const nextParamIdx = params.length + 1;
           const todayWhere = conditions.length > 0
-            ? `${whereClause} AND acctstarttime >= ?`
-            : `WHERE acctstarttime >= ?`;
+            ? `${whereClause} AND acctstarttime >= $${nextParamIdx}`
+            : `WHERE acctstarttime >= $${nextParamIdx}`;
           const todayParams = [...params, yesterday.toISOString().slice(0, 10)];
 
           const prevDayWhere = conditions.length > 0
-            ? `${whereClause} AND acctstarttime >= ? AND acctstarttime < ?`
-            : `WHERE acctstarttime >= ? AND acctstarttime < ?`;
+            ? `${whereClause} AND acctstarttime >= $${params.length + 1} AND acctstarttime < $${params.length + 2}`
+            : `WHERE acctstarttime >= $${params.length + 1} AND acctstarttime < $${params.length + 2}`;
           const prevDayParams = [...params, dayBefore.toISOString().slice(0, 10), yesterday.toISOString().slice(0, 10)];
 
           // Calculate 24h trend — wrap in try/catch so basic stats always return
@@ -613,8 +614,8 @@ export async function GET(request: NextRequest) {
           // Build SQL conditions on the view
           const conditions: string[] = ["session_status = 'active'"];
           const sqlParams: unknown[] = [];
-          if (username) { conditions.push(`username LIKE ?`); sqlParams.push(`%${username}%`); }
-          if (nasIp) { conditions.push(`nasipaddress LIKE ?`); sqlParams.push(`%${nasIp}%`); }
+          if (username) { conditions.push(`username LIKE $${sqlParams.length + 1}`); sqlParams.push(`%${username}%`); }
+          if (nasIp) { conditions.push(`nasipaddress LIKE $${sqlParams.length + 1}`); sqlParams.push(`%${nasIp}%`); }
           const whereClause = `WHERE ${conditions.join(' AND ')}`;
 
           const activeSessions = await db.$queryRawUnsafe<{
@@ -884,8 +885,8 @@ export async function GET(request: NextRequest) {
           if (viewCount === 0) {
             return NextResponse.json({ success: true, data: [], stats: { totalUsers: 0, totalBandwidth: 0, avgPerUser: 0, topUser: null }, _debug: 'view_empty' });
           }
-          if (startDateStr) { conditions.push(`first_session_start >= ?`); sqlParams.push(startDateStr); }
-          if (endDateStr) { conditions.push(`first_session_start <= ?`); sqlParams.push(`${endDateStr} 23:59:59`); }
+          if (startDateStr) { conditions.push(`first_session_start >= $${sqlParams.length + 1}`); sqlParams.push(startDateStr); }
+          if (endDateStr) { conditions.push(`first_session_start <= $${sqlParams.length + 1}`); sqlParams.push(`${endDateStr} 23:59:59`); }
           const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
           // Map sortBy to SQL column
@@ -932,7 +933,7 @@ export async function GET(request: NextRequest) {
                    plan_download_speed, plan_upload_speed, plan_data_limit
             FROM v_user_usage ${whereClause}
             ORDER BY ${orderBy}
-            LIMIT ?
+            LIMIT $${sqlParams.length}
           `, ...sqlParams);
 
           // Map view columns to response format (camelCase) — BigInt-safe
@@ -993,10 +994,10 @@ export async function GET(request: NextRequest) {
           const endDateStr = searchParams.get('endDate');
 
           // Build SQL conditions on the view
-          const conditions: string[] = ['username = ?'];
+          const conditions: string[] = [`username = $1`];
           const sqlParams: unknown[] = [username];
-          if (startDateStr) { conditions.push(`acctstarttime >= ?`); sqlParams.push(startDateStr); }
-          if (endDateStr) { conditions.push(`acctstarttime <= ?`); sqlParams.push(`${endDateStr} 23:59:59`); }
+          if (startDateStr) { conditions.push(`acctstarttime >= $${sqlParams.length + 1}`); sqlParams.push(startDateStr); }
+          if (endDateStr) { conditions.push(`acctstarttime <= $${sqlParams.length + 1}`); sqlParams.push(`${endDateStr} 23:59:59`); }
           const whereClause = `WHERE ${conditions.join(' AND ')}`;
 
           const userRecords = await db.$queryRawUnsafe<{
