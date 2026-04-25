@@ -283,7 +283,7 @@ export async function GET(request: NextRequest) {
 
     const [totalResult, summaryResult, activeCountResult, paginatedSessions] = await Promise.all([
       // Total count within filters
-      db.$queryRawUnsafe<{ c: number }[]>(
+      db.$queryRawUnsafe<{ c: number | bigint }[]>(
         `SELECT COUNT(*) as c FROM v_session_history ${whereClause}`,
         ...params
       ),
@@ -291,9 +291,9 @@ export async function GET(request: NextRequest) {
       // Summary aggregation — CRITICAL: this uses the same WHERE clause
       // so it only counts/sums rows within the applied date filters
       db.$queryRawUnsafe<{
-        total: number;
-        total_input: number;
-        total_output: number;
+        total: number | bigint;
+        total_input: number | bigint;
+        total_output: number | bigint;
       }[]>(`
         SELECT COUNT(*) as total,
                COALESCE(SUM(acctinputoctets), 0) as total_input,
@@ -302,7 +302,7 @@ export async function GET(request: NextRequest) {
       `, ...params),
 
       // Active count (acctstoptime IS NULL) — within the same filter scope
-      db.$queryRawUnsafe<{ c: number }[]>(
+      db.$queryRawUnsafe<{ c: number | bigint }[]>(
         `SELECT COUNT(*) as c FROM v_session_history ${activeWhereClause}`,
         ...params
       ),
@@ -326,15 +326,17 @@ export async function GET(request: NextRequest) {
       `, ...params, limit, offset),
     ])
 
-    const total = totalResult[0]?.c ?? 0
+    const total = Number(totalResult[0]?.c ?? 0)
     const aggregateRow = summaryResult[0]
-    const activeCount = activeCountResult[0]?.c ?? 0
+    const activeCount = Number(activeCountResult[0]?.c ?? 0)
     const totalPages = Math.ceil(total / limit)
 
     // ── Build response ──────────────────────────────────────────────────────
+    // Convert BigInt values from SQLite to Number for JSON serialization
+    const safeData = JSON.parse(JSON.stringify(paginatedSessions, (_, v) => typeof v === 'bigint' ? Number(v) : v));
     const response: SessionHistoryResponse = {
       success: true,
-      data: paginatedSessions,
+      data: safeData,
       pagination: {
         total,
         limit,
@@ -344,8 +346,8 @@ export async function GET(request: NextRequest) {
       summary: {
         total,
         active: activeCount,
-        totalDownload: aggregateRow?.total_output ?? 0,
-        totalUpload: aggregateRow?.total_input ?? 0,
+        totalDownload: Number(aggregateRow?.total_output ?? 0),
+        totalUpload: Number(aggregateRow?.total_input ?? 0),
       },
       filters: {
         startDate: dateRange.startDate.slice(0, 10),

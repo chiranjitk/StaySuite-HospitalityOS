@@ -2057,12 +2057,14 @@ async function main() {
 
     `CREATE VIEW IF NOT EXISTS v_session_history AS
      SELECT
-       ra.radacctid, ra.acctsessionid, ra.username, ra.acctstarttime, ra.acctupdatetime,
+       ra.radacctid, ra.acctuniqueid, ra.acctsessionid, ra.username, ra.acctstarttime, ra.acctupdatetime,
        ra.acctstoptime, ra.acctsessiontime, ra.acctinputoctets, ra.acctoutputoctets,
        ra.acctterminatecause, ra.nasipaddress, ra.nasidentifier, ra.nasportid,
        ra.nasporttype, ra.calledstationid, ra.callingstationid, ra.framedipaddress,
+       ra.framedipv6address, ra.connectinfo_start, ra.connectinfo_stop,
        wu.id AS wifi_user_id, wu.guestId, wu.bookingId, wu.propertyId, wu.planId,
        wu.status AS wifi_user_status,
+       wu.password AS wifi_mac,
        g.firstName AS guest_first_name, g.lastName AS guest_last_name,
        g.email AS guest_email, g.phone AS guest_phone,
        r.number AS room_number, r.name AS room_name, r.floor AS room_floor,
@@ -2085,7 +2087,8 @@ async function main() {
        wu.id, wu.tenantId, wu.propertyId, wu.guestId, wu.bookingId,
        wu.username, wu.planId, wu.status, wu.userType,
        wu.validFrom, wu.validUntil, wu.totalBytesIn, wu.totalBytesOut,
-       wu.sessionCount, wu.lastAccountingAt, wu.createdAt, wu.updatedAt,
+       wu.sessionCount, wu.lastAccountingAt AS lastSeenAt, wu.createdAt, wu.updatedAt,
+       NULL AS macAddress, NULL AS authMethod,
        rc.value AS radius_password,
        rug.groupname AS radius_group,
        g.firstName AS guest_first_name, g.lastName AS guest_last_name,

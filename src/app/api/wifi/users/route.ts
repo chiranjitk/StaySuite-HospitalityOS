@@ -54,11 +54,11 @@ export async function GET(request: NextRequest) {    const user = await requireP
     const offset = (page - 1) * limit;
 
     // Count total
-    const totalResult = await db.$queryRawUnsafe<{ c: number }[]>(
+    const totalResult = await db.$queryRawUnsafe<{ c: number | bigint }[]>(
       `SELECT COUNT(*) as c FROM v_wifi_users ${whereClause}`,
       ...sqlParams
     );
-    const total = totalResult[0]?.c ?? 0;
+    const total = Number(totalResult[0]?.c ?? 0);
 
     // Fetch paginated users from the view
     sqlParams.push(limit, offset);

@@ -3197,6 +3197,7 @@ model RadAcct {
   username            String    @default("")
   realm               String?   @default("")
   nasipaddress        String    @default("")
+  nasidentifier       String?   @default("")
   nasportid           String?
   nasporttype         String?
   acctstarttime       DateTime?

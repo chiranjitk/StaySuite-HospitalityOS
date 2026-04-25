@@ -1,5 +1,6 @@
 // Master loader — routes section to the right category tier-2 loader
 // Only has ~5 import() calls — Turbopack can handle this at chunk compile time
+import type React from 'react';
 
 export default async function masterLoader(section: string): Promise<{ default: React.ComponentType<any> }> {
   const prefix = section.split('-')[0];
