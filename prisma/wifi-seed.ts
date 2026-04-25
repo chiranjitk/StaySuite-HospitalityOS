@@ -7,9 +7,9 @@ const uuid = (seed: string): string => {
   return [
     h.slice(0, 8),
     h.slice(8, 12),
-    '4' + h.slice(13, 15),
-    ((parseInt(h.charAt(15), 16) & 3) | 8).toString(16) + h.slice(16, 18),
-    h.slice(18, 30)
+    '4' + h.slice(12, 15),
+    ((parseInt(h.charAt(15), 16) & 3) | 8).toString(16) + h.slice(16, 19),
+    h.slice(19, 31)
   ].join('-');
 };
 
@@ -297,8 +297,8 @@ export async function seedWiFiData() {
         validUntil: day(3),
         maxSessions: 10,
         sessionCount: 3,
-        totalBytesIn: 2147483648, // ~2GB
-        totalBytesOut: 524288000,
+        totalBytesIn: 2000000000, // ~2GB
+        totalBytesOut: 500000000,
         status: 'active',
         radiusSynced: true,
         radiusSyncedAt: hour(-1),
@@ -423,8 +423,8 @@ export async function seedWiFiData() {
         validUntil: day(1),
         maxSessions: 25,
         sessionCount: 8,
-        totalBytesIn: 4294967296, // ~4GB
-        totalBytesOut: 1073741824, // ~1GB
+        totalBytesIn: 1000000000, // ~1GB
+        totalBytesOut: 500000000, // ~500MB
         status: 'active',
         radiusSynced: true,
         radiusSyncedAt: hour(-1),

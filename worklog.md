@@ -24,3 +24,38 @@ Stage Summary:
 - Only `radius/route.ts` touches raw `radacct` for cleanup mutations (PostgreSQL timestamp fix)
 - RadCheck/RadReply accessed via Prisma ORM for user management operations
 - Production-ready: seed creates complete demo data (170 rooms, 6 bookings, 3 WiFi plans, 2 tenants, 7 users)
+
+---
+Task ID: 3
+Agent: Main Agent
+Task: Real WiFi data population — fix UUID mismatch, seed WiFi data, create SQLite views, verify all GUI tabs
+
+Work Log:
+- Fixed UUID function mismatch between seed.ts and wifi-seed.ts (different slice offsets caused FK violations)
+- Re-enabled wifi-seed.ts import in seed.ts (was previously commented out)
+- Fixed BigInt overflow in wifi-seed.ts: reduced totalBytesIn from 2,147,483,648 to 2,000,000,000 (INT max)
+- Created 4 SQLite views with datetime formatting for date comparison:
+  - `v_wifi_users` — joins WiFiUser + Guest + Booking + Room + Property + WiFiPlan + RadCheck + RadUserGroup
+  - `v_session_history` — joins WiFiSession + WiFiUser + Guest + Booking + Room + Property + WiFiPlan
+  - `v_active_sessions` — filtered v_session_history WHERE status='active'
+  - `v_user_usage` — aggregated per-user usage from WiFiUser + Guest + Booking + Room + Property + WiFiPlan
+- Fixed BigInt serialization in users API route (JSON.parse with replacer)
+- Integrated SQLite view creation into seed.ts (auto-runs on `prisma db seed` for dev environment)
+- Fixed session-history views to use `datetime(ms/1000, 'unixepoch')` for SQLite date formatting
+- Added all required RADIUS columns to views (radacctid, acctsessionid, nasportid, nasporttype, etc.)
+
+Stage Summary:
+- All 8 WiFi API endpoints verified working with real data:
+  - Plans: 6 plans (Free, Basic, Standard, Premium, VIP Suite, Conference)
+  - Users: 8 users (7 active, 1 expired) with guest names, plan details, room numbers
+  - Sessions: 10 sessions (3 active, 5 ended, 2 terminated) with device names, MACs, IPs
+  - Vouchers: 10 vouchers (4 active, 3 used, 2 expired, 1 revoked)
+  - Session History: 10 records with pagination, summary stats
+  - Live Sessions: 3 real-time active session monitoring
+  - User Usage: 2 users with bandwidth usage data
+  - Auth Logs: 0 (no actual FreeRADIUS auth events in dev)
+- Login credentials: admin@royalstay.in / admin123
+- All data flows through SQL VIEW abstraction layer (GUI never touches raw RADIUS tables)
+- ESLint: 0 errors
+- Seed is idempotent: running `prisma db seed` recreates all data + views
+

@@ -138,9 +138,12 @@ export async function GET(request: NextRequest) {    const user = await requireP
       booking_check_out: row.booking_check_out,
     }));
 
+    // Serialize BigInt values for JSON response
+    const safeUsers = JSON.parse(JSON.stringify(users, (_, v) => typeof v === 'bigint' ? Number(v) : v));
+
     return NextResponse.json({
       success: true,
-      data: users,
+      data: safeUsers,
       pagination: {
         page,
         limit,
