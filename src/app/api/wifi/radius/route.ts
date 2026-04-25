@@ -36,10 +36,13 @@ async function ensureRadacctClean() {
     // SQLite doesn't support multi-statement executeRawUnsafe well.
     // Run each UPDATE individually to avoid "Execute returned results" errors.
     const cleanups = [
-      "UPDATE radacct SET acctstoptime = NULL WHERE acctstoptime = '' OR acctstoptime = '0000-00-00 00:00:00'",
-      "UPDATE radacct SET acctstarttime = NULL WHERE acctstarttime = '' OR acctstarttime = '0000-00-00 00:00:00'",
-      "UPDATE radacct SET acctupdatetime = NULL WHERE acctupdatetime = '' OR acctupdatetime = '0000-00-00 00:00:00'",
-      "UPDATE radacct SET acctinterval = NULL WHERE acctinterval = '' OR acctinterval = '0000-00-00 00:00:00'",
+      // PostgreSQL: cast timestamptz to text before comparing to empty string / zero-date
+      // SQLite would accept plain `= ''` but PG rejects implicit cast from text to timestamptz
+      "UPDATE radacct SET acctstoptime = NULL WHERE acctstoptime::text IN ('', '0000-00-00 00:00:00')",
+      "UPDATE radacct SET acctstarttime = NULL WHERE acctstarttime::text IN ('', '0000-00-00 00:00:00')",
+      "UPDATE radacct SET acctupdatetime = NULL WHERE acctupdatetime::text IN ('', '0000-00-00 00:00:00')",
+      // acctinterval is BigInt, not timestamp — compare as text for empty/zero values
+      "UPDATE radacct SET acctinterval = NULL WHERE acctinterval::text IN ('', '0')",
       "UPDATE radacct SET connectinfo_start = NULL WHERE connectinfo_start = ''",
       "UPDATE radacct SET connectinfo_stop = NULL WHERE connectinfo_stop = ''",
     ];

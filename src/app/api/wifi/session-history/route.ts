@@ -233,10 +233,12 @@ export async function GET(request: NextRequest) {
     // Run individually: SQLite doesn't support multi-statement executeRawUnsafe.
     try {
       const cleanups = [
-        "UPDATE radacct SET acctstoptime = NULL WHERE acctstoptime = '' OR acctstoptime = '0000-00-00 00:00:00'",
-        "UPDATE radacct SET acctstarttime = NULL WHERE acctstarttime = '' OR acctstarttime = '0000-00-00 00:00:00'",
-        "UPDATE radacct SET acctupdatetime = NULL WHERE acctupdatetime = '' OR acctupdatetime = '0000-00-00 00:00:00'",
-        "UPDATE radacct SET acctinterval = NULL WHERE acctinterval = '' OR acctinterval = '0000-00-00 00:00:00'",
+        // PostgreSQL: cast timestamptz to text before comparing to empty string / zero-date
+        "UPDATE radacct SET acctstoptime = NULL WHERE acctstoptime::text IN ('', '0000-00-00 00:00:00')",
+        "UPDATE radacct SET acctstarttime = NULL WHERE acctstarttime::text IN ('', '0000-00-00 00:00:00')",
+        "UPDATE radacct SET acctupdatetime = NULL WHERE acctupdatetime::text IN ('', '0000-00-00 00:00:00')",
+        // acctinterval is BigInt, not timestamp — compare as text for empty/zero values
+        "UPDATE radacct SET acctinterval = NULL WHERE acctinterval::text IN ('', '0')",
       ];
       for (const sql of cleanups) {
         await db.$executeRawUnsafe(sql);
