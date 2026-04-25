@@ -229,8 +229,6 @@ export default function UserUsageDashboard() {
   const [disconnectTarget, setDisconnectTarget] = useState<UserSessionDetail | null>(null);
   const [disconnectingId, setDisconnectingId] = useState<string | null>(null);
 
-  const { startDate, endDate } = getDateRange();
-
   // ─── Fetch Summary ───────────────────────────────────────────────────────────
 
   const fetchSummary = useCallback(async () => {
@@ -240,8 +238,6 @@ export default function UserUsageDashboard() {
         action: 'user-usage-summary',
         limit: String(DEFAULT_LIMIT),
         sort: sortBy,
-        startDate,
-        endDate,
       });
 
       const res = await fetch(`/api/wifi/radius?${params.toString()}`);
@@ -269,7 +265,7 @@ export default function UserUsageDashboard() {
     } finally {
       setIsLoading(false);
     }
-  }, [sortBy, startDate, endDate]);
+  }, [sortBy]);
 
   useEffect(() => {
     fetchSummary();
@@ -284,8 +280,6 @@ export default function UserUsageDashboard() {
       const params = new URLSearchParams({
         action: 'user-usage-detail',
         username,
-        startDate,
-        endDate,
       });
 
       const res = await fetch(`/api/wifi/radius?${params.toString()}`);

@@ -154,9 +154,80 @@ export async function GET(request: NextRequest) {
         return NextResponse.json(data);
       }
 
+      // ─── Users: Query from v_wifi_users view ───────────────────
+      // Direct DB query for reliability — does not depend on freeradius-service.
       case 'users': {
-        const data = await freeradiusRequest('/api/users');
-        return NextResponse.json(data);
+        try {
+          const propertyId = searchParams.get('propertyId');
+          const status = searchParams.get('status');
+
+          const conditions: string[] = [];
+          const sqlParams: unknown[] = [];
+          if (propertyId) { conditions.push(`propertyId = ?`); sqlParams.push(propertyId); }
+          if (status) { conditions.push(`status = ?`); sqlParams.push(status); }
+          const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+          const rows = await db.$queryRawUnsafe<Record<string, unknown>[]>(`
+            SELECT id, tenantId, propertyId, guestId, bookingId, username, planId,
+                   status, authMethod, macAddress, validFrom, validUntil,
+                   totalBytesIn, totalBytesOut, sessionCount, lastSeenAt,
+                   createdAt, updatedAt,
+                   radius_password, radius_group,
+                   guest_first_name, guest_last_name, guest_email, guest_phone,
+                   guest_loyalty_tier, guest_is_vip,
+                   room_number, room_name, room_floor,
+                   property_name, plan_name,
+                   plan_download_speed, plan_upload_speed, plan_data_limit,
+                   booking_code, booking_status, booking_check_in, booking_check_out
+            FROM v_wifi_users ${whereClause}
+            ORDER BY createdAt DESC
+          `, ...sqlParams);
+
+          const users = rows.map((row) => ({
+            id: row.id,
+            username: row.username || '',
+            password: row.radius_password || '',
+            group: row.radius_group || '',
+            attributes: row.planId ? {
+              'WISPr-Bandwidth-Max-Down': String(row.plan_download_speed || 0),
+              'WISPr-Bandwidth-Max-Up': String(row.plan_upload_speed || 0),
+              'Session-Timeout': '',
+            } : {},
+            downloadSpeed: Number(row.plan_download_speed || 0),
+            uploadSpeed: Number(row.plan_upload_speed || 0),
+            sessionTimeout: 0,
+            dataLimit: row.plan_data_limit ? Number(row.plan_data_limit) : 0,
+            createdAt: row.createdAt ? String(row.createdAt) : '',
+            updatedAt: row.updatedAt ? String(row.updatedAt) : '',
+            guestId: row.guestId || '',
+            bookingId: row.bookingId || '',
+            userType: row.authMethod || 'guest',
+            status: row.status || 'active',
+            validUntil: row.validUntil ? String(row.validUntil) : '',
+            fupPolicy: null,
+            // Enriched fields
+            guest_first_name: row.guest_first_name || '',
+            guest_last_name: row.guest_last_name || '',
+            room_number: row.room_number || '',
+            property_name: row.property_name || '',
+            plan_name: row.plan_name || '',
+            totalBytesIn: Number(row.totalBytesIn || 0),
+            totalBytesOut: Number(row.totalBytesOut || 0),
+            sessionCount: Number(row.sessionCount || 0),
+          }));
+
+          const safeUsers = JSON.parse(JSON.stringify(users, (_, v) => typeof v === 'bigint' ? Number(v) : v));
+          return NextResponse.json({ success: true, data: safeUsers });
+        } catch (error) {
+          console.error('[users] Direct query error:', error);
+          // Fallback to freeradius-service
+          try {
+            const data = await freeradiusRequest('/api/users');
+            return NextResponse.json(data);
+          } catch {
+            return NextResponse.json({ success: true, data: [] });
+          }
+        }
       }
 
       case 'accounting': {
@@ -327,19 +398,26 @@ export async function GET(request: NextRequest) {
             : `WHERE acctstarttime >= ? AND acctstarttime < ?`;
           const prevDayParams = [...params, dayBefore.toISOString().slice(0, 10), yesterday.toISOString().slice(0, 10)];
 
-          const todayCount = Number((await db.$queryRawUnsafe<{ c: number | bigint }[]>(
-            `SELECT COUNT(DISTINCT acctuniqueid) as c FROM v_session_history ${todayWhere}`,
-            ...todayParams
-          ))[0]?.c ?? 0);
+          // Calculate 24h trend — wrap in try/catch so basic stats always return
+          let last24hTrend = 0;
+          try {
+            const todayCount = Number((await db.$queryRawUnsafe<{ c: number | bigint }[]>(
+              `SELECT COUNT(DISTINCT acctuniqueid) as c FROM v_session_history ${todayWhere}`,
+              ...todayParams
+            ))[0]?.c ?? 0);
 
-          const prevDayCount = Number((await db.$queryRawUnsafe<{ c: number | bigint }[]>(
-            `SELECT COUNT(DISTINCT acctuniqueid) as c FROM v_session_history ${prevDayWhere}`,
-            ...prevDayParams
-          ))[0]?.c ?? 0);
+            const prevDayCount = Number((await db.$queryRawUnsafe<{ c: number | bigint }[]>(
+              `SELECT COUNT(DISTINCT acctuniqueid) as c FROM v_session_history ${prevDayWhere}`,
+              ...prevDayParams
+            ))[0]?.c ?? 0);
 
-          const last24hTrend = prevDayCount > 0
-            ? Math.round(((todayCount - prevDayCount) / prevDayCount) * 100)
-            : (todayCount > 0 ? 100 : 0);
+            last24hTrend = prevDayCount > 0
+              ? Math.round(((todayCount - prevDayCount) / prevDayCount) * 100)
+              : (todayCount > 0 ? 100 : 0);
+          } catch (trendErr) {
+            console.error('[auth-logs-stats] Trend calculation error (non-fatal):', trendErr);
+            // Return basic stats without trend
+          }
 
           return NextResponse.json({
             success: true,
@@ -353,14 +431,17 @@ export async function GET(request: NextRequest) {
           });
         } catch (error) {
           console.error('[auth-logs-stats] Direct query error:', error);
-          const queryParams = new URLSearchParams();
-          const statsFilterParams = ['username', 'result', 'startDate', 'endDate'];
-          for (const p of statsFilterParams) {
-            const v = searchParams.get(p);
-            if (v) queryParams.set(p, v);
-          }
-          const data = await freeradiusRequest(`/api/auth-logs/stats?${queryParams.toString()}`);
-          return NextResponse.json(data);
+          // Return zero stats instead of crashing or depending on freeradius-service
+          return NextResponse.json({
+            success: true,
+            data: {
+              totalAuths: 0,
+              acceptCount: 0,
+              rejectCount: 0,
+              successRate: 0,
+              last24hTrend: 0,
+            },
+          });
         }
       }
 
@@ -839,16 +920,16 @@ export async function GET(request: NextRequest) {
             room_number: string | null;
             property_name: string | null;
             plan_name: string | null;
-            downloadSpeed: number | null;
-            uploadSpeed: number | null;
-            dataLimit: number | null;
+            plan_download_speed: number | null;
+            plan_upload_speed: number | null;
+            plan_data_limit: number | null;
           }[]>(`
             SELECT username, total_sessions, active_sessions,
                    total_download_bytes, total_upload_bytes, total_session_time,
                    last_session_start,
                    guest_first_name, guest_last_name, guest_email,
                    room_number, property_name, plan_name,
-                   downloadSpeed, uploadSpeed, dataLimit
+                   plan_download_speed, plan_upload_speed, plan_data_limit
             FROM v_user_usage ${whereClause}
             ORDER BY ${orderBy}
             LIMIT ?
@@ -869,9 +950,9 @@ export async function GET(request: NextRequest) {
             roomNumber: r.room_number || '',
             propertyName: r.property_name || '',
             planName: r.plan_name || '',
-            downloadSpeed: r.downloadSpeed,
-            uploadSpeed: r.uploadSpeed,
-            dataLimit: r.dataLimit,
+            downloadSpeed: r.plan_download_speed,
+            uploadSpeed: r.plan_upload_speed,
+            dataLimit: r.plan_data_limit,
           }));
 
           // Overall stats
