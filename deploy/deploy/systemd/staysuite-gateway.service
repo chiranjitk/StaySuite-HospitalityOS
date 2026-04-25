@@ -1,0 +1,22 @@
+[Unit]
+Description=StaySuite Gateway Firewall (nftables) - Captive Portal Gateway
+Documentation=https://github.com/chiranjitk/StaySuite-HospitalityOS
+After=network-online.target NetworkManager.service
+After=dnsmasq.service dhcp-service.service
+Before=nftables.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=-/bin/mkdir -p /usr/local/staysuite/logs
+ExecStartPre=-/bin/sleep 3
+ExecStart=/bin/bash /usr/local/staysuite/scripts/nftables/staysuite-gateway.sh
+ExecReload=/bin/bash /usr/local/staysuite/scripts/nftables/staysuite-gateway.sh
+TimeoutStartSec=120
+StandardOutput=journal
+StandardError=journal
+WorkingDirectory=/usr/local/staysuite
+
+[Install]
+WantedBy=multi-user.target

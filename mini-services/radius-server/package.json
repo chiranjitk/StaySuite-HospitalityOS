@@ -1,0 +1,11 @@
+{
+  "name": "radius-server",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "bun --hot index.ts"
+  },
+  "dependencies": {
+    "hono": "^4.12.14"
+  }
+}

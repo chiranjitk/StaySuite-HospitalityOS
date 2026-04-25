@@ -1,0 +1,18 @@
+[Unit]
+Description=StaySuite nftables Management API Service (Hono)
+Documentation=https://github.com/chiranjitk/StaySuite-HospitalityOS
+After=network-online.target staysuite-gateway.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/usr/local/staysuite/.env
+ExecStart=/usr/bin/bun run /usr/local/staysuite/mini-services/nftables-service/index.ts
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+WorkingDirectory=/usr/local/staysuite/mini-services/nftables-service
+
+[Install]
+WantedBy=multi-user.target

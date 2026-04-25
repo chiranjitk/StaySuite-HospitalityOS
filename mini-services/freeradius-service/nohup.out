@@ -1,0 +1,35 @@
+[2026-04-23T19:46:38.105Z] [INFO] [radius-service] Connected to shared PMS database — radcheck/radreply tables found
+[2026-04-23T19:46:38.106Z] [INFO] [radius-service] Using shared database: /home/z/my-project/db/custom.db
+[2026-04-23T19:46:38.107Z] [WARN] [radius-service] No RADIUS_SERVICE_AUTH_SECRET set - API is open (dev mode). Set env var to enable authentication.
+[2026-04-23T19:46:38.107Z] [INFO] [radius-service] RADIUS Management Service starting {"port":3010,"version":"2.0.0","dbPath":"/home/z/my-project/db/custom.db"}
+[2026-04-23T19:46:38.111Z] [INFO] [radius-service] Starting RADIUS config sync from SQLite database
+[2026-04-23T19:46:38.113Z] [INFO] [radius-service] RADIUS table OK: radcheck
+[2026-04-23T19:46:38.113Z] [INFO] [radius-service] RADIUS table OK: radreply
+[2026-04-23T19:46:38.113Z] [INFO] [radius-service] RADIUS table OK: radgroupcheck
+[2026-04-23T19:46:38.113Z] [INFO] [radius-service] RADIUS table OK: radgroupreply
+[2026-04-23T19:46:38.113Z] [INFO] [radius-service] RADIUS table OK: radusergroup
+[2026-04-23T19:46:38.113Z] [INFO] [radius-service] RADIUS table OK: radacct
+[2026-04-23T19:46:38.113Z] [INFO] [radius-service] RADIUS table OK: nas
+[2026-04-23T19:46:38.113Z] [INFO] [radius-service] RADIUS table OK: radpostauth
+/bin/sh: 1: cannot create /etc/raddb/clients.conf: Directory nonexistent
+[2026-04-23T19:46:38.118Z] [ERROR] [radius-service] Failed to write clients.conf via base64+shell, falling back to fs.writeFile {"error":"Error: Command failed: /bin/sh -c printf '%s' \"IyA+Pj4+Pj4gU3RheVN1aXRlIG1hbmFnZWQgTkFTIGNsaWVudHMgLSBETyBOT1QgRURJVCBCRVRXRUVOIE1BUktFUlMgPDw8PDw8CgojIE5BUyBDbGllbnQ6IFRlc3QgTkFTCiMgQ3JlYXRlZDogMjAyNi0wNC0yM1QxODoxMjoyNC45NjNaCmNsaWVudCB0ZXN0IHsKICAgIGlwYWRkciA9IDEyNy4wLjAuMQogICAgc2VjcmV0ID0gInRlc3RpbmcxMjMiCiAgICBzaG9ydG5hbWUgPSB0ZXN0CiAgICBuYXNfdHlwZSA9IG90aGVyCiAgICByZXF1aXJlX21lc3NhZ2VfYXV0aGVudGljYXRvciA9IHllcwogICAgbGltaXRfcHJveHlfc3RhdGUgPSB5ZXMKICAgIHJlc3BvbnNlX3dpbmRvdyA9IDYKfQoKIyA+Pj4+Pj4gRW5kIFN0YXlTdWl0ZSBtYW5hZ2VkIE5BUyBjbGllbnRzIDw8PDw8PAo=\" | base64 -d > \"/etc/raddb/clients.conf\" && chown radiusd:radiusd \"/etc/raddb/clients.conf\" && chmod 640 \"/etc/raddb/clients.conf\"\n/bin/sh: 1: cannot create /etc/raddb/clients.conf: Directory nonexistent\n"}
+/bin/sh: 1: cannot create /etc/raddb/mods-available/sql: Directory nonexistent
+[2026-04-23T19:46:38.120Z] [ERROR] [radius-service] Failed to write NAS clients to clients.conf {"error":"Error: ENOENT: no such file or directory, open '/etc/raddb/clients.conf'"}
+[2026-04-23T19:46:38.120Z] [INFO] [radius-service] RADIUS config sync complete {"clients":false}
+7341 |   }
+7342 | }).catch(err => {
+7343 |   log.warn('FreeRADIUS SQL auto-setup error (non-critical)', { error: String(err) });
+7344 | });
+7345 | 
+7346 | Bun.serve({
+           ^
+error: Failed to start server. Is port 3010 in use?
+ syscall: "listen",
+   errno: 0,
+    code: "EADDRINUSE"
+
+      at /home/z/my-project/mini-services/freeradius-service/index.ts:7346:5
+      at loadAndEvaluateModule (2:1)
+[2026-04-23T19:46:38.122Z] [WARN] [radius-service] FreeRADIUS not installed - management UI active but no live auth/accounting {"status":{"installed":false,"running":false,"error":"RADIUS server is not installed on this system"}}
+[2026-04-23T19:46:38.138Z] [INFO] [radius-service] Could not reload RADIUS server - may not be running or no permissions
+[2026-04-23T19:46:38.138Z] [INFO] [radius-service] FreeRADIUS SQL auto-setup completed {"details":["Verified RADIUS tables (native lowercase schema: radcheck, radreply, etc.)","WARNING: Could not write sql module config: Error: ENOENT: no such file or directory, open '/etc/raddb/mods-available/sql'","WARNING: Could not enable sql module: Error: ENOENT: no such file or directory, symlink '/etc/raddb/mods-available/sql' -> '/etc/raddb/mods-enabled/sql'","WARNING: Could not update sites config: Error: ENOENT: no such file or directory, open '/etc/raddb/sites-available/default'","Reloaded FreeRADIUS server"]}

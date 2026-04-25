@@ -1,0 +1,61 @@
+# =============================================================================
+# StaySuite HospitalityOS - Main Application Service
+# =============================================================================
+# Manages the Next.js application server (production mode, port 3000)
+#
+# Install:
+#   sudo cp staysuite.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now staysuite
+#
+# Manage:
+#   sudo systemctl start staysuite
+#   sudo systemctl stop staysuite
+#   sudo systemctl restart staysuite
+#   sudo systemctl status staysuite
+#   journalctl -u staysuite -f
+# =============================================================================
+
+[Unit]
+Description=StaySuite HospitalityOS - Main Application
+Documentation=https://github.com/staysuite/hospitality-os
+After=network-online.target postgresql.service
+Wants=network-online.target
+Requires=staysuite-realtime.service staysuite-availability.service
+
+[Service]
+Type=simple
+User=staysuite
+Group=staysuite
+WorkingDirectory=/opt/staysuite
+EnvironmentFile=/opt/staysuite/.env
+ExecStart=/usr/local/bin/bun run start
+ExecReload=/bin/kill -HUP $MAINPID
+PIDFile=/opt/staysuite/.main.pid
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=60
+TimeoutStopSec=30
+
+# --- Security Hardening ---
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/staysuite/.next /opt/staysuite/db /opt/staysuite/logs /opt/staysuite/uploads /tmp
+PrivateTmp=true
+ReadOnlyPaths=/opt/staysuite/node_modules /opt/staysuite/public
+
+# --- Resource Limits ---
+LimitNOFILE=65535
+LimitNPROC=4096
+MemoryHigh=1G
+MemoryMax=2G
+CPUQuota=200%
+
+# --- Logging ---
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=staysuite
+
+[Install]
+WantedBy=multi-user.target

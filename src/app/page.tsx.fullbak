@@ -1,0 +1,724 @@
+'use client';
+
+import { useState, useEffect, lazy, Suspense } from 'react';
+import { useRouter } from 'next/navigation';
+import { useUIStore } from '@/store';
+import { useAuth } from '@/contexts/AuthContext';
+import { usePermissions } from '@/contexts/PermissionContext';
+import { menuPermissions } from '@/config/permissions';
+import { Loader2, ShieldX, ArrowLeft } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { AppLayout } from '@/components/layout/app-layout';
+
+// --- Section registries (lazy imports split across 19 files for lower build RAM) ---
+import { dashboardSections } from '@/components/sections/dashboard-sections';
+import { pmsSections } from '@/components/sections/pms-sections';
+import { guestsSections } from '@/components/sections/guests-sections';
+import { bookingsSections } from '@/components/sections/bookings-sections';
+import { frontdeskSections } from '@/components/sections/frontdesk-sections';
+import { wifiSections } from '@/components/sections/wifi-sections';
+import { billingSections } from '@/components/sections/billing-sections';
+import { inventorySections } from '@/components/sections/inventory-sections';
+import { housekeepingSections } from '@/components/sections/housekeeping-sections';
+import { posSections } from '@/components/sections/pos-sections';
+import { experienceSections } from '@/components/sections/experience-sections';
+import { securitySections } from '@/components/sections/security-sections';
+import { crmAutomationSections } from '@/components/sections/crm-automation-sections';
+import { channelsSections } from '@/components/sections/channels-sections';
+import { reportsRevenueSections } from '@/components/sections/reports-revenue-sections';
+import { integrationsNotificationsSections } from '@/components/sections/integrations-notifications-sections';
+import { aiAdminSections } from '@/components/sections/ai-admin-sections';
+import { chainMarketingEventsSections } from '@/components/sections/chain-marketing-events-sections';
+import { iotStaffHelpAdsSections } from '@/components/sections/iot-staff-help-ads-sections';
+
+// --- Shorthand aliases for frequently used components ---
+const OverviewDashboard = dashboardSections.OverviewDashboard;
+const FrontDeskDashboard = dashboardSections.FrontDeskDashboard;
+const HousekeepingDashboard = dashboardSections.HousekeepingDashboard;
+
+// --- Shared section loading fallback ---
+function SectionLoader() {
+  return (
+    <div className="flex items-center justify-center min-h-[400px]">
+      <div className="flex flex-col items-center gap-4">
+        <Loader2 className="h-8 w-8 animate-spin text-teal-600" />
+        <p className="text-muted-foreground text-sm">Loading section...</p>
+      </div>
+    </div>
+  );
+}
+
+function AccessDenied({ onGoToDashboard }: { onGoToDashboard: () => void }) {
+  return (
+    <div className="flex flex-col items-center justify-center min-h-[400px] space-y-4">
+      <div className="flex items-center justify-center w-16 h-16 rounded-full bg-red-100 dark:bg-red-900/20">
+        <ShieldX className="h-8 w-8 text-red-600 dark:text-red-400" />
+      </div>
+      <div className="text-center space-y-2">
+        <h2 className="text-xl font-semibold text-foreground">Access Denied</h2>
+        <p className="text-muted-foreground max-w-md">
+          You don&apos;t have permission to access this section. Please contact your administrator if you believe this is an error.
+        </p>
+      </div>
+      <Button
+        variant="outline"
+        onClick={onGoToDashboard}
+        className="mt-2"
+      >
+        <ArrowLeft className="mr-2 h-4 w-4" />
+        Go to Dashboard
+      </Button>
+    </div>
+  );
+}
+
+// Helper to wrap a lazy component in a div wrapper
+function WrappedSection({ component: Comp }: { component: React.LazyExoticComponent<any> }) {
+  return (
+    <div className="space-y-4">
+      <Comp />
+    </div>
+  );
+}
+
+export default function Home() {
+  const { activeSection } = useUIStore();
+  const { isAuthenticated, isLoading: authLoading, user } = useAuth();
+  const { canAccessMenu, isAdmin, roleName, hasPermission, permissions } = usePermissions();
+  const router = useRouter();
+  const [selectedGuestId, setSelectedGuestId] = useState<string | null>(null);
+  const [selectedArticleId, setSelectedArticleId] = useState<string | null>(null);
+
+  // Get the appropriate dashboard section for the user
+  const getUserDashboardSection = (): string => {
+    if (isAdmin || hasPermission('dashboard.view') || hasPermission('dashboard.full')) {
+      return 'dashboard-overview';
+    }
+    if (hasPermission('dashboard.operations')) {
+      return 'dashboard-operations';
+    }
+    if (hasPermission('dashboard.housekeeping')) {
+      return 'dashboard-housekeeping';
+    }
+    // Fallback - find first accessible section
+    const accessibleMenus = Object.keys(menuPermissions).filter(id => canAccessMenu(id));
+    return accessibleMenus[0] || 'dashboard-overview';
+  };
+
+  // Redirect to login if not authenticated
+  useEffect(() => {
+    if (!authLoading && !isAuthenticated) {
+      router.push('/login');
+    }
+  }, [isAuthenticated, authLoading, router]);
+
+  // Redirect to appropriate dashboard on mount and when auth changes
+  useEffect(() => {
+    if (!authLoading && isAuthenticated) {
+      if ((activeSection === 'dashboard-overview' || activeSection === 'overview') &&
+          !isAdmin && !hasPermission('dashboard.view') && !hasPermission('dashboard.full')) {
+        const userDashboard = getUserDashboardSection();
+        if (userDashboard !== activeSection && userDashboard !== 'dashboard-overview') {
+          useUIStore.getState().setActiveSection(userDashboard);
+        }
+      }
+    }
+  }, [isAuthenticated, authLoading, activeSection, isAdmin, hasPermission]);
+
+  // Show loading while checking auth
+  if (authLoading || !isAuthenticated) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-background">
+        <div className="flex flex-col items-center gap-4">
+          <Loader2 className="h-8 w-8 animate-spin text-teal-600" />
+          <p className="text-muted-foreground text-sm">Loading...</p>
+        </div>
+      </div>
+    );
+  }
+
+  // Check if user can access current section (skip for admin)
+  const checkSectionAccess = (sectionId: string): boolean => {
+    if (isAdmin) return true;
+    return canAccessMenu(sectionId);
+  };
+
+  // Render content based on active section
+  const renderContent = () => {
+    // For dashboard sections, show role-appropriate dashboard
+    if (activeSection === 'dashboard-overview' || activeSection === 'overview') {
+      if (!isAdmin && !hasPermission('dashboard.view') && !hasPermission('dashboard.full')) {
+        if (hasPermission('dashboard.operations')) {
+          return <FrontDeskDashboard />;
+        }
+        if (hasPermission('dashboard.housekeeping')) {
+          return <HousekeepingDashboard />;
+        }
+        const accessibleSection = getUserDashboardSection();
+        if (accessibleSection && accessibleSection !== activeSection) {
+          setTimeout(() => useUIStore.getState().setActiveSection(accessibleSection), 0);
+          return (
+            <div className="flex items-center justify-center min-h-[400px]">
+              <Loader2 className="h-8 w-8 animate-spin text-teal-600" />
+            </div>
+          );
+        }
+        return (
+          <div className="space-y-4">
+            <div className="flex flex-col gap-2">
+              <h1 className="text-2xl font-bold tracking-tight">Welcome</h1>
+              <p className="text-muted-foreground">
+                You have limited access. Contact your administrator for more permissions.
+              </p>
+            </div>
+          </div>
+        );
+      }
+      return <OverviewDashboard />;
+    }
+
+    // Check permission for active section
+    if (!checkSectionAccess(activeSection)) {
+      return <AccessDenied onGoToDashboard={() => useUIStore.getState().setActiveSection(getUserDashboardSection())} />;
+    }
+
+    switch (activeSection) {
+      // --- Dashboard ---
+      case 'dashboard-operations':
+        return <FrontDeskDashboard />;
+      case 'dashboard-housekeeping':
+        return <HousekeepingDashboard />;
+      case 'dashboard-command-center':
+        return (
+          <div className="space-y-4">
+            <div className="flex flex-col gap-2">
+              <h1 className="text-2xl font-bold tracking-tight">Command Center</h1>
+              <p className="text-muted-foreground">Real-time operations monitoring and control</p>
+            </div>
+            <dashboardSections.KPICards />
+            <dashboardSections.CommandCenter />
+          </div>
+        );
+      case 'dashboard-alerts':
+        return (
+          <div className="space-y-4">
+            <div className="flex flex-col gap-2">
+              <h1 className="text-2xl font-bold tracking-tight">Alerts & Notifications</h1>
+              <p className="text-muted-foreground">System alerts and important notifications</p>
+            </div>
+            <dashboardSections.AlertsPanel />
+          </div>
+        );
+      case 'dashboard-kpi':
+        return <dashboardSections.KPIDashboardEnhanced />;
+
+      // --- PMS ---
+      case 'pms-properties':
+        return <WrappedSection component={pmsSections.PropertiesList} />;
+      case 'pms-room-types':
+        return <WrappedSection component={pmsSections.RoomTypesManager} />;
+      case 'pms-rooms':
+        return <WrappedSection component={pmsSections.RoomsManager} />;
+      case 'pms-floor-plans':
+        return <WrappedSection component={pmsSections.FloorPlans} />;
+      case 'pms-inventory-calendar':
+        return <WrappedSection component={pmsSections.InventoryCalendar} />;
+      case 'pms-pricing-rules':
+      case 'pms-rate-plans':
+      case 'pms-rate-plans-pricing':
+        return <WrappedSection component={pmsSections.RatePlansPricingRules} />;
+      case 'pms-availability':
+        return <WrappedSection component={pmsSections.AvailabilityControl} />;
+      case 'pms-locking':
+        return <WrappedSection component={pmsSections.InventoryLocking} />;
+      case 'pms-overbooking':
+        return <WrappedSection component={pmsSections.OverbookingSettings} />;
+      case 'pms-bulk-price':
+        return <WrappedSection component={pmsSections.BulkPriceUpdate} />;
+      case 'pms-revenue':
+        return <WrappedSection component={pmsSections.RevenueDashboard} />;
+
+      // --- Bookings ---
+      case 'bookings-calendar':
+        return <WrappedSection component={bookingsSections.BookingsCalendarList} />;
+      case 'bookings-groups':
+        return <WrappedSection component={bookingsSections.GroupBookings} />;
+      case 'bookings-waitlist':
+        return <WrappedSection component={bookingsSections.Waitlist} />;
+      case 'bookings-audit':
+        return <WrappedSection component={bookingsSections.AuditLogs} />;
+      case 'bookings-conflicts':
+        return <WrappedSection component={bookingsSections.Conflicts} />;
+      case 'bookings-no-show':
+        return <WrappedSection component={bookingsSections.NoShowAutomation} />;
+
+      // --- Guests ---
+      case 'guests-list':
+        return selectedGuestId ? (
+          <guestsSections.GuestProfile
+            guestId={selectedGuestId}
+            onBack={() => setSelectedGuestId(null)}
+          />
+        ) : (
+          <guestsSections.GuestsList onSelectGuest={(id: string) => setSelectedGuestId(id)} />
+        );
+      case 'guests-kyc':
+        return <WrappedSection component={guestsSections.KYCManagement} />;
+      case 'guests-preferences':
+        return <WrappedSection component={guestsSections.PreferencesManagement} />;
+      case 'guests-stay-history':
+      case 'guests-history':
+        return <WrappedSection component={guestsSections.StayHistoryManagement} />;
+      case 'guests-loyalty':
+        return <WrappedSection component={guestsSections.LoyaltyManagement} />;
+
+      // --- Front Desk ---
+      case 'frontdesk-checkin':
+        return <WrappedSection component={frontdeskSections.CheckIn} />;
+      case 'frontdesk-checkout':
+        return <WrappedSection component={frontdeskSections.CheckOut} />;
+      case 'frontdesk-walkin':
+        return <WrappedSection component={frontdeskSections.WalkIn} />;
+      case 'frontdesk-room-grid':
+        return <WrappedSection component={frontdeskSections.RoomGrid} />;
+      case 'frontdesk-assignment':
+        return <WrappedSection component={frontdeskSections.RoomAssignment} />;
+
+      // --- WiFi ---
+      case 'wifi-sessions':
+        return <WrappedSection component={wifiSections.WifiSessions} />;
+      case 'wifi-vouchers':
+        return <WrappedSection component={wifiSections.WifiVouchers} />;
+      case 'wifi-plans':
+        return <WrappedSection component={wifiSections.WifiPlans} />;
+      case 'wifi-logs':
+        return <WrappedSection component={wifiSections.UsageLogs} />;
+      case 'wifi-gateway':
+        return <WrappedSection component={wifiSections.GatewayIntegration} />;
+      case 'wifi-aaa':
+        return <WrappedSection component={wifiSections.AAAConfig} />;
+
+      // --- Billing ---
+      case 'billing-folios':
+        return <WrappedSection component={billingSections.Folios} />;
+      case 'billing-invoices':
+        return <WrappedSection component={billingSections.Invoices} />;
+      case 'billing-payments':
+        return <WrappedSection component={billingSections.Payments} />;
+      case 'billing-refunds':
+        return <WrappedSection component={billingSections.Refunds} />;
+      case 'billing-discounts':
+        return <WrappedSection component={billingSections.Discounts} />;
+      case 'billing-cancellation-policies':
+        return <WrappedSection component={billingSections.CancellationPolicies} />;
+      case 'billing-saas-plans':
+      case 'saas-plans':
+        return <WrappedSection component={billingSections.SaaSPlans} />;
+      case 'billing-saas-subs':
+      case 'saas-subscriptions':
+        return <WrappedSection component={billingSections.Subscriptions} />;
+      case 'billing-saas-usage':
+      case 'saas-usage':
+        return <WrappedSection component={billingSections.UsageBilling} />;
+
+      // --- Inventory ---
+      case 'inventory-stock':
+        return <WrappedSection component={inventorySections.StockItems} />;
+      case 'inventory-consumption':
+        return <WrappedSection component={inventorySections.ConsumptionLogs} />;
+      case 'inventory-alerts':
+        return <WrappedSection component={inventorySections.LowStockAlerts} />;
+      case 'inventory-vendors':
+        return <WrappedSection component={inventorySections.Vendors} />;
+      case 'inventory-purchase-orders':
+      case 'inventory-po':
+        return <WrappedSection component={inventorySections.PurchaseOrders} />;
+
+      // --- Housekeeping ---
+      case 'housekeeping-tasks':
+        return <WrappedSection component={housekeepingSections.TasksList} />;
+      case 'housekeeping-kanban':
+        return <WrappedSection component={housekeepingSections.KanbanBoard} />;
+      case 'housekeeping-status':
+        return <WrappedSection component={housekeepingSections.RoomStatus} />;
+      case 'housekeeping-maintenance':
+      case 'housekeeping-preventive':
+        return <WrappedSection component={housekeepingSections.Maintenance} />;
+      case 'housekeeping-assets':
+        return <WrappedSection component={housekeepingSections.Assets} />;
+      case 'housekeeping-automation':
+        return <WrappedSection component={housekeepingSections.HousekeepingAutomation} />;
+      case 'housekeeping-inspections':
+        return <WrappedSection component={housekeepingSections.InspectionChecklists} />;
+
+      // --- POS ---
+      case 'pos-orders':
+        return <WrappedSection component={posSections.Orders} />;
+      case 'pos-tables':
+        return <WrappedSection component={posSections.Tables} />;
+      case 'pos-kitchen':
+        return <WrappedSection component={posSections.KitchenDisplay} />;
+      case 'pos-menu':
+        return <WrappedSection component={posSections.MenuManagement} />;
+      case 'pos-billing':
+        return <WrappedSection component={posSections.POSBilling} />;
+
+      // --- Experience ---
+      case 'experience-requests':
+        return <WrappedSection component={experienceSections.ServiceRequests} />;
+      case 'experience-inbox':
+        return <WrappedSection component={experienceSections.UnifiedInbox} />;
+      case 'experience-chat':
+        return <WrappedSection component={experienceSections.GuestChat} />;
+      case 'experience-keys':
+        return <WrappedSection component={experienceSections.DigitalKeys} />;
+      case 'experience-portal':
+        return <WrappedSection component={experienceSections.InRoomPortal} />;
+      case 'experience-app':
+      case 'experience-app-controls':
+        return <WrappedSection component={experienceSections.GuestAppControls} />;
+
+      // --- Parking ---
+      case 'parking-slots':
+        return <WrappedSection component={experienceSections.ParkingSlots} />;
+      case 'parking-tracking':
+        return <WrappedSection component={experienceSections.VehicleTracking} />;
+      case 'parking-mapping':
+      case 'parking-billing':
+        return <WrappedSection component={experienceSections.VehicleTracking} />;
+
+      // --- Security ---
+      case 'security-live':
+        return <WrappedSection component={securitySections.LiveCamera} />;
+      case 'security-playback':
+        return <WrappedSection component={securitySections.CameraPlayback} />;
+      case 'security-alerts':
+      case 'security-incidents':
+        return <WrappedSection component={securitySections.Incidents} />;
+      case 'security-overview':
+        return (
+          <div className="space-y-4">
+            <div className="flex flex-col gap-2">
+              <h1 className="text-2xl font-bold tracking-tight">Security Overview</h1>
+              <p className="text-muted-foreground">Monitor and manage your account security</p>
+            </div>
+            <securitySections.SecurityOverview onNavigate={(section: string) => useUIStore.getState().setActiveSection(section)} />
+          </div>
+        );
+      case 'security-audit-logs':
+        return (
+          <div className="space-y-4">
+            <div className="flex flex-col gap-2">
+              <h1 className="text-2xl font-bold tracking-tight">Audit Logs</h1>
+              <p className="text-muted-foreground">Track all system activities and user actions</p>
+            </div>
+            <securitySections.AuditLogsViewer />
+          </div>
+        );
+      case 'security-2fa':
+        return (
+          <div className="space-y-4">
+            <div className="flex flex-col gap-2">
+              <h1 className="text-2xl font-bold tracking-tight">Two-Factor Authentication</h1>
+              <p className="text-muted-foreground">Configure two-factor authentication for your account</p>
+            </div>
+            <securitySections.TwoFactorSetup />
+          </div>
+        );
+      case 'security-sessions':
+        return (
+          <div className="space-y-4">
+            <div className="flex flex-col gap-2">
+              <h1 className="text-2xl font-bold tracking-tight">Device Sessions</h1>
+              <p className="text-muted-foreground">Manage your active sessions across all devices</p>
+            </div>
+            <securitySections.DeviceSessions />
+          </div>
+        );
+      case 'security-sso':
+        return (
+          <div className="space-y-4">
+            <div className="flex flex-col gap-2">
+              <h1 className="text-2xl font-bold tracking-tight">Single Sign-On</h1>
+              <p className="text-muted-foreground">Configure SSO providers for your organization</p>
+            </div>
+            <securitySections.SSOConfig />
+          </div>
+        );
+
+      // --- Channel Manager ---
+      case 'channel-ota':
+        return <WrappedSection component={channelsSections.OTAConnections} />;
+      case 'channel-inventory':
+        return <WrappedSection component={channelsSections.InventorySync} />;
+      case 'channel-rate':
+        return <WrappedSection component={channelsSections.RateSync} />;
+      case 'channel-booking':
+        return <WrappedSection component={channelsSections.BookingSync} />;
+      case 'channel-restrictions':
+        return <WrappedSection component={channelsSections.Restrictions} />;
+      case 'channel-mapping':
+        return <WrappedSection component={channelsSections.ChannelMapping} />;
+      case 'channel-logs':
+        return <WrappedSection component={channelsSections.SyncLogs} />;
+      case 'channel-crs':
+        return <WrappedSection component={channelsSections.CRS} />;
+
+      // --- Reports ---
+      case 'reports-revenue':
+        return <WrappedSection component={reportsRevenueSections.RevenueReports} />;
+      case 'reports-occupancy':
+        return <WrappedSection component={reportsRevenueSections.OccupancyReports} />;
+      case 'reports-adr':
+      case 'reports-revpar':
+        return <WrappedSection component={reportsRevenueSections.ADRRevPAR} />;
+      case 'reports-guest':
+      case 'reports-guests':
+        return <WrappedSection component={reportsRevenueSections.GuestAnalyticsReports} />;
+      case 'reports-staff':
+        return <WrappedSection component={reportsRevenueSections.StaffPerformance} />;
+      case 'reports-scheduled':
+        return <WrappedSection component={reportsRevenueSections.ScheduledReports} />;
+
+      // --- Revenue Management ---
+      case 'revenue-pricing':
+      case 'revenue-rules':
+        return <WrappedSection component={pmsSections.RatePlansPricingRules} />;
+      case 'revenue-forecast':
+      case 'revenue-demand':
+      case 'revenue-forecasting':
+        return <WrappedSection component={reportsRevenueSections.DemandForecastingPage} />;
+      case 'revenue-competitor':
+      case 'revenue-compset':
+        return <WrappedSection component={reportsRevenueSections.CompetitorPricing} />;
+      case 'revenue-ai':
+      case 'revenue-suggestions':
+        return <WrappedSection component={reportsRevenueSections.AISuggestions} />;
+
+      // --- CRM ---
+      case 'crm-segments':
+        return <WrappedSection component={crmAutomationSections.GuestSegments} />;
+      case 'crm-campaigns':
+        return <WrappedSection component={crmAutomationSections.Campaigns} />;
+      case 'crm-loyalty':
+        return <WrappedSection component={crmAutomationSections.LoyaltyPrograms} />;
+      case 'crm-feedback':
+        return <WrappedSection component={crmAutomationSections.FeedbackReviews} />;
+      case 'crm-retention':
+        return <WrappedSection component={crmAutomationSections.RetentionAnalytics} />;
+
+      // --- GDPR ---
+      case 'settings-gdpr':
+      case 'admin-gdpr':
+      case 'gdpr-compliance':
+        return (
+          <div className="space-y-4">
+            <iotStaffHelpAdsSections.GDPRManager tenantId={user?.tenantId || ''} />
+          </div>
+        );
+
+      // --- Automation ---
+      case 'automation-workflow':
+      case 'automation-workflows':
+        return <WrappedSection component={crmAutomationSections.WorkflowBuilder} />;
+      case 'automation-rules':
+        return <WrappedSection component={crmAutomationSections.RulesEngine} />;
+      case 'automation-templates':
+        return <WrappedSection component={crmAutomationSections.Templates} />;
+      case 'automation-logs':
+        return <WrappedSection component={crmAutomationSections.ExecutionLogs} />;
+
+      // --- Integrations ---
+      case 'integrations-payment':
+      case 'integrations-payments':
+        return <WrappedSection component={integrationsNotificationsSections.PaymentGatewaysPage} />;
+      case 'integrations-wifi':
+        return <WrappedSection component={integrationsNotificationsSections.WifiGateways} />;
+      case 'integrations-pos':
+        return <WrappedSection component={integrationsNotificationsSections.PosSystems} />;
+      case 'integrations-apis':
+        return <WrappedSection component={integrationsNotificationsSections.ThirdPartyApis} />;
+
+      // --- Notifications ---
+      case 'notifications-templates':
+        return <WrappedSection component={integrationsNotificationsSections.NotificationTemplates} />;
+      case 'notifications-logs':
+        return <WrappedSection component={integrationsNotificationsSections.DeliveryLogs} />;
+      case 'notifications-settings':
+        return <WrappedSection component={integrationsNotificationsSections.NotificationSettingsComponent} />;
+
+      // --- Webhooks ---
+      case 'webhooks-events':
+        return <WrappedSection component={integrationsNotificationsSections.WebhookEvents} />;
+      case 'webhooks-delivery':
+        return <WrappedSection component={integrationsNotificationsSections.WebhookDelivery} />;
+      case 'webhooks-retry':
+        return <WrappedSection component={integrationsNotificationsSections.RetryQueue} />;
+
+      // --- AI ---
+      case 'ai-copilot':
+        return <WrappedSection component={aiAdminSections.AICopilot} />;
+      case 'ai-provider':
+      case 'ai-settings':
+        return <WrappedSection component={aiAdminSections.AIProviderSettings} />;
+      case 'ai-insights':
+        return <WrappedSection component={aiAdminSections.AIInsights} />;
+
+      // --- Admin ---
+      case 'admin-tenants':
+        return <WrappedSection component={aiAdminSections.TenantManagement} />;
+      case 'admin-tenant-lifecycle':
+      case 'admin-lifecycle':
+        return <WrappedSection component={aiAdminSections.TenantLifecycle} />;
+      case 'admin-users':
+        return <WrappedSection component={aiAdminSections.UserManagement} />;
+      case 'admin-usage':
+        return <WrappedSection component={aiAdminSections.UsageTracking} />;
+      case 'admin-revenue':
+        return <WrappedSection component={aiAdminSections.RevenueAnalytics} />;
+      case 'admin-health':
+        return <WrappedSection component={aiAdminSections.SystemHealth} />;
+      case 'admin-roles':
+        return <WrappedSection component={aiAdminSections.RolePermissions} />;
+
+      // --- Settings ---
+      case 'settings-general':
+        return <WrappedSection component={aiAdminSections.GeneralSettingsComponent} />;
+      case 'settings-tax':
+        return <WrappedSection component={aiAdminSections.TaxCurrencySettings} />;
+      case 'settings-localization':
+        return <WrappedSection component={aiAdminSections.LocalizationSettings} />;
+      case 'settings-features':
+        return <WrappedSection component={aiAdminSections.FeatureFlags} />;
+      case 'settings-security':
+        return <WrappedSection component={aiAdminSections.SecuritySettings} />;
+      case 'settings-integrations':
+        return <WrappedSection component={aiAdminSections.SystemIntegrations} />;
+
+      // --- Chain ---
+      case 'chain-brands':
+        return <WrappedSection component={chainMarketingEventsSections.BrandManagement} />;
+      case 'chain-dashboard':
+        return <WrappedSection component={chainMarketingEventsSections.ChainDashboard} />;
+      case 'chain-analytics':
+        return <WrappedSection component={chainMarketingEventsSections.CrossPropertyAnalytics} />;
+
+      // --- Marketing ---
+      case 'marketing-reputation':
+        return <WrappedSection component={chainMarketingEventsSections.ReputationDashboard} />;
+      case 'marketing-reviews':
+      case 'marketing-sources':
+        return <WrappedSection component={chainMarketingEventsSections.ReviewSources} />;
+      case 'marketing-promotions':
+        return <WrappedSection component={crmAutomationSections.Campaigns} />;
+      case 'marketing-booking-engine':
+        return <WrappedSection component={chainMarketingEventsSections.DirectBookingEngine} />;
+
+      // --- Events ---
+      case 'events-spaces':
+        return <WrappedSection component={chainMarketingEventsSections.EventSpaces} />;
+      case 'events-calendar':
+        return <WrappedSection component={chainMarketingEventsSections.EventCalendar} />;
+      case 'events-booking':
+        return <WrappedSection component={chainMarketingEventsSections.EventBooking} />;
+      case 'events-resources':
+        return <WrappedSection component={chainMarketingEventsSections.EventResources} />;
+
+      // --- IoT ---
+      case 'iot-devices':
+        return <WrappedSection component={iotStaffHelpAdsSections.DeviceManagement} />;
+      case 'iot-controls':
+        return <WrappedSection component={iotStaffHelpAdsSections.RoomControls} />;
+      case 'iot-energy':
+        return <WrappedSection component={iotStaffHelpAdsSections.EnergyDashboard} />;
+
+      // --- Staff Management ---
+      case 'staff-shifts':
+        return <WrappedSection component={iotStaffHelpAdsSections.ShiftScheduling} />;
+      case 'staff-attendance':
+        return <WrappedSection component={iotStaffHelpAdsSections.AttendanceTracking} />;
+      case 'staff-tasks':
+        return <WrappedSection component={iotStaffHelpAdsSections.TaskAssignment} />;
+      case 'staff-communication':
+        return <WrappedSection component={iotStaffHelpAdsSections.InternalCommunication} />;
+      case 'staff-performance':
+        return <WrappedSection component={reportsRevenueSections.StaffPerformance} />;
+      case 'staff-skills':
+        return <WrappedSection component={iotStaffHelpAdsSections.SkillsManagement} />;
+
+      // --- Help Center ---
+      case 'help-center':
+      case 'help-articles':
+        return selectedArticleId ? (
+          <iotStaffHelpAdsSections.ArticleViewer
+            articleId={selectedArticleId}
+            onBack={() => setSelectedArticleId(null)}
+          />
+        ) : (
+          <iotStaffHelpAdsSections.HelpCenter onSelectArticle={(id: string) => setSelectedArticleId(id)} />
+        );
+      case 'help-tutorials':
+        return (
+          <div className="space-y-4">
+            <iotStaffHelpAdsSections.HelpCenter onSelectArticle={(id: string) => setSelectedArticleId(id)} />
+          </div>
+        );
+
+      // --- User Profile ---
+      case 'profile':
+      case 'profile-user':
+        return <WrappedSection component={iotStaffHelpAdsSections.UserProfile} />;
+
+      // --- UI Showcase ---
+      case 'ui-showcase':
+        return <iotStaffHelpAdsSections.UIStyleShowcase />;
+
+      // --- Ads ---
+      case 'ads-campaigns':
+        return <WrappedSection component={iotStaffHelpAdsSections.AdCampaigns} />;
+      case 'ads-google':
+        return <WrappedSection component={iotStaffHelpAdsSections.GoogleHotelAds} />;
+      case 'ads-performance':
+        return <WrappedSection component={iotStaffHelpAdsSections.PerformanceTracking} />;
+      case 'ads-roi':
+        return <WrappedSection component={iotStaffHelpAdsSections.ROIAnalytics} />;
+
+      // --- Feature Not Found ---
+      default:
+        return (
+          <div className="flex flex-col items-center justify-center min-h-[60vh] text-center">
+            <div className="rounded-full bg-muted p-6 mb-4">
+              <svg
+                className="h-12 w-12 text-muted-foreground"
+                fill="none"
+                height="24"
+                stroke="currentColor"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth="2"
+                viewBox="0 0 24 24"
+                width="24"
+              >
+                <path d="M12 2L2 7l10 5 10-5-10-5z" />
+                <path d="M2 17l10 5 10-5" />
+                <path d="M2 12l10 5 10-5" />
+              </svg>
+            </div>
+            <h2 className="text-2xl font-semibold mb-2">Feature Not Found</h2>
+            <p className="text-muted-foreground max-w-md">
+              The <span className="font-medium">{activeSection.replace(/-/g, ' ')}</span> module is not available or has been moved.
+              Please contact your administrator for assistance.
+            </p>
+          </div>
+        );
+    }
+  };
+
+  return (
+    <AppLayout>
+      <Suspense fallback={<SectionLoader />}>
+        {renderContent()}
+      </Suspense>
+    </AppLayout>
+  );
+}

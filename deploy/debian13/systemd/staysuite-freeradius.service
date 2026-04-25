@@ -1,0 +1,57 @@
+# =============================================================================
+# StaySuite HospitalityOS - RADIUS Management Service
+# =============================================================================
+# Provides WiFi AAA management, RADIUS server configuration, and
+# authentication proxy via Socket.IO and REST API on port 3010
+#
+# Rocky Linux 10: Uses radiusd package (config at /etc/raddb/)
+#
+# Install:
+#   sudo cp staysuite-radius.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now staysuite-radius
+#
+# Manage:
+#   sudo systemctl restart staysuite-radius
+#   journalctl -u staysuite-radius -f
+# =============================================================================
+
+[Unit]
+Description=StaySuite HospitalityOS - RADIUS Management Service (port 3010)
+Documentation=https://github.com/staysuite/hospitality-os
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=staysuite
+Group=staysuite
+WorkingDirectory=/opt/StaySuite-HospitalityOS/mini-services/freeradius-service
+EnvironmentFile=/opt/StaySuite-HospitalityOS/.env
+ExecStart=/usr/local/bin/bun --hot index.ts
+PIDFile=/opt/StaySuite-HospitalityOS/mini-services/freeradius-service/.radius-service.pid
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=30
+TimeoutStopSec=15
+
+# --- Security Hardening ---
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/StaySuite-HospitalityOS/mini-services/freeradius-service /opt/StaySuite-HospitalityOS/db /tmp /etc/raddb
+PrivateTmp=true
+
+# --- Resource Limits ---
+LimitNOFILE=65535
+LimitNPROC=1024
+MemoryHigh=512M
+MemoryMax=1G
+
+# --- Logging ---
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=staysuite-radius
+
+[Install]
+WantedBy=multi-user.target

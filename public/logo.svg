@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<svg version="1.1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" xml:space="preserve">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0F766E"/>
+      <stop offset="100%" stop-color="#0D9488"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#F59E0B"/>
+      <stop offset="100%" stop-color="#FBBF24"/>
+    </linearGradient>
+  </defs>
+  <!-- Rounded square background -->
+  <rect x="1" y="1" width="30" height="30" rx="7" ry="7" fill="url(#bg)"/>
+  <!-- S letter - stylized -->
+  <g transform="translate(16, 16)">
+    <!-- Top curve of S -->
+    <path d="M3.5,-6.5 C3.5,-6.5 3.5,-8 0,-8 C-3.5,-8 -3.5,-5.5 -3.5,-5.5 C-3.5,-5.5 -3.5,-3 3.5,-3"
+          fill="none" stroke="#FFFFFF" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
+    <!-- Bottom curve of S -->
+    <path d="M-3.5,6.5 C-3.5,6.5 -3.5,8 0,8 C3.5,8 3.5,5.5 3.5,5.5 C3.5,5.5 3.5,3 -3.5,3"
+          fill="none" stroke="#FFFFFF" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <!-- Small roof accent (hospitality) -->
+  <path d="M16,5 L24,11" stroke="url(#accent)" stroke-width="1.8" stroke-linecap="round" opacity="0.9"/>
+  <path d="M16,5 L8,11" stroke="url(#accent)" stroke-width="1.8" stroke-linecap="round" opacity="0.9"/>
+</svg>
