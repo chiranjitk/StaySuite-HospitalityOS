@@ -5085,17 +5085,28 @@ app.get('/api/user-usage/summary', (c) => {
       ? 'totalSessionTime DESC'
       : 'totalDownloadBytes DESC';
 
+    // Use v_user_usage view for enriched per-user usage data
+    const viewWhereClause = whereClause.replace(/acctstarttime/g, 'last_session_start');
+
     const summarySql = `
       SELECT
         username,
-        COUNT(*)                                                            AS totalSessions,
-        COALESCE(SUM(acctinputoctets), 0)                                   AS totalUploadBytes,
-        COALESCE(SUM(acctoutputoctets), 0)                                  AS totalDownloadBytes,
-        COALESCE(SUM(acctsessiontime), 0)                                   AS totalSessionTime,
-        MAX(COALESCE(acctupdatetime, acctstarttime))                        AS lastSeen,
-        SUM(CASE WHEN acctstoptime IS NULL THEN 1 ELSE 0 END)              AS activeSessions
-      FROM radacct
-      ${whereClause}
+        total_sessions        AS totalSessions,
+        active_sessions      AS activeSessions,
+        total_download_bytes AS totalDownloadBytes,
+        total_upload_bytes AS totalUploadBytes,
+        total_session_time   AS totalSessionTime,
+        last_session_start   AS lastSeen,
+        guest_first_name,
+        guest_last_name,
+        guest_email,
+        room_number,
+        property_name,
+        plan_name,
+        plan_download_speed AS downloadSpeed,
+        plan_upload_speed   AS uploadSpeed,
+        dataLimit
+      FROM v_user_usage ${viewWhereClause}
       GROUP BY username
       ORDER BY ${orderBy}
       LIMIT ?
@@ -5110,37 +5121,45 @@ app.get('/api/user-usage/summary', (c) => {
       totalSessionTime:     Number(row.totalSessionTime),
       lastSeen:             row.lastSeen as string || null,
       activeSessions:       Number(row.activeSessions),
+      guestName:           [row.guest_first_name, row.guest_last_name].filter(Boolean).join(' ') || '',
+      guestEmail:          row.guest_email || '',
+      roomNumber:          row.room_number || '',
+      propertyName:        row.property_name || '',
+      planName:            row.plan_name || '',
+      downloadSpeed:       row.downloadSpeed || null,
+      uploadSpeed:         row.uploadSpeed || null,
+      dataLimit:           row.dataLimit || null,
     }));
 
     // ---- Overall stats ----
     const totalUsersRow = db.query(
-      `SELECT COUNT(DISTINCT username) AS cnt FROM radacct ${whereClause}`
+      `SELECT COUNT(*) AS cnt FROM v_user_usage ${viewWhereClause}`
     ).get(...whereParams) as { cnt: number } | undefined;
 
     const bandwidthRow = db.query(
       `SELECT
-        COALESCE(SUM(acctinputoctets), 0) AS totalUpload,
-        COALESCE(SUM(acctoutputoctets), 0) AS totalDownload
-      FROM radacct ${whereClause}`
+        COALESCE(SUM(total_upload_bytes), 0) AS totalUpload,
+        COALESCE(SUM(total_download_bytes), 0) AS totalDownload
+      FROM v_user_usage ${viewWhereClause}`
     ).get(...whereParams) as { totalUpload: number; totalDownload: number } | undefined;
 
     const topUserRow = db.query(
-      `SELECT username, COALESCE(SUM(acctoutputoctets), 0) AS totalDownload
-       FROM radacct ${whereClause}
+      `SELECT username, total_download_bytes AS totalDownload
+       FROM v_user_usage ${viewWhereClause}
        GROUP BY username
        ORDER BY totalDownload DESC
        LIMIT 1`
     ).get(...whereParams) as { username: string; totalDownload: number } | undefined;
 
-    const totalUploadBytes = bandwidthRow?.totalUpload || 0;
-    const totalDownloadBytes = bandwidthRow?.totalDownload || 0;
+    const totalUploadBytes = Number(bandwidthRow?.totalUpload ?? 0);
+    const totalDownloadBytes = Number(bandwidthRow?.totalDownload ?? 0);
 
     return c.json({
       success: true,
       data: {
         users,
         overallStats: {
-          totalUsers: totalUsersRow?.cnt || 0,
+          totalUsers: Number(totalUsersRow?.cnt ?? 0),
           totalBandwidth: totalUploadBytes + totalDownloadBytes,
           totalUploadBytes,
           totalDownloadBytes,

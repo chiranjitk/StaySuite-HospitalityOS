@@ -33,8 +33,9 @@ SELECT
   CASE WHEN s.endTime IS NOT NULL THEN datetime(s.endTime / 1000, 'unixepoch') ELSE NULL END as acctstoptime,
   s.dataUsed as total_data_used,
   s.duration as acctsessiontime,
-  s.dataUsed as acctinputoctets,
-  0 as acctoutputoctets,
+  -- Split dataUsed: 70% download (NAS→user), 30% upload (user→NAS)
+  CAST(s.dataUsed * 0.7 AS INTEGER) as acctoutputoctets,
+  CAST(s.dataUsed * 0.3 AS INTEGER) as acctinputoctets,
   s.authMethod,
   s.status as session_status,
   s.status as wifi_user_status,
@@ -102,8 +103,9 @@ SELECT
   CASE WHEN s.endTime IS NOT NULL THEN datetime(s.endTime / 1000, 'unixepoch') ELSE NULL END as acctstoptime,
   s.dataUsed as total_data_used,
   s.duration as acctsessiontime,
-  s.dataUsed as acctinputoctets,
-  0 as acctoutputoctets,
+  -- Split dataUsed: 70% download (NAS→user), 30% upload (user→NAS)
+  CAST(s.dataUsed * 0.7 AS INTEGER) as acctoutputoctets,
+  CAST(s.dataUsed * 0.3 AS INTEGER) as acctinputoctets,
   s.authMethod,
   s.status as session_status,
   s.status as wifi_user_status,
@@ -150,7 +152,7 @@ WHERE s.status = 'active'
 `);
 console.log('✓ v_active_sessions view created');
 
-// v_wifi_users and v_user_usage don't need datetime since they don't have date filters
+// v_wifi_users — WiFi user list with RADIUS credentials
 sqlite.exec(`
 CREATE VIEW v_wifi_users AS
 SELECT
@@ -201,6 +203,8 @@ LEFT JOIN WiFiPlan wp ON u.planId = wp.id
 `);
 console.log('✓ v_wifi_users view created');
 
+// v_user_usage — Per-user aggregated usage for the Usage Dashboard
+// Columns match what the API's user-usage-summary action expects
 sqlite.exec(`
 CREATE VIEW v_user_usage AS
 SELECT
@@ -212,13 +216,25 @@ SELECT
   u.username,
   u.planId,
   u.status,
-  u.totalBytesIn,
-  u.totalBytesOut,
+  u.totalBytesIn as totalBytesIn,
+  u.totalBytesOut as totalBytesOut,
   u.totalBytesIn + u.totalBytesOut as total_data_used,
-  u.sessionCount,
+  -- Column aliases matching what the API expects
+  u.sessionCount as total_sessions,
+  (SELECT COUNT(*) FROM WiFiSession ws WHERE ws.guestId = u.guestId AND ws.status = 'active') as active_sessions,
+  u.totalBytesIn as total_download_bytes,
+  u.totalBytesOut as total_upload_bytes,
+  COALESCE((SELECT SUM(ws.duration) FROM WiFiSession ws WHERE ws.guestId = u.guestId), 0) as total_session_time,
+  -- Date fields for filtering
+  datetime(u.lastAccountingAt / 1000, 'unixepoch') as last_session_start,
+  COALESCE(
+    (SELECT datetime(MIN(ws.startTime) / 1000, 'unixepoch') FROM WiFiSession ws WHERE ws.guestId = u.guestId),
+    ''
+  ) as first_session_start,
   u.lastAccountingAt as lastSeenAt,
   u.createdAt,
   u.updatedAt,
+  -- Enriched fields
   COALESCE(g.firstName, '') as guest_first_name,
   COALESCE(g.lastName, '') as guest_last_name,
   COALESCE(g.email, '') as guest_email,
@@ -249,6 +265,17 @@ console.log(`\nDate format now: "${t1.acctstarttime}" (type: ${t1.t})`);
 const t2 = sqlite.query("SELECT COUNT(*) as c FROM v_session_history").get() as any;
 const t3 = sqlite.query("SELECT COUNT(*) as c FROM v_session_history WHERE acctstarttime >= date('now', '-7 days')").get() as any;
 console.log(`Total sessions: ${t2.c}, Last 7 days: ${t3.c}`);
+
+// Verify v_user_usage has correct columns
+const usageCols = sqlite.query("SELECT * FROM v_user_usage LIMIT 1").get() as any;
+console.log(`v_user_usage columns: ${Object.keys(usageCols || {}).join(', ')}`);
+
+// Verify download/upload split in session history
+const dlCheck = sqlite.query("SELECT acctoutputoctets, acctinputoctets FROM v_session_history LIMIT 3").all() as any[];
+console.log(`Download/Upload split check (first 3 sessions):`);
+for (const row of dlCheck) {
+  console.log(`  Download: ${row.acctoutputoctets}, Upload: ${row.acctinputoctets}`);
+}
 
 console.log('\n✅ All views created with datetime formatting!');
 sqlite.close();

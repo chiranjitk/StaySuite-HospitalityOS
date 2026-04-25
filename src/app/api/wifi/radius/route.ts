@@ -260,10 +260,10 @@ export async function GET(request: NextRequest) {
             timestamp: e.acctstarttime || '',
             username: e.username || '',
             authResult: 'Access-Accept',
-            authType: 'PAP',
+            authType: e.nasporttype || 'PAP',
             nasIpAddress: e.nasipaddress || '',
             callingStationId: e.callingstationid || '',
-            replyMessage: '',
+            replyMessage: e.plan_name ? `Plan: ${e.plan_name}` : 'Authenticated successfully',
             // Enriched fields from view
             guestName: [e.guest_first_name, e.guest_last_name].filter(Boolean).join(' ') || '',
             roomNumber: e.room_number || '',
@@ -301,10 +301,10 @@ export async function GET(request: NextRequest) {
           if (endDateStr) { conditions.push(`acctstarttime <= ?`); params.push(`${endDateStr} 23:59:59`); }
           const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-          const totalAuths = (await db.$queryRawUnsafe<{ c: number }[]>(
+          const totalAuths = Number((await db.$queryRawUnsafe<{ c: number | bigint }[]>(
             `SELECT COUNT(DISTINCT acctuniqueid) as c FROM v_session_history ${whereClause}`,
             ...params
-          ))[0]?.c ?? 0;
+          ))[0]?.c ?? 0);
 
           // All records in the view are successful auths (rejects don't get accounting)
           const acceptCount = resultFilter === 'Access-Reject' ? 0 : totalAuths;
@@ -327,15 +327,15 @@ export async function GET(request: NextRequest) {
             : `WHERE acctstarttime >= ? AND acctstarttime < ?`;
           const prevDayParams = [...params, dayBefore.toISOString().slice(0, 10), yesterday.toISOString().slice(0, 10)];
 
-          const todayCount = (await db.$queryRawUnsafe<{ c: number }[]>(
+          const todayCount = Number((await db.$queryRawUnsafe<{ c: number | bigint }[]>(
             `SELECT COUNT(DISTINCT acctuniqueid) as c FROM v_session_history ${todayWhere}`,
             ...todayParams
-          ))[0]?.c ?? 0;
+          ))[0]?.c ?? 0);
 
-          const prevDayCount = (await db.$queryRawUnsafe<{ c: number }[]>(
+          const prevDayCount = Number((await db.$queryRawUnsafe<{ c: number | bigint }[]>(
             `SELECT COUNT(DISTINCT acctuniqueid) as c FROM v_session_history ${prevDayWhere}`,
             ...prevDayParams
-          ))[0]?.c ?? 0;
+          ))[0]?.c ?? 0);
 
           const last24hTrend = prevDayCount > 0
             ? Math.round(((todayCount - prevDayCount) / prevDayCount) * 100)
@@ -794,6 +794,15 @@ export async function GET(request: NextRequest) {
           // Build date filter on the view
           const conditions: string[] = [];
           const sqlParams: unknown[] = [];
+
+          // Quick test: verify view is accessible
+          const viewTest = await db.$queryRawUnsafe<{ c: number | bigint }[]>(
+            'SELECT COUNT(*) as c FROM v_user_usage'
+          );
+          const viewCount = Number(viewTest[0]?.c ?? 0);
+          if (viewCount === 0) {
+            return NextResponse.json({ success: true, data: [], stats: { totalUsers: 0, totalBandwidth: 0, avgPerUser: 0, topUser: null }, _debug: 'view_empty' });
+          }
           if (startDateStr) { conditions.push(`first_session_start >= ?`); sqlParams.push(startDateStr); }
           if (endDateStr) { conditions.push(`first_session_start <= ?`); sqlParams.push(`${endDateStr} 23:59:59`); }
           const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -808,11 +817,11 @@ export async function GET(request: NextRequest) {
           const orderBy = orderByMap[sortBy] || orderByMap.download;
 
           // Get total user count for stats
-          const totalUsersRow = await db.$queryRawUnsafe<{ c: number }[]>(
+          const totalUsersRow = await db.$queryRawUnsafe<{ c: number | bigint }[]>(
             `SELECT COUNT(*) as c FROM v_user_usage ${whereClause}`,
             ...sqlParams
           );
-          const totalUsers = totalUsersRow[0]?.c ?? 0;
+          const totalUsers = Number(totalUsersRow[0]?.c ?? 0);
 
           // Get paginated data
           sqlParams.push(limit);
@@ -845,14 +854,14 @@ export async function GET(request: NextRequest) {
             LIMIT ?
           `, ...sqlParams);
 
-          // Map view columns to response format (camelCase)
+          // Map view columns to response format (camelCase) — BigInt-safe
           const sortedUsers = usageRows.map((r) => ({
             username: r.username,
-            totalSessions: r.total_sessions,
-            activeSessions: r.active_sessions,
-            totalDownloadBytes: r.total_download_bytes,
-            totalUploadBytes: r.total_upload_bytes,
-            totalSessionTime: r.total_session_time,
+            totalSessions: Number(r.total_sessions ?? 0),
+            activeSessions: Number(r.active_sessions ?? 0),
+            totalDownloadBytes: Number(r.total_download_bytes ?? 0),
+            totalUploadBytes: Number(r.total_upload_bytes ?? 0),
+            totalSessionTime: Number(r.total_session_time ?? 0),
             lastSeen: r.last_session_start || '',
             // Enriched fields from view
             guestName: [r.guest_first_name, r.guest_last_name].filter(Boolean).join(' ') || '',
@@ -866,7 +875,7 @@ export async function GET(request: NextRequest) {
           }));
 
           // Overall stats
-          const totalBandwidth = usageRows.reduce((sum, u) => sum + u.total_download_bytes + u.total_upload_bytes, 0);
+          const totalBandwidth = usageRows.reduce((sum, u) => sum + Number(u.total_download_bytes ?? 0) + Number(u.total_upload_bytes ?? 0), 0);
           const overallStats = {
             totalUsers,
             totalBandwidth,
@@ -940,7 +949,7 @@ export async function GET(request: NextRequest) {
             ORDER BY acctstarttime DESC
           `, ...sqlParams);
 
-          // Build sessions list
+          // Build sessions list — BigInt-safe
           const sessions = userRecords.map((r) => ({
             id: r.acctuniqueid || r.acctsessionid,
             sessionId: r.acctsessionid,
@@ -950,9 +959,9 @@ export async function GET(request: NextRequest) {
             nasIdentifier: r.calledstationid || null,
             ipAddress: r.framedipaddress || '',
             macAddress: r.callingstationid || '',
-            downloadBytes: r.acctoutputoctets || 0,
-            uploadBytes: r.acctinputoctets || 0,
-            sessionTime: r.acctsessiontime || 0,
+            downloadBytes: Number(r.acctoutputoctets ?? 0),
+            uploadBytes: Number(r.acctinputoctets ?? 0),
+            sessionTime: Number(r.acctsessiontime ?? 0),
             isActive: !r.acctstoptime,
             // Enriched fields from view
             guestName: [r.guest_first_name, r.guest_last_name].filter(Boolean).join(' ') || '',
@@ -968,12 +977,12 @@ export async function GET(request: NextRequest) {
               const dateKey = r.acctupdatetime.split('T')[0];
               const existing = dailyMap.get(dateKey);
               if (existing) {
-                existing.downloadBytes += r.acctoutputoctets || 0;
-                existing.uploadBytes += r.acctinputoctets || 0;
+                existing.downloadBytes += Number(r.acctoutputoctets ?? 0);
+                existing.uploadBytes += Number(r.acctinputoctets ?? 0);
               } else {
                 dailyMap.set(dateKey, {
-                  downloadBytes: r.acctoutputoctets || 0,
-                  uploadBytes: r.acctinputoctets || 0,
+                  downloadBytes: Number(r.acctoutputoctets ?? 0),
+                  uploadBytes: Number(r.acctinputoctets ?? 0),
                 });
               }
             }
@@ -994,10 +1003,10 @@ export async function GET(request: NextRequest) {
               totalBytes: bytes.downloadBytes + bytes.uploadBytes,
             }));
 
-          // Summary stats
-          const totalDownloadBytes = userRecords.reduce((s, r) => s + (r.acctoutputoctets || 0), 0);
-          const totalUploadBytes = userRecords.reduce((s, r) => s + (r.acctinputoctets || 0), 0);
-          const totalSessionTime = userRecords.reduce((s, r) => s + (r.acctsessiontime || 0), 0);
+          // Summary stats — BigInt-safe
+          const totalDownloadBytes = userRecords.reduce((s, r) => s + Number(r.acctoutputoctets ?? 0), 0);
+          const totalUploadBytes = userRecords.reduce((s, r) => s + Number(r.acctinputoctets ?? 0), 0);
+          const totalSessionTime = userRecords.reduce((s, r) => s + Number(r.acctsessiontime ?? 0), 0);
           const activeSessions = userRecords.filter(r => !r.acctstoptime).length;
 
           const responseData = {
