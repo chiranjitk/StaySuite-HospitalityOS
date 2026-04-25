@@ -41,32 +41,102 @@ export async function GET(request: NextRequest) {    const user = await requireP
     const page = parseInt(searchParams.get('page') || '1');
     const limit = parseInt(searchParams.get('limit') || '50');
 
-    const where: any = {};
-    where.tenantId = user.tenantId;
-    
-    if (propertyId) where.propertyId = propertyId;
-    if (guestId) where.guestId = guestId;
-    if (bookingId) where.bookingId = bookingId;
-    if (status) where.status = status;
+    // Build SQL conditions on the v_wifi_users view
+    const conditions: string[] = ['tenantId = ?'];
+    const sqlParams: unknown[] = [user.tenantId];
 
-    const [users, total] = await Promise.all([
-      db.wiFiUser.findMany({
-        where,
-        include: {
-          radCheck: {
-            where: { isActive: true },
-          },
-          radReply: {
-            where: { isActive: true },
-          },
-          plan: true,
-        },
-        orderBy: { createdAt: 'desc' },
-        skip: (page - 1) * limit,
-        take: limit,
-      }),
-      db.wiFiUser.count({ where }),
-    ]);
+    if (propertyId) { conditions.push(`propertyId = ?`); sqlParams.push(propertyId); }
+    if (guestId) { conditions.push(`guestId = ?`); sqlParams.push(guestId); }
+    if (bookingId) { conditions.push(`bookingId = ?`); sqlParams.push(bookingId); }
+    if (status) { conditions.push(`status = ?`); sqlParams.push(status); }
+
+    const whereClause = `WHERE ${conditions.join(' AND ')}`;
+    const offset = (page - 1) * limit;
+
+    // Count total
+    const totalResult = await db.$queryRawUnsafe<{ c: number }[]>(
+      `SELECT COUNT(*) as c FROM v_wifi_users ${whereClause}`,
+      ...sqlParams
+    );
+    const total = totalResult[0]?.c ?? 0;
+
+    // Fetch paginated users from the view
+    sqlParams.push(limit, offset);
+    const rows = await db.$queryRawUnsafe<Record<string, unknown>[]>(`
+      SELECT id, tenantId, propertyId, guestId, bookingId, username, planId,
+             status, authMethod, macAddress, validFrom, validUntil,
+             totalBytesIn, totalBytesOut, sessionCount, lastSeenAt,
+             createdAt, updatedAt,
+             radius_password, radius_group,
+             guest_first_name, guest_last_name, guest_email, guest_phone,
+             guest_loyalty_tier, guest_is_vip,
+             room_number, room_name, room_floor,
+             property_name, plan_name,
+             plan_download_speed, plan_upload_speed, plan_data_limit,
+             booking_code, booking_status, booking_check_in, booking_check_out
+      FROM v_wifi_users ${whereClause}
+      ORDER BY createdAt DESC
+      LIMIT ? OFFSET ?
+    `, ...sqlParams);
+
+    // Reconstruct the nested format to maintain backward compatibility
+    const users = rows.map((row) => ({
+      id: row.id,
+      tenantId: row.tenantId,
+      propertyId: row.propertyId,
+      guestId: row.guestId,
+      bookingId: row.bookingId,
+      username: row.username,
+      planId: row.planId,
+      status: row.status,
+      authMethod: row.authMethod,
+      macAddress: row.macAddress,
+      validFrom: row.validFrom,
+      validUntil: row.validUntil,
+      totalBytesIn: row.totalBytesIn,
+      totalBytesOut: row.totalBytesOut,
+      sessionCount: row.sessionCount,
+      lastSeenAt: row.lastSeenAt,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+      // Reconstruct radCheck from view columns
+      radCheck: row.radius_password ? [{
+        username: row.username,
+        attribute: 'Cleartext-Password',
+        op: ':=',
+        value: row.radius_password,
+        isActive: true,
+      }] : [],
+      // Reconstruct radReply from plan columns
+      radReply: row.planId ? [
+        { username: row.username, attribute: 'WISPr-Bandwidth-Max-Down', op: ':=', value: String(row.plan_download_speed || 0), isActive: true },
+        { username: row.username, attribute: 'WISPr-Bandwidth-Max-Up', op: ':=', value: String(row.plan_upload_speed || 0), isActive: true },
+      ] : [],
+      // Reconstruct plan relation from view columns
+      plan: row.planId ? {
+        id: row.planId,
+        name: row.plan_name,
+        downloadSpeed: row.plan_download_speed,
+        uploadSpeed: row.plan_upload_speed,
+        dataLimit: row.plan_data_limit,
+      } : null,
+      // Enriched fields from view
+      radius_group: row.radius_group,
+      guest_first_name: row.guest_first_name,
+      guest_last_name: row.guest_last_name,
+      guest_email: row.guest_email,
+      guest_phone: row.guest_phone,
+      guest_loyalty_tier: row.guest_loyalty_tier,
+      guest_is_vip: row.guest_is_vip,
+      room_number: row.room_number,
+      room_name: row.room_name,
+      room_floor: row.room_floor,
+      property_name: row.property_name,
+      booking_code: row.booking_code,
+      booking_status: row.booking_status,
+      booking_check_in: row.booking_check_in,
+      booking_check_out: row.booking_check_out,
+    }));
 
     return NextResponse.json({
       success: true,

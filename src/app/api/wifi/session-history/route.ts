@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
-import { Prisma } from '@prisma/client'
 import { requirePermission } from '@/lib/auth/tenant-context'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -113,7 +112,7 @@ function parsePagination(limitStr: string | null, offsetStr: string | null): {
  * Build the default date range (last 7 days).
  * startDate = midnight 7 days ago, endDate = now (end of today).
  */
-function getDefaultDateRange(): { startDate: Date; endDate: Date } {
+function getDefaultDateRange(): { startDate: string; endDate: string } {
   const now = new Date()
   const startDate = new Date(now)
   startDate.setDate(startDate.getDate() - DEFAULT_DATE_RANGE_DAYS)
@@ -123,79 +122,77 @@ function getDefaultDateRange(): { startDate: Date; endDate: Date } {
   const endDate = new Date(now)
   endDate.setHours(23, 59, 59, 999)
 
-  return { startDate, endDate }
+  return {
+    startDate: startDate.toISOString().slice(0, 10),
+    endDate: endDate.toISOString().slice(0, 10) + ' 23:59:59',
+  }
 }
 
 /**
- * Parse ISO date strings into Date objects.
+ * Parse ISO date strings into date range strings for SQL.
  * Validates that startDate < endDate.
  */
 function parseDateRange(
   startDateStr: string | null,
   endDateStr: string | null
-): { startDate: Date; endDate: Date } | null {
+): { startDate: string; endDate: string } | null {
   if (!startDateStr && !endDateStr) {
     return null // Will use default
   }
 
-  const startDate = startDateStr ? new Date(startDateStr) : new Date('2000-01-01')
-  const endDate = endDateStr
-    ? (() => {
-        const d = new Date(endDateStr)
-        d.setHours(23, 59, 59, 999)
-        return d
-      })()
-    : new Date()
-
-  if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
-    return null
-  }
+  const startDate = startDateStr || '2000-01-01'
+  const endDate = endDateStr || new Date().toISOString().slice(0, 10) + ' 23:59:59'
 
   return { startDate, endDate }
 }
 
 /**
- * Build the Prisma WHERE clause from the parsed filters.
+ * Build SQL WHERE conditions from the parsed filters.
  *
  * CRITICAL: The date range filter on acctstarttime is ALWAYS applied
  * — either from user-provided dates or the default 7-day range.
  * This prevents accidental full-table scans on large datasets.
  */
-function buildWhereClause(filters: SessionHistoryFilters, dateRange: { startDate: Date; endDate: Date }): Prisma.RadAcctWhereInput {
-  const where: Prisma.RadAcctWhereInput = {
-    // ALWAYS filter by acctstarttime to prevent full table scans
-    // Note: Only use gte to avoid Prisma/SQLite DateTime lte comparison bug
-    acctstarttime: {
-      gte: dateRange.startDate,
-    },
-  }
+function buildSqlConditions(
+  filters: SessionHistoryFilters,
+  dateRange: { startDate: string; endDate: string }
+): { whereClause: string; params: unknown[] } {
+  const conditions: string[] = []
+  const params: unknown[] = []
+
+  // ALWAYS filter by acctstarttime to prevent full table scans
+  conditions.push(`acctstarttime >= ?`)
+  params.push(dateRange.startDate)
+  conditions.push(`acctstarttime <= ?`)
+  params.push(dateRange.endDate)
 
   // Username LIKE search (case-insensitive substring match)
   if (filters.username) {
-    where.username = { contains: filters.username, mode: 'insensitive' }
+    conditions.push(`username LIKE ?`)
+    params.push(`%${filters.username}%`)
   }
 
   // NAS IP exact match
   if (filters.nasIp) {
-    where.nasipaddress = filters.nasIp
+    conditions.push(`nasipaddress = ?`)
+    params.push(filters.nasIp)
   }
 
   // Calling station ID (MAC address) — case-insensitive contains
   if (filters.callingStationId) {
-    where.callingstationid = { contains: filters.callingStationId, mode: 'insensitive' }
+    conditions.push(`callingstationid LIKE ?`)
+    params.push(`%${filters.callingStationId}%`)
   }
 
   // Status filter
   if (filters.status === 'active') {
-    where.acctstoptime = null
+    conditions.push(`acctstoptime IS NULL`)
   } else if (filters.status === 'stopped') {
-    where.acctstoptime = { not: null }
+    conditions.push(`acctstoptime IS NOT NULL`)
   }
 
-  // propertyId — reserved for future multi-tenant filtering
-  // No-op for now since RadAcct is a RADIUS table without tenant scope
-
-  return where
+  const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
+  return { whereClause, params }
 }
 
 /**
@@ -212,11 +209,11 @@ function escapeCsvField(value: unknown): string {
 }
 
 /**
- * Format a Date for CSV output (ISO 8601).
+ * Format a value for CSV output.
  */
-function formatDateForCsv(date: Date | null | undefined): string {
-  if (!date) return ''
-  return date.toISOString()
+function formatForCsv(value: unknown): string {
+  if (value === null || value === undefined) return ''
+  return String(value)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -227,23 +224,6 @@ export async function GET(request: NextRequest) {
   try {
     const context = await requirePermission(request, 'reports.view')
     if (context instanceof NextResponse) return context
-
-    // Fix radacct DateTime columns that FreeRADIUS fills with empty strings ""
-    // instead of NULL — Prisma throws P2023 on these.
-    // Run individually: SQLite doesn't support multi-statement executeRawUnsafe.
-    try {
-      const cleanups = [
-        // PostgreSQL: cast timestamptz to text before comparing to empty string / zero-date
-        "UPDATE radacct SET acctstoptime = NULL WHERE acctstoptime::text IN ('', '0000-00-00 00:00:00')",
-        "UPDATE radacct SET acctstarttime = NULL WHERE acctstarttime::text IN ('', '0000-00-00 00:00:00')",
-        "UPDATE radacct SET acctupdatetime = NULL WHERE acctupdatetime::text IN ('', '0000-00-00 00:00:00')",
-        // acctinterval is BigInt, not timestamp — compare as text for empty/zero values
-        "UPDATE radacct SET acctinterval = NULL WHERE acctinterval::text IN ('', '0')",
-      ];
-      for (const sql of cleanups) {
-        await db.$executeRawUnsafe(sql);
-      }
-    } catch { /* table may not exist yet */ }
 
     const { searchParams } = request.nextUrl
 
@@ -284,11 +264,11 @@ export async function GET(request: NextRequest) {
       export: exportFormat || undefined,
     }
 
-    const where = buildWhereClause(filters, dateRange)
+    const { whereClause, params } = buildSqlConditions(filters, dateRange)
 
     // ── CSV Export path ─────────────────────────────────────────────────────
     if (exportFormat === 'csv') {
-      return handleCsvExport(where, dateRange, filters)
+      return handleCsvExport(whereClause, params, dateRange, filters)
     }
 
     // ── Execute queries in parallel for efficiency ──────────────────────────
@@ -297,62 +277,58 @@ export async function GET(request: NextRequest) {
     // 3. Count active sessions (acctstoptime IS NULL, within filter)
     // 4. Fetch paginated results
 
-    const [total, aggregateResult, activeCount, paginatedSessions] = await Promise.all([
-      // Total count within filters
-      db.radAcct.count({ where }),
+    const activeWhereClause = whereClause
+      ? `${whereClause} AND acctstoptime IS NULL`
+      : 'WHERE acctstoptime IS NULL'
 
-      // Summary aggregation — CRITICAL: this uses the same `where` clause
+    const [totalResult, summaryResult, activeCountResult, paginatedSessions] = await Promise.all([
+      // Total count within filters
+      db.$queryRawUnsafe<{ c: number }[]>(
+        `SELECT COUNT(*) as c FROM v_session_history ${whereClause}`,
+        ...params
+      ),
+
+      // Summary aggregation — CRITICAL: this uses the same WHERE clause
       // so it only counts/sums rows within the applied date filters
-      db.radAcct.aggregate({
-        where,
-        _count: true,
-        _sum: {
-          acctinputoctets: true,  // upload bytes (RFC 2866: input = traffic FROM user)
-          acctoutputoctets: true, // download bytes (RFC 2866: output = traffic TO user)
-        },
-      }),
+      db.$queryRawUnsafe<{
+        total: number;
+        total_input: number;
+        total_output: number;
+      }[]>(`
+        SELECT COUNT(*) as total,
+               COALESCE(SUM(acctinputoctets), 0) as total_input,
+               COALESCE(SUM(acctoutputoctets), 0) as total_output
+        FROM v_session_history ${whereClause}
+      `, ...params),
 
       // Active count (acctstoptime IS NULL) — within the same filter scope
-      db.radAcct.count({
-        where: {
-          ...where,
-          acctstoptime: null,
-        },
-      }),
+      db.$queryRawUnsafe<{ c: number }[]>(
+        `SELECT COUNT(*) as c FROM v_session_history ${activeWhereClause}`,
+        ...params
+      ),
 
       // Paginated session data, ordered by most recent first
-      db.radAcct.findMany({
-        where,
-        orderBy: { acctstarttime: 'desc' },
-        take: limit,
-        skip: offset,
-        select: {
-          radacctid: true,
-          acctsessionid: true,
-          acctuniqueid: true,
-          username: true,
-          nasipaddress: true,
-          nasportid: true,
-          nasporttype: true,
-          acctstarttime: true,
-          acctupdatetime: true,
-          acctstoptime: true,
-          acctsessiontime: true,
-          acctinputoctets: true,
-          acctoutputoctets: true,
-          callingstationid: true,
-          calledstationid: true,
-          acctterminatecause: true,
-          framedipaddress: true,
-          framedipv6address: true,
-          connectinfo_start: true,
-          connectinfo_stop: true,
-          createdAt: true,
-          updatedAt: true,
-        },
-      }),
+      db.$queryRawUnsafe<Record<string, unknown>[]>(`
+        SELECT radacctid, acctsessionid, acctuniqueid, username, nasipaddress,
+               nasportid, nasporttype, acctstarttime, acctupdatetime, acctstoptime,
+               acctsessiontime, acctinputoctets, acctoutputoctets,
+               callingstationid, calledstationid, acctterminatecause,
+               framedipaddress, framedipv6address,
+               connectinfo_start, connectinfo_stop,
+               guest_first_name, guest_last_name, guest_email, guest_phone,
+               room_number, room_name, room_floor,
+               property_name, plan_name,
+               downloadSpeed, uploadSpeed, dataLimit,
+               wifi_user_status, wifi_mac, session_status
+        FROM v_session_history ${whereClause}
+        ORDER BY acctstarttime DESC
+        LIMIT ? OFFSET ?
+      `, ...params, limit, offset),
     ])
 
+    const total = totalResult[0]?.c ?? 0
+    const aggregateRow = summaryResult[0]
+    const activeCount = activeCountResult[0]?.c ?? 0
     const totalPages = Math.ceil(total / limit)
 
     // ── Build response ──────────────────────────────────────────────────────
@@ -368,12 +344,12 @@ export async function GET(request: NextRequest) {
       summary: {
         total,
         active: activeCount,
-        totalDownload: aggregateResult._sum.acctoutputoctets ?? 0,
-        totalUpload: aggregateResult._sum.acctinputoctets ?? 0,
+        totalDownload: aggregateRow?.total_output ?? 0,
+        totalUpload: aggregateRow?.total_input ?? 0,
       },
       filters: {
-        startDate: dateRange.startDate.toISOString().split('T')[0],
-        endDate: dateRange.endDate.toISOString().split('T')[0],
+        startDate: dateRange.startDate.slice(0, 10),
+        endDate: dateRange.endDate.slice(0, 10),
         username: username ?? null,
         nasIp: nasIp ?? null,
         callingStationId: callingStationId ?? null,
@@ -390,19 +366,6 @@ export async function GET(request: NextRequest) {
   } catch (error) {
     console.error('[session-history] GET error:', error)
 
-    // Handle Prisma-specific errors
-    if (error instanceof Prisma.PrismaClientKnownRequestError) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: 'Database query failed',
-          code: error.code,
-          message: error.message,
-        },
-        { status: 500 }
-      )
-    }
-
     return NextResponse.json(
       {
         success: false,
@@ -418,37 +381,25 @@ export async function GET(request: NextRequest) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function handleCsvExport(
-  where: Prisma.RadAcctWhereInput,
-  dateRange: { startDate: Date; endDate: Date },
+  whereClause: string,
+  params: unknown[],
+  dateRange: { startDate: string; endDate: string },
   filters: SessionHistoryFilters
 ) {
   // For CSV export, we fetch ALL matching rows (with a safety cap of 50,000)
   const EXPORT_MAX_ROWS = 50_000
 
-  const sessions = await db.radAcct.findMany({
-    where,
-    orderBy: { acctstarttime: 'desc' },
-    take: EXPORT_MAX_ROWS,
-    select: {
-      radacctid: true,
-      acctsessionid: true,
-      acctuniqueid: true,
-      username: true,
-      nasipaddress: true,
-      nasporttype: true,
-      acctstarttime: true,
-      acctstoptime: true,
-      acctsessiontime: true,
-      acctinputoctets: true,
-      acctoutputoctets: true,
-      callingstationid: true,
-      calledstationid: true,
-      framedipaddress: true,
-      acctterminatecause: true,
-      connectinfo_start: true,
-      connectinfo_stop: true,
-    },
-  })
+  const sessions = await db.$queryRawUnsafe<Record<string, unknown>[]>(`
+    SELECT radacctid, acctsessionid, acctuniqueid, username, nasipaddress,
+           nasporttype, acctstarttime, acctstoptime, acctsessiontime,
+           acctinputoctets, acctoutputoctets,
+           callingstationid, calledstationid, framedipaddress,
+           acctterminatecause, connectinfo_start, connectinfo_stop,
+           guest_first_name, guest_last_name, room_number, property_name, plan_name
+    FROM v_session_history ${whereClause}
+    ORDER BY acctstarttime DESC
+    LIMIT ?
+  `, ...params, EXPORT_MAX_ROWS)
 
   // Generate CSV
   const csvRows: string[] = []
@@ -464,8 +415,8 @@ async function handleCsvExport(
       acctuniqueid: session.acctuniqueid,
       username: session.username,
       nasipaddress: session.nasipaddress,
-      acctstarttime: formatDateForCsv(session.acctstarttime),
-      acctstoptime: formatDateForCsv(session.acctstoptime),
+      acctstarttime: formatForCsv(session.acctstarttime),
+      acctstoptime: formatForCsv(session.acctstoptime),
       acctsessiontime: session.acctsessiontime ?? '',
       acctinputoctets: session.acctinputoctets ?? 0,
       acctoutputoctets: session.acctoutputoctets ?? 0,
@@ -484,8 +435,8 @@ async function handleCsvExport(
   const csvContent = csvRows.join('\n')
 
   // Generate filename with date range
-  const startDateStr = dateRange.startDate.toISOString().split('T')[0]
-  const endDateStr = dateRange.endDate.toISOString().split('T')[0]
+  const startDateStr = dateRange.startDate.slice(0, 10)
+  const endDateStr = dateRange.endDate.slice(0, 10)
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
   const filename = `session-history_${startDateStr}_to_${endDateStr}_${timestamp}.csv`
 

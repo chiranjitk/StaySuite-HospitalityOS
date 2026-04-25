@@ -11,18 +11,25 @@ async function seedHashPassword(password: string): Promise<string> {
 async function main() {
   console.log('Starting database seed...');
   
-  // Nuclear cleanup: truncate all tables (PostgreSQL TRUNCATE CASCADE handles FKs)
+  // Nuclear cleanup: delete all data (SQLite compatible)
   console.log('Cleaning all existing data...');
-  try {
-    await prisma.$executeRawUnsafe('TRUNCATE TABLE "User", "Role", "Tenant", "Property", "Room", "RoomType", "Guest", "Booking", "RatePlan", "Amenity", "Vendor", "StockItem", "OrderCategory", "MenuItem", "RestaurantTable" CASCADE;');
-    console.log('All tables truncated.');
-  } catch (e: any) {
-    // Tables may not exist yet on fresh install, that's OK
-    console.log('Note: Tables may not exist yet (fresh install), continuing...');
+  const deleteTables = [
+    'RadPostAuth', 'RadAcct', 'RadGroupReply', 'RadGroupCheck', 'RadUserGroup',
+    'RadReply', 'RadCheck', 'WiFiVoucher', 'WiFiSession', 'WiFiUser', 'WiFiGateway',
+    'WiFiAAAConfig', 'RadiusServerConfig', 'RadiusNAS',
+    'BookingAuditLog', 'Folio', 'GuestStay', 'GuestReview', 'GuestFeedback',
+    'GuestDocument', 'Booking', 'Guest', 'Room', 'RoomType', 'RatePlan',
+    'MenuItem', 'RestaurantTable', 'OrderCategory', 'Order', 'StockItem',
+    'Vendor', 'Amenity', 'AuditLog', 'User', 'Role', 'Tenant'
+  ];
+  for (const table of deleteTables) {
+    try {
+      await prisma.$executeRawUnsafe(`DELETE FROM "${table}"`);
+    } catch (e: any) {
+      // Table may not exist yet, that's OK
+    }
   }
-
-  console.log('Cleaning addon module data...');
-  // All data already cleaned via raw SQL above
+  console.log('All tables cleaned.');
   
   // Create tenant 1 - Royal Stay Hotels
   console.log('Seeding tenant 1...');
@@ -614,6 +621,43 @@ async function main() {
       { id: 'wifiplan-1', tenantId: 'tenant-1', name: 'Basic', description: 'Standard WiFi for browsing', downloadSpeed: 10, uploadSpeed: 5, dataLimit: 500, price: 0, currency: 'INR', priority: 1, validityDays: 1, status: 'active' },
       { id: 'wifiplan-2', tenantId: 'tenant-1', name: 'Premium', description: 'High-speed WiFi for streaming', downloadSpeed: 50, uploadSpeed: 25, dataLimit: null, price: 199, currency: 'INR', priority: 2, validityDays: 1, status: 'active' },
       { id: 'wifiplan-3', tenantId: 'tenant-1', name: 'Business', description: 'Ultra-fast WiFi for video calls', downloadSpeed: 100, uploadSpeed: 50, dataLimit: null, price: 399, currency: 'INR', priority: 3, validityDays: 1, status: 'active' },
+    ],
+  });
+
+  // Create WiFi AAA Config for property-1
+  console.log('Seeding WiFi AAA config...');
+  await prisma.wiFiAAAConfig.create({
+    data: {
+      id: 'aaa-1',
+      propertyId: 'property-1',
+      tenantId: 'tenant-1',
+      authMethod: 'pap',
+      maxConcurrentSessions: 3,
+      sessionTimeoutPolicy: 'hard',
+      defaultPlanId: 'wifiplan-1',
+      autoProvisionOnCheckin: true,
+      autoDeprovisionOnCheckout: true,
+      usernameFormat: 'room_random',
+      passwordFormat: 'random_alphanumeric',
+      portalEnabled: true,
+      status: 'active',
+    },
+  });
+
+  // Create RADIUS groups with check/reply attributes
+  console.log('Seeding RADIUS groups...');
+  await prisma.radGroupCheck.createMany({
+    data: [
+      { groupname: 'standard-guests', attribute: 'Simultaneous-Use', op: ':=', value: '2' },
+      { groupname: 'premium-guests', attribute: 'Simultaneous-Use', op: ':=', value: '3' },
+      { groupname: 'vip-guests', attribute: 'Simultaneous-Use', op: ':=', value: '5' },
+    ],
+  });
+  await prisma.radGroupReply.createMany({
+    data: [
+      { groupname: 'standard-guests', attribute: 'Mikrotik-Rate-Limit', op: ':=', value: '10M/5M' },
+      { groupname: 'premium-guests', attribute: 'Mikrotik-Rate-Limit', op: ':=', value: '25M/15M' },
+      { groupname: 'vip-guests', attribute: 'Mikrotik-Rate-Limit', op: ':=', value: '50M/30M' },
     ],
   });
 
@@ -1981,6 +2025,121 @@ async function main() {
   }
 
   console.log('Addon module seed data completed!');
+
+  // Create WiFi view tables for GUI (read from FreeRADIUS tables + StaySuite context)
+  console.log('Creating WiFi view tables...');
+
+  const views = [
+    `CREATE VIEW IF NOT EXISTS v_active_sessions AS
+     SELECT
+       ra.radacctid, ra.acctsessionid, ra.username, ra.acctstarttime, ra.acctupdatetime,
+       ra.acctstoptime, ra.acctsessiontime, ra.acctinputoctets, ra.acctoutputoctets,
+       ra.acctterminatecause, ra.nasipaddress, ra.nasidentifier, ra.nasportid,
+       ra.nasporttype, ra.calledstationid, ra.callingstationid, ra.framedipaddress,
+       wu.id AS wifi_user_id, wu.guestId, wu.bookingId, wu.propertyId, wu.planId,
+       wu.status AS wifi_user_status,
+       g.firstName AS guest_first_name, g.lastName AS guest_last_name,
+       g.email AS guest_email, g.phone AS guest_phone,
+       r.number AS room_number, r.name AS room_name, r.floor AS room_floor,
+       p.name AS property_name,
+       wp.name AS plan_name, wp.downloadSpeed, wp.uploadSpeed, wp.dataLimit,
+       b.confirmationCode AS booking_code,
+       rug.groupname,
+       CASE WHEN ra.acctstoptime IS NULL THEN 'active' ELSE 'stopped' END AS session_status
+     FROM radacct ra
+     LEFT JOIN WiFiUser wu ON ra.username = wu.username
+     LEFT JOIN Guest g ON wu.guestId = g.id
+     LEFT JOIN Booking b ON wu.bookingId = b.id
+     LEFT JOIN Room r ON b.roomId = r.id
+     LEFT JOIN Property p ON wu.propertyId = p.id
+     LEFT JOIN WiFiPlan wp ON wu.planId = wp.id
+     LEFT JOIN RadUserGroup rug ON ra.username = rug.username`,
+
+    `CREATE VIEW IF NOT EXISTS v_session_history AS
+     SELECT
+       ra.radacctid, ra.acctsessionid, ra.username, ra.acctstarttime, ra.acctupdatetime,
+       ra.acctstoptime, ra.acctsessiontime, ra.acctinputoctets, ra.acctoutputoctets,
+       ra.acctterminatecause, ra.nasipaddress, ra.nasidentifier, ra.nasportid,
+       ra.nasporttype, ra.calledstationid, ra.callingstationid, ra.framedipaddress,
+       wu.id AS wifi_user_id, wu.guestId, wu.bookingId, wu.propertyId, wu.planId,
+       wu.status AS wifi_user_status,
+       g.firstName AS guest_first_name, g.lastName AS guest_last_name,
+       g.email AS guest_email, g.phone AS guest_phone,
+       r.number AS room_number, r.name AS room_name, r.floor AS room_floor,
+       p.name AS property_name,
+       wp.name AS plan_name, wp.downloadSpeed, wp.uploadSpeed, wp.dataLimit,
+       b.confirmationCode AS booking_code,
+       rug.groupname,
+       CASE WHEN ra.acctstoptime IS NULL THEN 'active' ELSE 'stopped' END AS session_status
+     FROM radacct ra
+     LEFT JOIN WiFiUser wu ON ra.username = wu.username
+     LEFT JOIN Guest g ON wu.guestId = g.id
+     LEFT JOIN Booking b ON wu.bookingId = b.id
+     LEFT JOIN Room r ON b.roomId = r.id
+     LEFT JOIN Property p ON wu.propertyId = p.id
+     LEFT JOIN WiFiPlan wp ON wu.planId = wp.id
+     LEFT JOIN RadUserGroup rug ON ra.username = rug.username`,
+
+    `CREATE VIEW IF NOT EXISTS v_wifi_users AS
+     SELECT
+       wu.id, wu.tenantId, wu.propertyId, wu.guestId, wu.bookingId,
+       wu.username, wu.planId, wu.status, wu.userType,
+       wu.validFrom, wu.validUntil, wu.totalBytesIn, wu.totalBytesOut,
+       wu.sessionCount, wu.lastAccountingAt, wu.createdAt, wu.updatedAt,
+       rc.value AS radius_password,
+       rug.groupname AS radius_group,
+       g.firstName AS guest_first_name, g.lastName AS guest_last_name,
+       g.email AS guest_email, g.phone AS guest_phone,
+       g.loyaltyTier AS guest_loyalty_tier, g.isVip AS guest_is_vip,
+       r.number AS room_number, r.name AS room_name, r.floor AS room_floor,
+       p.name AS property_name,
+       wp.name AS plan_name, wp.downloadSpeed AS plan_download_speed,
+       wp.uploadSpeed AS plan_upload_speed, wp.dataLimit AS plan_data_limit,
+       b.confirmationCode AS booking_code, b.status AS booking_status,
+       b.checkIn AS booking_check_in, b.checkOut AS booking_check_out
+     FROM WiFiUser wu
+     LEFT JOIN RadCheck rc ON wu.username = rc.username AND rc.attribute = 'Cleartext-Password' AND rc.isActive = 1
+     LEFT JOIN RadUserGroup rug ON wu.username = rug.username
+     LEFT JOIN Guest g ON wu.guestId = g.id
+     LEFT JOIN Booking b ON wu.bookingId = b.id
+     LEFT JOIN Room r ON b.roomId = r.id
+     LEFT JOIN Property p ON wu.propertyId = p.id
+     LEFT JOIN WiFiPlan wp ON wu.planId = wp.id`,
+
+    `CREATE VIEW IF NOT EXISTS v_user_usage AS
+     SELECT
+       ra.username,
+       COUNT(*) AS total_sessions,
+       SUM(CASE WHEN ra.acctstoptime IS NULL THEN 1 ELSE 0 END) AS active_sessions,
+       SUM(COALESCE(ra.acctinputoctets, 0)) AS total_download_bytes,
+       SUM(COALESCE(ra.acctoutputoctets, 0)) AS total_upload_bytes,
+       SUM(COALESCE(ra.acctsessiontime, 0)) AS total_session_time,
+       MAX(ra.acctstarttime) AS last_session_start,
+       MIN(ra.acctstarttime) AS first_session_start,
+       wu.guestId, wu.bookingId, wu.propertyId, wu.planId,
+       g.firstName AS guest_first_name, g.lastName AS guest_last_name,
+       g.email AS guest_email,
+       r.number AS room_number,
+       p.name AS property_name,
+       wp.name AS plan_name, wp.downloadSpeed, wp.uploadSpeed, wp.dataLimit
+     FROM radacct ra
+     LEFT JOIN WiFiUser wu ON ra.username = wu.username
+     LEFT JOIN Guest g ON wu.guestId = g.id
+     LEFT JOIN Booking b ON wu.bookingId = b.id
+     LEFT JOIN Room r ON b.roomId = r.id
+     LEFT JOIN Property p ON wu.propertyId = p.id
+     LEFT JOIN WiFiPlan wp ON wu.planId = wp.id
+     GROUP BY ra.username`,
+  ];
+
+  for (const viewSql of views) {
+    try {
+      await prisma.$executeRawUnsafe(viewSql);
+      console.log('  Created view successfully');
+    } catch (e: any) {
+      console.log(`  View creation note: ${e.message}`);
+    }
+  }
 
   console.log('\n✅ Database seed completed successfully!');
 

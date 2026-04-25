@@ -17,7 +17,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth, requirePermission, hasPermission } from '@/lib/auth/tenant-context';
 import { db } from '@/lib/db';
-import { Prisma } from '@prisma/client';
 
 const RADIUS_SERVICE_URL = process.env.RADIUS_SERVICE_URL || 'http://localhost:3010';
 
@@ -201,14 +200,11 @@ export async function GET(request: NextRequest) {
         return NextResponse.json(data);
       }
 
-      // ─── Auth Logs: Raw SQL query on radacct ─────────────
-      // FreeRADIUS writes accounting records to radacct. Every accounting Start
-      // represents a successful authentication. We derive auth logs from these records.
-      // Uses raw SQL GROUP BY instead of Prisma distinct (Prisma+SQLite distinct
-      // is buggy when combined with orderBy + take + select).
+      // ─── Auth Logs: Query from v_session_history view ─────────────
+      // The view joins radacct with StaySuite tables (Guest, Room, Property, Plan).
+      // Every accounting Start represents a successful authentication.
       case 'auth-logs': {
         try {
-          await ensureRadacctClean();
           const limitStr = searchParams.get('limit') || '100';
           const limit = Math.min(parseInt(limitStr, 10) || 100, 500);
           const resultFilter = searchParams.get('result');
@@ -221,7 +217,7 @@ export async function GET(request: NextRequest) {
             return NextResponse.json({ success: true, data: [] });
           }
 
-          // Build raw SQL with GROUP BY — avoids Prisma+SQLite distinct bug
+          // Build SQL conditions on the view
           const conditions: string[] = [];
           const sqlParams: unknown[] = [];
           if (usernameFilter) { conditions.push(`username LIKE ?`); sqlParams.push(`%${usernameFilter}%`); }
@@ -239,11 +235,21 @@ export async function GET(request: NextRequest) {
             acctstarttime: string | null;
             nasporttype: string | null;
             calledstationid: string;
+            guest_first_name: string | null;
+            guest_last_name: string | null;
+            room_number: string | null;
+            property_name: string | null;
+            plan_name: string | null;
           }[]>(`
             SELECT MIN(radacctid) as radacctid, acctuniqueid, username, nasipaddress,
                    callingstationid, MAX(acctstarttime) as acctstarttime,
-                   nasporttype, calledstationid
-            FROM radacct ${whereClause}
+                   nasporttype, calledstationid,
+                   MAX(guest_first_name) as guest_first_name,
+                   MAX(guest_last_name) as guest_last_name,
+                   MAX(room_number) as room_number,
+                   MAX(property_name) as property_name,
+                   MAX(plan_name) as plan_name
+            FROM v_session_history ${whereClause}
             GROUP BY acctuniqueid
             ORDER BY MAX(acctstarttime) DESC
             LIMIT ?
@@ -258,6 +264,11 @@ export async function GET(request: NextRequest) {
             nasIpAddress: e.nasipaddress || '',
             callingStationId: e.callingstationid || '',
             replyMessage: '',
+            // Enriched fields from view
+            guestName: [e.guest_first_name, e.guest_last_name].filter(Boolean).join(' ') || '',
+            roomNumber: e.room_number || '',
+            propertyName: e.property_name || '',
+            planName: e.plan_name || '',
           }));
 
           return NextResponse.json({ success: true, data: logs });
@@ -274,6 +285,7 @@ export async function GET(request: NextRequest) {
         }
       }
 
+      // ─── Auth Logs Stats: Query from v_session_history view ──────
       case 'auth-logs-stats': {
         try {
           const usernameFilter = searchParams.get('username');
@@ -281,46 +293,50 @@ export async function GET(request: NextRequest) {
           const startDateStr = searchParams.get('startDate');
           const endDateStr = searchParams.get('endDate');
 
-          const where: Prisma.RadAcctWhereInput = {};
-          if (usernameFilter) where.username = { contains: usernameFilter };
-          if (startDateStr) {
-            const sd = new Date(startDateStr);
-            if (!isNaN(sd.getTime())) where.acctstarttime = { gte: sd };
-          }
-          if (endDateStr) {
-            const ed = new Date(endDateStr);
-            ed.setHours(23, 59, 59, 999);
-            if (!isNaN(ed.getTime())) {
-              where.acctstarttime = { ...(where.acctstarttime as Prisma.DateTimeFilter || {}), lte: ed };
-            }
-          }
+          // Build SQL conditions on the view
+          const conditions: string[] = [];
+          const params: unknown[] = [];
+          if (usernameFilter) { conditions.push(`username LIKE ?`); params.push(`%${usernameFilter}%`); }
+          if (startDateStr) { conditions.push(`acctstarttime >= ?`); params.push(startDateStr); }
+          if (endDateStr) { conditions.push(`acctstarttime <= ?`); params.push(`${endDateStr} 23:59:59`); }
+          const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-          const totalAuths = await db.radAcct.count({
-            where,
-          });
+          const totalAuths = (await db.$queryRawUnsafe<{ c: number }[]>(
+            `SELECT COUNT(DISTINCT acctuniqueid) as c FROM v_session_history ${whereClause}`,
+            ...params
+          ))[0]?.c ?? 0;
 
-          // All records in radacct are successful auths (rejects don't get accounting)
+          // All records in the view are successful auths (rejects don't get accounting)
           const acceptCount = resultFilter === 'Access-Reject' ? 0 : totalAuths;
           const rejectCount = 0;
           const successRate = totalAuths > 0 ? 100 : 0;
 
-          // Calculate 24h trend
+          // Calculate 24h trend using separate queries
           const yesterday = new Date();
           yesterday.setDate(yesterday.getDate() - 1);
           const dayBefore = new Date();
           dayBefore.setDate(dayBefore.getDate() - 2);
-          const todayCount = await db.radAcct.count({
-            where: {
-              ...where,
-              acctstarttime: { gte: yesterday },
-            },
-          });
-          const prevDayCount = await db.radAcct.count({
-            where: {
-              ...where,
-              acctstarttime: { gte: dayBefore, lt: yesterday },
-            },
-          });
+
+          const todayWhere = conditions.length > 0
+            ? `${whereClause} AND acctstarttime >= ?`
+            : `WHERE acctstarttime >= ?`;
+          const todayParams = [...params, yesterday.toISOString().slice(0, 10)];
+
+          const prevDayWhere = conditions.length > 0
+            ? `${whereClause} AND acctstarttime >= ? AND acctstarttime < ?`
+            : `WHERE acctstarttime >= ? AND acctstarttime < ?`;
+          const prevDayParams = [...params, dayBefore.toISOString().slice(0, 10), yesterday.toISOString().slice(0, 10)];
+
+          const todayCount = (await db.$queryRawUnsafe<{ c: number }[]>(
+            `SELECT COUNT(DISTINCT acctuniqueid) as c FROM v_session_history ${todayWhere}`,
+            ...todayParams
+          ))[0]?.c ?? 0;
+
+          const prevDayCount = (await db.$queryRawUnsafe<{ c: number }[]>(
+            `SELECT COUNT(DISTINCT acctuniqueid) as c FROM v_session_history ${prevDayWhere}`,
+            ...prevDayParams
+          ))[0]?.c ?? 0;
+
           const last24hTrend = prevDayCount > 0
             ? Math.round(((todayCount - prevDayCount) / prevDayCount) * 100)
             : (todayCount > 0 ? 100 : 0);
@@ -505,40 +521,52 @@ export async function GET(request: NextRequest) {
         return NextResponse.json(data);
       }
 
-      // ─── Active Users: Direct Prisma query on radacct ──────────
-      // FreeRADIUS writes to radacct; LiveSession table is only populated by
-      // the custom radius-server mini-service which isn't used with native FreeRADIUS.
-      // So we query radacct WHERE acctstoptime IS NULL (active sessions).
+      // ─── Active Users: Query from v_active_sessions view ──────────
+      // The view joins radacct with StaySuite tables and filters for active sessions.
       case 'live-sessions-list': {
         try {
-          await ensureRadacctClean();
           const username = searchParams.get('username');
           const nasIp = searchParams.get('nasIp');
           const status = searchParams.get('status');
 
-          const where: Prisma.RadAcctWhereInput = { acctstoptime: null };
-          if (username) where.username = { contains: username };
-          if (nasIp) where.nasipaddress = { contains: nasIp };
+          // Build SQL conditions on the view
+          const conditions: string[] = ["session_status = 'active'"];
+          const sqlParams: unknown[] = [];
+          if (username) { conditions.push(`username LIKE ?`); sqlParams.push(`%${username}%`); }
+          if (nasIp) { conditions.push(`nasipaddress LIKE ?`); sqlParams.push(`%${nasIp}%`); }
+          const whereClause = `WHERE ${conditions.join(' AND ')}`;
 
-          const activeSessions = await db.radAcct.findMany({
-            where,
-            orderBy: { acctstarttime: 'desc' },
-            select: {
-              acctuniqueid: true,
-              acctsessionid: true,
-              username: true,
-              framedipaddress: true,
-              callingstationid: true,
-              nasipaddress: true,
-              calledstationid: true,
-              acctstarttime: true,
-              acctupdatetime: true,
-              acctsessiontime: true,
-              acctinputoctets: true,
-              acctoutputoctets: true,
-              nasporttype: true,
-            },
-          });
+          const activeSessions = await db.$queryRawUnsafe<{
+            acctuniqueid: string;
+            acctsessionid: string;
+            username: string;
+            framedipaddress: string | null;
+            callingstationid: string | null;
+            nasipaddress: string | null;
+            calledstationid: string | null;
+            acctstarttime: string | null;
+            acctupdatetime: string | null;
+            acctsessiontime: number | null;
+            acctinputoctets: number | null;
+            acctoutputoctets: number | null;
+            nasporttype: string | null;
+            guest_first_name: string | null;
+            guest_last_name: string | null;
+            room_number: string | null;
+            property_name: string | null;
+            plan_name: string | null;
+            downloadSpeed: number | null;
+            uploadSpeed: number | null;
+          }[]>(`
+            SELECT acctuniqueid, acctsessionid, username, framedipaddress,
+                   callingstationid, nasipaddress, calledstationid,
+                   acctstarttime, acctupdatetime, acctsessiontime,
+                   acctinputoctets, acctoutputoctets, nasporttype,
+                   guest_first_name, guest_last_name, room_number,
+                   property_name, plan_name, downloadSpeed, uploadSpeed
+            FROM v_active_sessions ${whereClause}
+            ORDER BY acctstarttime DESC
+          `, ...sqlParams);
 
           const sessions = activeSessions.map((s) => ({
             id: `ls_${s.acctuniqueid}`,
@@ -550,24 +578,27 @@ export async function GET(request: NextRequest) {
             deviceType: '',
             operatingSystem: '',
             manufacturer: '',
-            bandwidthDown: null,
-            bandwidthUp: null,
+            bandwidthDown: s.downloadSpeed != null ? `${s.downloadSpeed} Mbps` : null,
+            bandwidthUp: s.uploadSpeed != null ? `${s.uploadSpeed} Mbps` : null,
             sessionTime: s.acctsessiontime || 0,
             dataDownload: s.acctoutputoctets || 0,
             dataUpload: s.acctinputoctets || 0,
             status: 'active' as const,
-            startedAt: s.acctstarttime?.toISOString() || '',
-            lastSeenAt: s.acctupdatetime?.toISOString() || '',
+            startedAt: s.acctstarttime || '',
+            lastSeenAt: s.acctupdatetime || '',
             sessionTimeout: null,
             idleTimeout: null,
-            planName: '',
-            roomId: '',
+            planName: s.plan_name || '',
+            roomId: s.room_number || '',
+            // Enriched fields from view
+            guestName: [s.guest_first_name, s.guest_last_name].filter(Boolean).join(' ') || '',
+            propertyName: s.property_name || '',
           }));
 
           return NextResponse.json({ success: true, data: sessions });
         } catch (error) {
           console.error('[live-sessions-list] Direct query error:', error);
-          // Fallback to proxy if Prisma fails
+          // Fallback to proxy if query fails
           const queryParams = new URLSearchParams();
           const params = ['propertyId', 'status', 'nasId', 'limit', 'offset'];
           for (const p of params) {
@@ -613,18 +644,19 @@ export async function GET(request: NextRequest) {
         return NextResponse.json(data);
       }
 
+      // ─── Live Sessions Stats: Query from v_active_sessions view ──
       case 'live-sessions-stats': {
         try {
-          await ensureRadacctClean();
-          const activeRecords = await db.radAcct.findMany({
-            where: { acctstoptime: null },
-            select: {
-              nasipaddress: true,
-              calledstationid: true,
-              acctoutputoctets: true,
-              acctinputoctets: true,
-            },
-          });
+          const activeRecords = await db.$queryRawUnsafe<{
+            nasipaddress: string | null;
+            calledstationid: string | null;
+            acctoutputoctets: number | null;
+            acctinputoctets: number | null;
+          }[]>(`
+            SELECT nasipaddress, calledstationid, acctoutputoctets, acctinputoctets
+            FROM v_active_sessions
+            WHERE session_status = 'active'
+          `);
 
           const totalActive = activeRecords.length;
           // Group by NAS IP for per-NAS breakdown
@@ -635,7 +667,7 @@ export async function GET(request: NextRequest) {
           for (const r of activeRecords) {
             totalDownload += r.acctoutputoctets || 0;
             totalUpload += r.acctinputoctets || 0;
-            const key = r.nasipaddress;
+            const key = r.nasipaddress || 'unknown';
             const existing = nasMap.get(key);
             if (existing) {
               existing.count++;
@@ -748,113 +780,97 @@ export async function GET(request: NextRequest) {
         return NextResponse.json(data);
       }
 
-      // ─── Accsium Gap: User Usage Summary ────────────────────
-      // ─── User Usage: Direct Prisma query on radacct ─────────────
-      // Aggregate per-user bandwidth, session counts, and time from radacct.
+      // ─── User Usage Summary: Query from v_user_usage view ────────
+      // The view already aggregates per-user bandwidth, session counts, and time
+      // from radacct, with enriched guest/room/property/plan data.
       case 'user-usage-summary': {
         try {
-          await ensureRadacctClean();
           const limitStr = searchParams.get('limit') || '20';
           const limit = Math.min(parseInt(limitStr, 10) || 20, 100);
           const sortBy = searchParams.get('sort') || 'download';
           const startDateStr = searchParams.get('startDate');
           const endDateStr = searchParams.get('endDate');
 
-          // Build date filter
-          const dateWhere: Prisma.RadAcctWhereInput = {};
-          if (startDateStr) {
-            const sd = new Date(startDateStr);
-            if (!isNaN(sd.getTime())) dateWhere.acctstarttime = { gte: sd };
-          }
-          if (endDateStr) {
-            const ed = new Date(endDateStr);
-            ed.setHours(23, 59, 59, 999);
-            if (!isNaN(ed.getTime())) {
-              dateWhere.acctstarttime = { ...(dateWhere.acctstarttime as Prisma.DateTimeFilter || {}), lte: ed };
-            }
-          }
+          // Build date filter on the view
+          const conditions: string[] = [];
+          const sqlParams: unknown[] = [];
+          if (startDateStr) { conditions.push(`first_session_start >= ?`); sqlParams.push(startDateStr); }
+          if (endDateStr) { conditions.push(`first_session_start <= ?`); sqlParams.push(`${endDateStr} 23:59:59`); }
+          const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-          // Get all matching records (we need to aggregate in JS for grouping)
-          const records = await db.radAcct.findMany({
-            where: dateWhere,
-            select: {
-              username: true,
-              acctinputoctets: true,
-              acctoutputoctets: true,
-              acctsessiontime: true,
-              acctupdatetime: true,
-              acctstoptime: true,
-            },
-          });
+          // Map sortBy to SQL column
+          const orderByMap: Record<string, string> = {
+            download: 'total_download_bytes DESC',
+            upload: 'total_upload_bytes DESC',
+            sessions: 'total_sessions DESC',
+            sessionTime: 'total_session_time DESC',
+          };
+          const orderBy = orderByMap[sortBy] || orderByMap.download;
 
-          // Aggregate per user
-          const userMap = new Map<string, {
-            totalSessions: number;
-            activeSessions: number;
-            totalDownloadBytes: number;
-            totalUploadBytes: number;
-            totalSessionTime: number;
-            lastSeen: string;
-          }>();
+          // Get total user count for stats
+          const totalUsersRow = await db.$queryRawUnsafe<{ c: number }[]>(
+            `SELECT COUNT(*) as c FROM v_user_usage ${whereClause}`,
+            ...sqlParams
+          );
+          const totalUsers = totalUsersRow[0]?.c ?? 0;
 
-          for (const r of records) {
-            const u = r.username;
-            const existing = userMap.get(u);
-            const dl = r.acctoutputoctets || 0;
-            const ul = r.acctinputoctets || 0;
-            const st = r.acctsessiontime || 0;
+          // Get paginated data
+          sqlParams.push(limit);
+          const usageRows = await db.$queryRawUnsafe<{
+            username: string;
+            total_sessions: number;
+            active_sessions: number;
+            total_download_bytes: number;
+            total_upload_bytes: number;
+            total_session_time: number;
+            last_session_start: string | null;
+            guest_first_name: string | null;
+            guest_last_name: string | null;
+            guest_email: string | null;
+            room_number: string | null;
+            property_name: string | null;
+            plan_name: string | null;
+            downloadSpeed: number | null;
+            uploadSpeed: number | null;
+            dataLimit: number | null;
+          }[]>(`
+            SELECT username, total_sessions, active_sessions,
+                   total_download_bytes, total_upload_bytes, total_session_time,
+                   last_session_start,
+                   guest_first_name, guest_last_name, guest_email,
+                   room_number, property_name, plan_name,
+                   downloadSpeed, uploadSpeed, dataLimit
+            FROM v_user_usage ${whereClause}
+            ORDER BY ${orderBy}
+            LIMIT ?
+          `, ...sqlParams);
 
-            if (existing) {
-              existing.totalSessions++;
-              if (!r.acctstoptime) existing.activeSessions++;
-              existing.totalDownloadBytes += dl;
-              existing.totalUploadBytes += ul;
-              existing.totalSessionTime += st;
-              const updateTime = r.acctupdatetime?.toISOString() || '';
-              if (updateTime > existing.lastSeen) existing.lastSeen = updateTime;
-            } else {
-              userMap.set(u, {
-                totalSessions: 1,
-                activeSessions: r.acctstoptime ? 0 : 1,
-                totalDownloadBytes: dl,
-                totalUploadBytes: ul,
-                totalSessionTime: st,
-                lastSeen: r.acctupdatetime?.toISOString() || '',
-              });
-            }
-          }
-
-          // Sort by the requested key
-          let sortedUsers = Array.from(userMap.entries()).map(([username, stats]) => ({
-            username,
-            ...stats,
+          // Map view columns to response format (camelCase)
+          const sortedUsers = usageRows.map((r) => ({
+            username: r.username,
+            totalSessions: r.total_sessions,
+            activeSessions: r.active_sessions,
+            totalDownloadBytes: r.total_download_bytes,
+            totalUploadBytes: r.total_upload_bytes,
+            totalSessionTime: r.total_session_time,
+            lastSeen: r.last_session_start || '',
+            // Enriched fields from view
+            guestName: [r.guest_first_name, r.guest_last_name].filter(Boolean).join(' ') || '',
+            guestEmail: r.guest_email || '',
+            roomNumber: r.room_number || '',
+            propertyName: r.property_name || '',
+            planName: r.plan_name || '',
+            downloadSpeed: r.downloadSpeed,
+            uploadSpeed: r.uploadSpeed,
+            dataLimit: r.dataLimit,
           }));
 
-          switch (sortBy) {
-            case 'upload':
-              sortedUsers.sort((a, b) => b.totalUploadBytes - a.totalUploadBytes);
-              break;
-            case 'sessions':
-              sortedUsers.sort((a, b) => b.totalSessions - a.totalSessions);
-              break;
-            case 'sessionTime':
-              sortedUsers.sort((a, b) => b.totalSessionTime - a.totalSessionTime);
-              break;
-            case 'download':
-            default:
-              sortedUsers.sort((a, b) => b.totalDownloadBytes - a.totalDownloadBytes);
-              break;
-          }
-
-          // Apply limit
-          sortedUsers = sortedUsers.slice(0, limit);
-
           // Overall stats
-          const totalBandwidth = sortedUsers.reduce((sum, u) => sum + u.totalDownloadBytes + u.totalUploadBytes, 0);
+          const totalBandwidth = usageRows.reduce((sum, u) => sum + u.total_download_bytes + u.total_upload_bytes, 0);
           const overallStats = {
-            totalUsers: userMap.size,
+            totalUsers,
             totalBandwidth,
-            avgPerUser: userMap.size > 0 ? Math.round(totalBandwidth / userMap.size) : 0,
+            avgPerUser: totalUsers > 0 ? Math.round(totalBandwidth / totalUsers) : 0,
             topUser: sortedUsers.length > 0 ? sortedUsers[0].username : null,
           };
 
@@ -876,6 +892,7 @@ export async function GET(request: NextRequest) {
         }
       }
 
+      // ─── User Usage Detail: Query from v_session_history view ────
       case 'user-usage-detail': {
         try {
           const username = searchParams.get('username');
@@ -885,47 +902,50 @@ export async function GET(request: NextRequest) {
           const startDateStr = searchParams.get('startDate');
           const endDateStr = searchParams.get('endDate');
 
-          const where: Prisma.RadAcctWhereInput = { username };
-          if (startDateStr) {
-            const sd = new Date(startDateStr);
-            if (!isNaN(sd.getTime())) where.acctstarttime = { gte: sd };
-          }
-          if (endDateStr) {
-            const ed = new Date(endDateStr);
-            ed.setHours(23, 59, 59, 999);
-            if (!isNaN(ed.getTime())) {
-              where.acctstarttime = { ...(where.acctstarttime as Prisma.DateTimeFilter || {}), lte: ed };
-            }
-          }
+          // Build SQL conditions on the view
+          const conditions: string[] = ['username = ?'];
+          const sqlParams: unknown[] = [username];
+          if (startDateStr) { conditions.push(`acctstarttime >= ?`); sqlParams.push(startDateStr); }
+          if (endDateStr) { conditions.push(`acctstarttime <= ?`); sqlParams.push(`${endDateStr} 23:59:59`); }
+          const whereClause = `WHERE ${conditions.join(' AND ')}`;
 
-          const userRecords = await db.radAcct.findMany({
-            where,
-            orderBy: { acctstarttime: 'desc' },
-            select: {
-              radacctid: true,
-              acctuniqueid: true,
-              acctsessionid: true,
-              username: true,
-              nasipaddress: true,
-              calledstationid: true,
-              framedipaddress: true,
-              callingstationid: true,
-              acctstarttime: true,
-              acctstoptime: true,
-              acctsessiontime: true,
-              acctinputoctets: true,
-              acctoutputoctets: true,
-              acctupdatetime: true,
-              acctstatus: true,
-            },
-          });
+          const userRecords = await db.$queryRawUnsafe<{
+            radacctid: number;
+            acctuniqueid: string;
+            acctsessionid: string;
+            username: string;
+            nasipaddress: string | null;
+            calledstationid: string | null;
+            framedipaddress: string | null;
+            callingstationid: string | null;
+            acctstarttime: string | null;
+            acctstoptime: string | null;
+            acctsessiontime: number | null;
+            acctinputoctets: number | null;
+            acctoutputoctets: number | null;
+            acctupdatetime: string | null;
+            guest_first_name: string | null;
+            guest_last_name: string | null;
+            room_number: string | null;
+            property_name: string | null;
+            plan_name: string | null;
+          }[]>(`
+            SELECT radacctid, acctuniqueid, acctsessionid, username,
+                   nasipaddress, calledstationid, framedipaddress, callingstationid,
+                   acctstarttime, acctstoptime, acctsessiontime,
+                   acctinputoctets, acctoutputoctets, acctupdatetime,
+                   guest_first_name, guest_last_name, room_number,
+                   property_name, plan_name
+            FROM v_session_history ${whereClause}
+            ORDER BY acctstarttime DESC
+          `, ...sqlParams);
 
           // Build sessions list
           const sessions = userRecords.map((r) => ({
             id: r.acctuniqueid || r.acctsessionid,
             sessionId: r.acctsessionid,
-            startedAt: r.acctstarttime?.toISOString() || null,
-            endedAt: r.acctstoptime?.toISOString() || null,
+            startedAt: r.acctstarttime || null,
+            endedAt: r.acctstoptime || null,
             nasIp: r.nasipaddress,
             nasIdentifier: r.calledstationid || null,
             ipAddress: r.framedipaddress || '',
@@ -934,13 +954,18 @@ export async function GET(request: NextRequest) {
             uploadBytes: r.acctinputoctets || 0,
             sessionTime: r.acctsessiontime || 0,
             isActive: !r.acctstoptime,
+            // Enriched fields from view
+            guestName: [r.guest_first_name, r.guest_last_name].filter(Boolean).join(' ') || '',
+            roomNumber: r.room_number || '',
+            propertyName: r.property_name || '',
+            planName: r.plan_name || '',
           }));
 
           // Build daily usage breakdown
           const dailyMap = new Map<string, { downloadBytes: number; uploadBytes: number }>();
           for (const r of userRecords) {
             if (r.acctupdatetime) {
-              const dateKey = r.acctupdatetime.toISOString().split('T')[0];
+              const dateKey = r.acctupdatetime.split('T')[0];
               const existing = dailyMap.get(dateKey);
               if (existing) {
                 existing.downloadBytes += r.acctoutputoctets || 0;
