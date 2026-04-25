@@ -9,6 +9,29 @@ import { NextRequest } from 'next/server';
 import { auditLogService, AuditModule, AuditAction } from '@/lib/services/audit-service';
 
 // =====================================================
+// UUID VALIDATION HELPERS
+// =====================================================
+
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Check if a string is a valid UUID.
+ * PostgreSQL @db.Uuid columns reject non-UUID values.
+ */
+export function isValidUUID(value: string | undefined | null): boolean {
+  if (!value) return false;
+  return UUID_REGEX.test(value);
+}
+
+/**
+ * Safely resolve a value for a @db.Uuid column.
+ * Returns the value if it's a valid UUID, otherwise undefined (maps to NULL).
+ */
+export function safeUUID(value: string | undefined | null): string | undefined {
+  return isValidUUID(value) ? value! : undefined;
+}
+
+// =====================================================
 // REQUEST CONTEXT EXTRACTION
 // =====================================================
 
@@ -20,7 +43,9 @@ export interface RequestContext {
 }
 
 /**
- * Extract context from a Next.js request
+ * Extract context from a Next.js request.
+ * NOTE: tenantId from headers must be a valid UUID for PostgreSQL.
+ * Callers should always provide overrides?.tenantId from authenticated session.
  */
 export function extractRequestContext(request: NextRequest): RequestContext {
   return {
@@ -282,13 +307,14 @@ export async function logSettings(
   const ctx = extractRequestContext(request);
   return auditLogService.log({
     tenantId: overrides?.tenantId || ctx.tenantId,
-    userId: overrides?.userId || ctx.userId,
+    userId: safeUUID(overrides?.userId || ctx.userId),
     module: 'settings',
     action,
     entityType: 'setting',
-    entityId: settingKey,
+    // NOTE: settingKey is NOT a UUID — store it in newValue JSON for PostgreSQL compatibility
+    entityId: undefined,
+    newValue: { settingKey, ...newValue },
     oldValue,
-    newValue,
     ipAddress: ctx.ipAddress,
     userAgent: ctx.userAgent,
   });

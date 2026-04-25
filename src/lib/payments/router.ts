@@ -459,15 +459,17 @@ export class PaymentRouter {
   private async logTransaction(log: Omit<PaymentTransactionLog, 'id' | 'createdAt'>): Promise<void> {
     try {
       // Store in PaymentGatewayLog table or AuditLog
+      // NOTE: gatewayRef (e.g. 'pi_xxx', 'PAYID-xxx') is NOT a UUID — store in newValue JSON
       await db.auditLog.create({
         data: {
           tenantId: log.tenantId,
           module: 'payments',
           action: log.operation,
           entityType: 'payment_transaction',
-          entityId: log.gatewayRef,
+          entityId: undefined, // gatewayRef is not a valid UUID
           newValue: JSON.stringify({
             gateway: log.gateway,
+            gatewayRef: log.gatewayRef,
             amount: log.amount,
             currency: log.currency,
             status: log.status,

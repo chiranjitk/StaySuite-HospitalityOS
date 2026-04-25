@@ -129,6 +129,9 @@ async function processUserExpiration(
   username: string
 ): Promise<void> {
   await db.$transaction(async (tx) => {
+    // Pre-fetch the WiFi user record (used for tenantId and guestId lookups)
+    const wifiUser = await tx.wiFiUser.findUnique({ where: { id: userId } });
+
     // 1. Update WiFi user status
     await tx.wiFiUser.update({
       where: { id: userId },
@@ -155,7 +158,7 @@ async function processUserExpiration(
     // 4. Terminate any active sessions
     await tx.wiFiSession.updateMany({
       where: {
-        guestId: (await tx.wiFiUser.findUnique({ where: { id: userId } }))?.guestId || 'none',
+        guestId: wifiUser?.guestId || 'none',
         status: 'active',
       },
       data: {
@@ -165,20 +168,25 @@ async function processUserExpiration(
     });
 
     // 5. Create audit log entry
-    await tx.auditLog.create({
-      data: {
-        tenantId: (await tx.wiFiUser.findUnique({ where: { id: userId } }))?.tenantId || 'system',
-        module: 'wifi',
-        action: 'expire',
-        entityType: 'wifi_user',
-        entityId: userId,
-        newValue: JSON.stringify({
-          username,
-          reason: 'validUntil exceeded',
-          expiredAt: new Date().toISOString(),
-        }),
-      },
-    });
+    // NOTE: tenantId is required (@db.Uuid NOT NULL). Skip if WiFiUser has no tenantId.
+    if (wifiUser?.tenantId) {
+      await tx.auditLog.create({
+        data: {
+          tenantId: wifiUser.tenantId,
+          module: 'wifi',
+          action: 'expire',
+          entityType: 'wifi_user',
+          entityId: userId,
+          newValue: JSON.stringify({
+            username,
+            reason: 'validUntil exceeded',
+            expiredAt: new Date().toISOString(),
+          }),
+        },
+      });
+    } else {
+      console.warn(`[Expiration Job] Skipping audit log for user ${userId}: no tenantId on WiFiUser`);
+    }
   });
 }
 

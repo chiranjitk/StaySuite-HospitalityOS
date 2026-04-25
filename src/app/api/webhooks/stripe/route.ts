@@ -76,6 +76,7 @@ export async function POST(request: NextRequest) {
 
     const gatewayConfig = await db.paymentGateway.findFirst({
       where: { provider: 'stripe', status: 'active' },
+      select: { id: true, apiKey: true, webhookSecret: true, tenantId: true },
     });
 
     const result = await handleStripeEvent(event, gatewayConfig);
@@ -88,6 +89,7 @@ export async function POST(request: NextRequest) {
       status: result.success ? 'processed' : 'failed',
       errorMessage: result.error,
       processingTimeMs: Date.now() - startTime,
+      tenantId: gatewayConfig?.tenantId || undefined,
     });
 
     if (!result.success) {
@@ -309,17 +311,24 @@ async function logWebhookEvent(params: {
   status: string;
   errorMessage?: string;
   processingTimeMs: number;
+  tenantId?: string; // Optional: must be a valid UUID for PostgreSQL
 }): Promise<void> {
   try {
+    if (!params.tenantId) {
+      console.warn('[Stripe Webhook] Skipping audit log: no tenantId available');
+      return;
+    }
     await db.auditLog.create({
       data: {
-        tenantId: 'system',
+        tenantId: params.tenantId,
         module: 'payments',
         action: 'webhook_received',
         entityType: 'payment_webhook',
-        entityId: params.gatewayEventId,
+        // NOTE: gatewayEventId (e.g. 'evt_xxx') is NOT a UUID — store in newValue
+        entityId: undefined,
         newValue: JSON.stringify({
           gateway: params.gateway,
+          gatewayEventId: params.gatewayEventId,
           eventType: params.eventType,
           status: params.status,
           errorMessage: params.errorMessage,

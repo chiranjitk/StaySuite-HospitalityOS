@@ -954,8 +954,15 @@ export class WiFiUserService {
   }): Promise<{ success: boolean; id?: string; error?: string }> {
     try {
       // Use the AuditLog model for provisioning logs
-      // Resolve tenantId: prefer explicit param, fallback to tenant-1
-      const resolvedTenantId = params.tenantId || 'tenant-1';
+      // NOTE: entityId must be a valid UUID for PostgreSQL (@db.Uuid columns).
+      //   - Use bookingId when available (it's always a UUID)
+      //   - Fall back to undefined rather than passing a non-UUID username
+      //   - The username is stored inside newValue JSON for reference
+      const resolvedTenantId = params.tenantId;
+      if (!resolvedTenantId) {
+        console.warn('[WiFi Provisioning Log] Skipped: no tenantId provided (required for PostgreSQL UUID column)');
+        return { success: false, error: 'No tenantId provided' };
+      }
       const logEntry = await db.auditLog.create({
         data: {
           tenantId: resolvedTenantId,
@@ -964,11 +971,11 @@ export class WiFiUserService {
           module: 'wifi-provisioning',
           action: params.action,
           entityType: 'WiFiUser',
-          entityId: params.username,
+          entityId: params.bookingId || undefined, // bookingId is a UUID; username is not
           newValue: JSON.stringify({
+            username: params.username,
             propertyId: params.propertyId,
             guestId: params.guestId,
-            bookingId: params.bookingId,
             result: params.result,
             details: params.details,
             durationMs: params.durationMs,

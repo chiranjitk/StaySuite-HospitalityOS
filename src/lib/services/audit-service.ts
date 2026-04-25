@@ -674,9 +674,9 @@ export async function logSettingsEvent(
       module: 'settings',
       action,
       entityType: 'setting',
-      entityId: settingKey,
-      oldValue,
-      newValue,
+      // NOTE: settingKey is NOT a UUID — store it in newValue JSON for PostgreSQL compatibility
+      entityId: undefined,
+      newValue: { settingKey, ...newValue },
     },
     request
   );
