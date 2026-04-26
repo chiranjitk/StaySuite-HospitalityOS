@@ -1759,36 +1759,48 @@ export async function POST(request: NextRequest) {
         let localEnded = false;
         let localMessage = '';
         try {
-          // Close the radacct record so it disappears from v_active_sessions view
-          // Match by: username (exact), acctuniqueid (GUI sends this as acctSessionId), or nasipaddress
-          // Note: GUI sends acctuniqueid as acctSessionId (not acctsessionid which can be empty)
-          // Note: nasipaddress is inet type — use host() to strip CIDR suffix (e.g. 192.168.1.1/32 → 192.168.1.1)
-          const updateResult = await db.$executeRawUnsafe(`
-            UPDATE radacct
-            SET acctstoptime = NOW(),
-                acctterminatecause = 'Admin-Reset',
-                acctsessiontime = COALESCE(
-                  EXTRACT(EPOCH FROM (NOW() - acctstarttime))::bigint,
-                  acctsessiontime
-                ),
-                acctupdatetime = NOW()
-            WHERE acctstoptime IS NULL
-              AND ($1::text = '' OR username = $1)
-              AND ($2::text = '' OR acctuniqueid = $2 OR acctsessionid = $2)
-              AND ($3::text = '' OR host(nasipaddress) = host($3::inet))
-          `, disconnectUsername, bareSessionId || '', disconnectNasIp);
-          console.log('[live-sessions-disconnect] DB update done, checking result...');
+          // The view uses COALESCE(WiFiSession.id::text, radacct.acctuniqueid) as acctuniqueid
+          // So bareSessionId might be a WiFiSession.id (UUID) — NOT a real radacct acctuniqueid
+          // We must close BOTH tables: radacct (by acctuniqueid/acctsessionid) AND WiFiSession (by id)
+          // Also, nasipaddress from the view defaults to '0.0.0.0' when no radacct row exists
+          // So when nasIp is '0.0.0.0', don't use it as a filter (too broad — matches everything)
 
-          // Check if any row was updated
-          const checkRows = await db.$queryRawUnsafe<{ cnt: bigint }[]>(
-            `SELECT COUNT(*) as cnt FROM radacct WHERE acctterminatecause = 'Admin-Reset' AND acctstoptime > NOW() - INTERVAL '5 seconds'`
-          );
-          localEnded = Number(checkRows[0]?.cnt || 0) > 0;
-          localMessage = localEnded ? `Closed ${checkRows[0]?.cnt} session(s) in radacct` : 'No matching active session found';
-          console.log('[live-sessions-disconnect] localEnded:', localEnded, 'message:', localMessage);
+          const nasIpFilter = (disconnectNasIp && disconnectNasIp !== '0.0.0.0' && disconnectNasIp !== '0.0.0.0/32') ? disconnectNasIp : '';
 
-          // Also mark LiveSession as ended if it exists
-          // Note: acctSessionId is UUID type — cast parameter to uuid
+          // 2a. Close radacct record
+          try {
+            await db.$executeRawUnsafe(`
+              UPDATE radacct
+              SET acctstoptime = NOW(),
+                  acctterminatecause = 'Admin-Reset',
+                  acctsessiontime = COALESCE(
+                    EXTRACT(EPOCH FROM (NOW() - acctstarttime))::bigint,
+                    acctsessiontime
+                  ),
+                  acctupdatetime = NOW()
+              WHERE acctstoptime IS NULL
+                AND ($1::text = '' OR username = $1)
+                AND ($2::text = '' OR acctuniqueid = $2 OR acctsessionid = $2)
+                AND ($3::text = '' OR host(nasipaddress) = host($3::inet))
+            `, disconnectUsername, bareSessionId || '', nasIpFilter);
+          } catch (radacctErr) {
+            console.warn('[live-sessions-disconnect] radacct update error:', radacctErr instanceof Error ? radacctErr.message : radacctErr);
+          }
+
+          // 2b. Close WiFiSession by id (the bareSessionId may be WiFiSession.id)
+          // WiFiSession has no username column — match only by id
+          try {
+            await db.$executeRawUnsafe(`
+              UPDATE "WiFiSession"
+              SET status = 'completed', "endTime" = NOW(), "updatedAt" = NOW()
+              WHERE status = 'active'
+                AND ($1::text = '' OR id = $1::uuid)
+            `, bareSessionId || '');
+          } catch (wifiErr) {
+            console.warn('[live-sessions-disconnect] WiFiSession update error:', wifiErr instanceof Error ? wifiErr.message : wifiErr);
+          }
+
+          // 2c. Close LiveSession if it exists
           try {
             await db.$executeRawUnsafe(`
               UPDATE "LiveSession"
@@ -1798,21 +1810,24 @@ export async function POST(request: NextRequest) {
                 AND ($2::text = '' OR username = $2)
             `, bareSessionId || '', disconnectUsername);
           } catch {
-            // LiveSession table may not have matching record — that's OK
+            // LiveSession table may not have matching record — OK
           }
 
-          // WiFiSession doesn't have acctSessionId column, match by username only
-          try {
-            await db.$executeRawUnsafe(`
-              UPDATE "WiFiSession"
-              SET status = 'completed', "endTime" = NOW(), "updatedAt" = NOW()
-              WHERE status = 'active'
-                AND ($1::text = '' OR "id" = $1::uuid)
-                AND ($2::text = '' OR "macAddress" = $2)
-            `, bareSessionId || '', disconnectUsername);
-          } catch {
-            // WiFiSession table may not have matching record — that's OK
-          }
+          // Check if any session was closed (radacct OR WiFiSession)
+          const radacctClosed = await db.$queryRawUnsafe<{ cnt: bigint }[]>(
+            `SELECT COUNT(*) as cnt FROM radacct WHERE acctterminatecause = 'Admin-Reset' AND acctstoptime > NOW() - INTERVAL '5 seconds'`
+          );
+          const wifiClosed = await db.$queryRawUnsafe<{ cnt: bigint }[]>(
+            `SELECT COUNT(*) as cnt FROM "WiFiSession" WHERE status = 'completed' AND "endTime" > NOW() - INTERVAL '5 seconds'`
+          );
+          const radacctCount = Number(radacctClosed[0]?.cnt || 0);
+          const wifiCount = Number(wifiClosed[0]?.cnt || 0);
+          localEnded = radacctCount > 0 || wifiCount > 0;
+          localMessage = localEnded
+            ? `Closed ${radacctCount} RADIUS session(s), ${wifiCount} WiFi session(s)`
+            : 'No matching active session found';
+
+          console.log('[live-sessions-disconnect] localEnded:', localEnded, 'radacct:', radacctCount, 'wifi:', wifiCount);
         } catch (dbErr) {
           localMessage = dbErr instanceof Error ? dbErr.message : String(dbErr);
         }
