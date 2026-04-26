@@ -215,14 +215,17 @@ export async function getOptionalTenantFilter(
 
 /**
  * Resolve propertyId for an API request.
- * Uses the provided value if present; otherwise auto-detects the first
+ * Uses the provided value if present and valid UUID; otherwise auto-detects the first
  * property belonging to the tenant. Returns null only if no property exists.
  */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export async function resolvePropertyId(
   context: TenantContext,
   explicitId?: string | null,
 ): Promise<string | null> {
-  if (explicitId) return explicitId;
+  if (explicitId && UUID_RE.test(explicitId)) return explicitId;
+  // explicitId was provided but is not a valid UUID — fall back to auto-detection
   const prop = await db.property.findFirst({
     where: { tenantId: context.tenantId },
     select: { id: true },
