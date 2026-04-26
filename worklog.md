@@ -166,3 +166,25 @@ Stage Summary:
 - Both the stats widgets AND the session list/table now show data
 - The `live-sessions-stats` endpoint was already working (uses `Number()` for BigInt)
 - No other tabs had similar column name issues (verified all view queries)
+---
+Task ID: 2
+Agent: main
+Task: Create final production PostgreSQL schema, seeds, and WiFi configuration in separate folder
+
+Work Log:
+- Audited entire database: 226 Prisma tables, 7 FreeRADIUS native tables, 5 custom views
+- Extracted all view definitions from live database (v_session_history, v_active_sessions, v_auth_logs, v_user_usage, v_wifi_users)
+- Exported all FreeRADIUS table data (radcheck 10, radgroupcheck 6, radgroupreply 24, radusergroup 10, nas 5, radpostauth 19, radacct 3)
+- Copied Prisma PostgreSQL schema to pgsql-production/schema.prisma
+- Copied FreeRADIUS v3.2.6 schema.sql to pgsql-production/01-freeradius-schema.sql (178 lines)
+- Created pgsql-production/02-staysuite-views.sql with data_usage_by_period table + 5 views (235 lines)
+- Created pgsql-production/03-radius-seed.sql with all RADIUS seed data, idempotent ON CONFLICT (187 lines)
+- Created pgsql-production/deploy.sh automated deployment script (6-step process)
+- Created pgsql-production/README.md with full documentation (credentials, plans, NAS inventory, views reference)
+- SQLite dev artifacts preserved (schema.prisma, db/custom.db, seed.ts) — NOT deleted
+
+Stage Summary:
+- pgsql-production/ folder contains 6 files: schema.prisma, 01-freeradius-schema.sql, 02-staysuite-views.sql, 03-radius-seed.sql, deploy.sh, README.md
+- All SQL files are idempotent (safe to re-run)
+- Deploy order: Prisma push → FreeRADIUS schema → Views → App seed → WiFi seed → RADIUS seed
+- No existing files were modified or deleted
