@@ -98,8 +98,12 @@ SELECT COALESCE((s.id)::text, r.acctuniqueid) AS session_id,
     COALESCE(r.calledstationid, ''::text) AS calledstationid,
     r.connectinfo_start,
     r.connectinfo_stop
-   FROM ((((((("WiFiSession" s
-     FULL JOIN radacct r ON (((s.id)::text = r.acctuniqueid)))
+   FROM (((((((("WiFiSession" s
+     FULL JOIN (
+       SELECT DISTINCT ON (username, acctsessionid) *
+       FROM radacct
+       ORDER BY username, acctsessionid, radacctid DESC
+     ) r ON (((s.id)::text = r.acctuniqueid)))
      LEFT JOIN "WiFiUser" wu ON ((s."guestId" = wu."guestId")))
      LEFT JOIN "Guest" g ON ((s."guestId" = g.id)))
      LEFT JOIN "Booking" b ON ((s."bookingId" = b.id)))
