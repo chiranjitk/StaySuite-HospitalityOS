@@ -1711,12 +1711,14 @@ export async function POST(request: NextRequest) {
         let coaMessage = '';
         try {
           // Look up NAS secret from PostgreSQL
+          // GUI may send nasIp with CIDR (e.g. 192.168.1.1/32) — strip it for NAS lookup
           let nasSecret = 'testing123'; // default fallback
           let coaPort = 3799;
+          const cleanNasIp = disconnectNasIp.replace(/\/\d+$/, ''); // strip /32 CIDR suffix
           try {
             const nasRows = await db.$queryRawUnsafe<{ nasname: string; secret: string; ports: number | null }[]>(
               `SELECT nasname, secret, ports FROM nas WHERE nasname = $1 LIMIT 1`,
-              disconnectNasIp
+              cleanNasIp
             );
             if (nasRows.length > 0) {
               nasSecret = nasRows[0].secret;
@@ -1724,7 +1726,7 @@ export async function POST(request: NextRequest) {
             }
           } catch { /* NAS lookup failed, use defaults */ }
 
-          // Build radclient attributes
+          // Build radclient attributes — use clean IP (without CIDR) for radclient
           const radclientPath = '/home/z/freeradius-install/bin/radclient';
           const attrs = `User-Name="${disconnectUsername}"${bareSessionId ? `\nAcct-Session-Id="${bareSessionId}"` : ''}`;
           const tmpAttrsFile = `/tmp/radclient-disconnect-${Date.now()}.txt`;
@@ -1733,7 +1735,7 @@ export async function POST(request: NextRequest) {
 
           try {
             fs.writeFileSync(tmpAttrsFile, attrs + '\n');
-            const cmd = `${radclientPath} -t 3 -r 1 ${disconnectNasIp}:${coaPort} disconnect ${nasSecret} < ${tmpAttrsFile} 2>&1`;
+            const cmd = `${radclientPath} -t 3 -r 1 ${cleanNasIp}:${coaPort} disconnect ${nasSecret} < ${tmpAttrsFile} 2>&1`;
             const output = execSync(cmd, { timeout: 5000 }).toString();
             coaMessage = output.trim();
             coaSuccess = output.includes('Disconnect-ACK') || output.includes('CoA-ACK') || output.includes('received');
@@ -1755,7 +1757,9 @@ export async function POST(request: NextRequest) {
         let localMessage = '';
         try {
           // Close the radacct record so it disappears from v_active_sessions view
-          // Note: nasipaddress is inet type — cast parameter to inet for comparison
+          // Match by: username (exact), acctuniqueid (GUI sends this as acctSessionId), or nasipaddress
+          // Note: GUI sends acctuniqueid as acctSessionId (not acctsessionid which can be empty)
+          // Note: nasipaddress is inet type — use host() to strip CIDR suffix (e.g. 192.168.1.1/32 → 192.168.1.1)
           const updateResult = await db.$executeRawUnsafe(`
             UPDATE radacct
             SET acctstoptime = NOW(),
@@ -1767,8 +1771,8 @@ export async function POST(request: NextRequest) {
                 acctupdatetime = NOW()
             WHERE acctstoptime IS NULL
               AND ($1::text = '' OR username = $1)
-              AND ($2::text = '' OR acctsessionid = $2)
-              AND ($3::text = '' OR nasipaddress = $3::inet)
+              AND ($2::text = '' OR acctuniqueid = $2 OR acctsessionid = $2)
+              AND ($3::text = '' OR host(nasipaddress) = host($3::inet))
           `, disconnectUsername, bareSessionId || '', disconnectNasIp);
 
           // Check if any row was updated
@@ -1847,6 +1851,7 @@ export async function POST(request: NextRequest) {
         }
         const bareId = effectiveId.startsWith('ls_') ? effectiveId.slice(3) : effectiveId;
         try {
+          // Match by acctuniqueid OR acctsessionid (GUI sends acctuniqueid as acctSessionId)
           await db.$executeRawUnsafe(`
             UPDATE radacct
             SET acctstoptime = NOW(),
@@ -1857,7 +1862,7 @@ export async function POST(request: NextRequest) {
                 ),
                 acctupdatetime = NOW()
             WHERE acctstoptime IS NULL
-              AND ($1::text = '' OR acctsessionid = $1)
+              AND ($1::text = '' OR acctuniqueid = $1 OR acctsessionid = $1)
           `, bareId || '');
           // Also update LiveSession (acctSessionId is UUID type)
           try {
