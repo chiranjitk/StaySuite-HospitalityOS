@@ -161,9 +161,9 @@ function buildSqlConditions(
   const params: unknown[] = []
 
   // ALWAYS filter by acctstarttime to prevent full table scans
-  conditions.push(`acctstarttime >= $${params.length + 1}`)
+  conditions.push(`acctstarttime >= $${params.length + 1}::timestamptz`)
   params.push(dateRange.startDate)
-  conditions.push(`acctstarttime <= $${params.length + 1}`)
+  conditions.push(`acctstarttime <= $${params.length + 1}::timestamptz`)
   params.push(dateRange.endDate)
 
   // Username LIKE search (case-insensitive substring match)

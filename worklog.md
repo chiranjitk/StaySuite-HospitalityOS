@@ -79,3 +79,68 @@ Stage Summary:
 - PM2 managing staysuite-nextjs with correct DATABASE_URL via wrapper script
 - All seed user accounts verified working
 - Server stable under PM2 (0 crashes)
+
+---
+Task ID: 3-b
+Agent: Fix Agent
+Task: Fix session-history route for PostgreSQL timestamptz casting
+
+Work Log:
+- Fixed `buildSqlConditions` function (lines 164-167): added `::timestamptz` cast to date comparison parameters
+- `acctstarttime >= $N` → `acctstarttime >= $N::timestamptz`
+- `acctstarttime <= $N` → `acctstarttime <= $N::timestamptz`
+- This resolves `operator does not exist: timestamp with time zone >= text` error
+
+Stage Summary:
+- session-history route now correctly casts text date parameters to timestamptz for PostgreSQL comparisons
+
+---
+Task ID: 3-c
+Agent: Fix Agent
+Task: Fix radius route for PostgreSQL column quoting, COALESCE, and timestamptz casting
+
+Work Log:
+- Quoted all mixed-case column names in `users` query (v_wifi_users view):
+  - WHERE: `"propertyId"` (was unquoted, caused `column "tenantid" does not exist`)
+  - SELECT: `"tenantId"`, `"propertyId"`, `"guestId"`, `"bookingId"`, `"planId"`, `"authMethod"`, `"macAddress"`, `"validFrom"`, `"validUntil"`, `"totalBytesIn"`, `"totalBytesOut"`, `"sessionCount"`, `"lastSeenAt"`, `"createdAt"`, `"updatedAt"`
+  - ORDER BY: `"createdAt"`
+- Quoted mixed-case columns in `live-sessions-list` query (v_active_sessions view):
+  - SELECT: `"downloadSpeed"`, `"uploadSpeed"`
+- Added COALESCE for nullable bigint columns in `live-sessions-stats` query:
+  - `COALESCE(acctoutputoctets, 0) as acctoutputoctets`
+  - `COALESCE(acctinputoctets, 0) as acctinputoctets`
+- Fixed TypeScript BigInt arithmetic in `live-sessions-stats` aggregation loop:
+  - `r.acctoutputoctets || 0` → `Number(r.acctoutputoctets)` (safe for bigint/number/null)
+  - `r.acctinputoctets || 0` → `Number(r.acctinputoctets)`
+- Added `::timestamptz` casts to all acctstarttime date comparisons across 4 case blocks:
+  - auth-logs (lines 295-296)
+  - auth-logs-stats (lines 371-372, 393-394, 398-399)
+  - user-usage-detail (lines 999-1000)
+
+Stage Summary:
+- radius route now works with PostgreSQL: column names properly quoted for mixed-case identifiers, null bigints handled with COALESCE, and all timestamp comparisons use explicit timestamptz casting
+
+---
+Task ID: 4
+Agent: Main Agent
+Task: Run radtest, verify FreeRADIUS auto-population, fix all broken WiFi GUI API routes
+
+Work Log:
+- Ran radtest: `radtest -x "guest.amit.mukherjee" "Welcome@123" localhost 1812 testing123` → Access-Accept with bandwidth attributes
+- Confirmed radacct auto-populated with new session row from radtest
+- Confirmed radpostauth logging both Accept and Reject events (19 total entries)
+- Audited ALL 24 WiFi API routes — found 3 failing routes:
+  1. /api/wifi/users — SQLite `?` placeholders + UUID cast issue
+  2. /api/wifi/session-history — timestamptz cast missing for date comparisons
+  3. /api/wifi/radius — PostgreSQL column quoting (case sensitivity), GROUP BY violation, COALESCE for bigint, timestamptz casts
+- Fixed all 3 routes for PostgreSQL compatibility
+- Final audit: ALL 15 WiFi tabs return ✅ with real data
+
+Stage Summary:
+- radtest confirmed working: RADIUS auth → radpostauth + radacct auto-populate
+- All 15 WiFi GUI API routes verified working:
+  WiFi Users (8), Session History (20), Auth Logs (30), Live Sessions (18),
+  Plans (6), Vouchers (10), NAS (2), Portal (2), DHCP Subnets (4), Bandwidth (7),
+  Health dashboard, Live session stats (12 active), Content Filter (0)
+- Key PostgreSQL fixes: `?` → `$N` params, `::uuid` casts, `::timestamptz` casts,
+  column quoting for case sensitivity, COALESCE for nullable bigints, GROUP BY strict mode

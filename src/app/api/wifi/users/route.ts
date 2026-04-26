@@ -42,13 +42,16 @@ export async function GET(request: NextRequest) {    const user = await requireP
     const limit = parseInt(searchParams.get('limit') || '50');
 
     // Build SQL conditions on the v_wifi_users view
-    const conditions: string[] = ['tenantId = ?'];
-    const sqlParams: unknown[] = [user.tenantId];
+    const conditions: string[] = [];
+    const sqlParams: unknown[] = [];
+    let paramIdx = 1;
+    const p = () => `$${paramIdx++}`;
 
-    if (propertyId) { conditions.push(`propertyId = ?`); sqlParams.push(propertyId); }
-    if (guestId) { conditions.push(`guestId = ?`); sqlParams.push(guestId); }
-    if (bookingId) { conditions.push(`bookingId = ?`); sqlParams.push(bookingId); }
-    if (status) { conditions.push(`status = ?`); sqlParams.push(status); }
+    conditions.push(`"tenantId" = ${p()}::uuid`); sqlParams.push(user.tenantId);
+    if (propertyId) { conditions.push(`"propertyId" = ${p()}::uuid`); sqlParams.push(propertyId); }
+    if (guestId) { conditions.push(`"guestId" = ${p()}::uuid`); sqlParams.push(guestId); }
+    if (bookingId) { conditions.push(`"bookingId" = ${p()}::uuid`); sqlParams.push(bookingId); }
+    if (status) { conditions.push(`status = ${p()}`); sqlParams.push(status); }
 
     const whereClause = `WHERE ${conditions.join(' AND ')}`;
     const offset = (page - 1) * limit;
@@ -63,10 +66,10 @@ export async function GET(request: NextRequest) {    const user = await requireP
     // Fetch paginated users from the view
     sqlParams.push(limit, offset);
     const rows = await db.$queryRawUnsafe<Record<string, unknown>[]>(`
-      SELECT id, tenantId, propertyId, guestId, bookingId, username, planId,
-             status, authMethod, macAddress, validFrom, validUntil,
-             totalBytesIn, totalBytesOut, sessionCount, lastSeenAt,
-             createdAt, updatedAt,
+      SELECT id, "tenantId", "propertyId", "guestId", "bookingId", username, "planId",
+             status, "authMethod", "macAddress", "validFrom", "validUntil",
+             "totalBytesIn", "totalBytesOut", "sessionCount", "lastSeenAt",
+             "createdAt", "updatedAt",
              radius_password, radius_group,
              guest_first_name, guest_last_name, guest_email, guest_phone,
              guest_loyalty_tier, guest_is_vip,
@@ -75,8 +78,8 @@ export async function GET(request: NextRequest) {    const user = await requireP
              plan_download_speed, plan_upload_speed, plan_data_limit,
              booking_code, booking_status, booking_check_in, booking_check_out
       FROM v_wifi_users ${whereClause}
-      ORDER BY createdAt DESC
-      LIMIT ? OFFSET ?
+      ORDER BY "createdAt" DESC
+      LIMIT ${p()} OFFSET ${p()}
     `, ...sqlParams);
 
     // Reconstruct the nested format to maintain backward compatibility

@@ -163,15 +163,15 @@ export async function GET(request: NextRequest) {
 
           const conditions: string[] = [];
           const sqlParams: unknown[] = [];
-          if (propertyId) { conditions.push(`propertyId = $${sqlParams.length + 1}`); sqlParams.push(propertyId); }
+          if (propertyId) { conditions.push(`"propertyId" = $${sqlParams.length + 1}`); sqlParams.push(propertyId); }
           if (status) { conditions.push(`status = $${sqlParams.length + 1}`); sqlParams.push(status); }
           const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
           const rows = await db.$queryRawUnsafe<Record<string, unknown>[]>(`
-            SELECT id, tenantId, propertyId, guestId, bookingId, username, planId,
-                   status, authMethod, macAddress, validFrom, validUntil,
-                   totalBytesIn, totalBytesOut, sessionCount, lastSeenAt,
-                   createdAt, updatedAt,
+            SELECT id, "tenantId", "propertyId", "guestId", "bookingId", username, "planId",
+                   status, "authMethod", "macAddress", "validFrom", "validUntil",
+                   "totalBytesIn", "totalBytesOut", "sessionCount", "lastSeenAt",
+                   "createdAt", "updatedAt",
                    radius_password, radius_group,
                    guest_first_name, guest_last_name, guest_email, guest_phone,
                    guest_loyalty_tier, guest_is_vip,
@@ -180,7 +180,7 @@ export async function GET(request: NextRequest) {
                    plan_download_speed, plan_upload_speed, plan_data_limit,
                    booking_code, booking_status, booking_check_in, booking_check_out
             FROM v_wifi_users ${whereClause}
-            ORDER BY createdAt DESC
+            ORDER BY "createdAt" DESC
           `, ...sqlParams);
 
           const users = rows.map((row) => ({
@@ -292,8 +292,8 @@ export async function GET(request: NextRequest) {
           const conditions: string[] = [];
           const sqlParams: unknown[] = [];
           if (usernameFilter) { conditions.push(`username LIKE $${sqlParams.length + 1}`); sqlParams.push(`%${usernameFilter}%`); }
-          if (startDateStr) { conditions.push(`acctstarttime >= $${sqlParams.length + 1}`); sqlParams.push(startDateStr); }
-          if (endDateStr) { conditions.push(`acctstarttime <= $${sqlParams.length + 1}`); sqlParams.push(`${endDateStr} 23:59:59`); }
+          if (startDateStr) { conditions.push(`acctstarttime >= $${sqlParams.length + 1}::timestamptz`); sqlParams.push(startDateStr); }
+          if (endDateStr) { conditions.push(`acctstarttime <= $${sqlParams.length + 1}::timestamptz`); sqlParams.push(`${endDateStr} 23:59:59`); }
           const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
           sqlParams.push(limit);
 
@@ -312,9 +312,10 @@ export async function GET(request: NextRequest) {
             property_name: string | null;
             plan_name: string | null;
           }[]>(`
-            SELECT MIN(radacctid) as radacctid, acctuniqueid, username, nasipaddress,
-                   callingstationid, MAX(acctstarttime) as acctstarttime,
-                   nasporttype, calledstationid,
+            SELECT MIN(radacctid) as radacctid, acctuniqueid,
+                   MAX(username) as username, MAX(nasipaddress) as nasipaddress,
+                   MAX(callingstationid) as callingstationid, MAX(acctstarttime) as acctstarttime,
+                   MAX(nasporttype) as nasporttype, MAX(calledstationid) as calledstationid,
                    MAX(guest_first_name) as guest_first_name,
                    MAX(guest_last_name) as guest_last_name,
                    MAX(room_number) as room_number,
@@ -368,8 +369,8 @@ export async function GET(request: NextRequest) {
           const conditions: string[] = [];
           const params: unknown[] = [];
           if (usernameFilter) { conditions.push(`username LIKE $${params.length + 1}`); params.push(`%${usernameFilter}%`); }
-          if (startDateStr) { conditions.push(`acctstarttime >= $${params.length + 1}`); params.push(startDateStr); }
-          if (endDateStr) { conditions.push(`acctstarttime <= $${params.length + 1}`); params.push(`${endDateStr} 23:59:59`); }
+          if (startDateStr) { conditions.push(`acctstarttime >= $${params.length + 1}::timestamptz`); params.push(startDateStr); }
+          if (endDateStr) { conditions.push(`acctstarttime <= $${params.length + 1}::timestamptz`); params.push(`${endDateStr} 23:59:59`); }
           const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
           const totalAuths = Number((await db.$queryRawUnsafe<{ c: number | bigint }[]>(
@@ -390,13 +391,13 @@ export async function GET(request: NextRequest) {
 
           const nextParamIdx = params.length + 1;
           const todayWhere = conditions.length > 0
-            ? `${whereClause} AND acctstarttime >= $${nextParamIdx}`
-            : `WHERE acctstarttime >= $${nextParamIdx}`;
+            ? `${whereClause} AND acctstarttime >= $${nextParamIdx}::timestamptz`
+            : `WHERE acctstarttime >= $${nextParamIdx}::timestamptz`;
           const todayParams = [...params, yesterday.toISOString().slice(0, 10)];
 
           const prevDayWhere = conditions.length > 0
-            ? `${whereClause} AND acctstarttime >= $${params.length + 1} AND acctstarttime < $${params.length + 2}`
-            : `WHERE acctstarttime >= $${params.length + 1} AND acctstarttime < $${params.length + 2}`;
+            ? `${whereClause} AND acctstarttime >= $${params.length + 1}::timestamptz AND acctstarttime < $${params.length + 2}::timestamptz`
+            : `WHERE acctstarttime >= $${params.length + 1}::timestamptz AND acctstarttime < $${params.length + 2}::timestamptz`;
           const prevDayParams = [...params, dayBefore.toISOString().slice(0, 10), yesterday.toISOString().slice(0, 10)];
 
           // Calculate 24h trend — wrap in try/catch so basic stats always return
@@ -645,7 +646,7 @@ export async function GET(request: NextRequest) {
                    acctstarttime, acctupdatetime, acctsessiontime,
                    acctinputoctets, acctoutputoctets, nasporttype,
                    guest_first_name, guest_last_name, room_number,
-                   property_name, plan_name, downloadSpeed, uploadSpeed
+                   property_name, plan_name, "downloadSpeed", "uploadSpeed"
             FROM v_active_sessions ${whereClause}
             ORDER BY acctstarttime DESC
           `, ...sqlParams);
@@ -735,7 +736,7 @@ export async function GET(request: NextRequest) {
             acctoutputoctets: number | null;
             acctinputoctets: number | null;
           }[]>(`
-            SELECT nasipaddress, calledstationid, acctoutputoctets, acctinputoctets
+            SELECT nasipaddress, calledstationid, COALESCE(acctoutputoctets, 0) as acctoutputoctets, COALESCE(acctinputoctets, 0) as acctinputoctets
             FROM v_active_sessions
             WHERE session_status = 'active'
           `);
@@ -747,8 +748,8 @@ export async function GET(request: NextRequest) {
           let totalUpload = 0;
 
           for (const r of activeRecords) {
-            totalDownload += r.acctoutputoctets || 0;
-            totalUpload += r.acctinputoctets || 0;
+            totalDownload += Number(r.acctoutputoctets);
+            totalUpload += Number(r.acctinputoctets);
             const key = r.nasipaddress || 'unknown';
             const existing = nasMap.get(key);
             if (existing) {
@@ -996,8 +997,8 @@ export async function GET(request: NextRequest) {
           // Build SQL conditions on the view
           const conditions: string[] = [`username = $1`];
           const sqlParams: unknown[] = [username];
-          if (startDateStr) { conditions.push(`acctstarttime >= $${sqlParams.length + 1}`); sqlParams.push(startDateStr); }
-          if (endDateStr) { conditions.push(`acctstarttime <= $${sqlParams.length + 1}`); sqlParams.push(`${endDateStr} 23:59:59`); }
+          if (startDateStr) { conditions.push(`acctstarttime >= $${sqlParams.length + 1}::timestamptz`); sqlParams.push(startDateStr); }
+          if (endDateStr) { conditions.push(`acctstarttime <= $${sqlParams.length + 1}::timestamptz`); sqlParams.push(`${endDateStr} 23:59:59`); }
           const whereClause = `WHERE ${conditions.join(' AND ')}`;
 
           const userRecords = await db.$queryRawUnsafe<{
