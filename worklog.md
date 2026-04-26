@@ -188,3 +188,30 @@ Stage Summary:
 - All SQL files are idempotent (safe to re-run)
 - Deploy order: Prisma push → FreeRADIUS schema → Views → App seed → WiFi seed → RADIUS seed
 - No existing files were modified or deleted
+
+---
+Task ID: 5
+Agent: Main Agent
+Task: Fix disconnect from Active Users tab — switch from SQLite freeradius-service to direct PostgreSQL
+
+Work Log:
+- Diagnosed disconnect failure: `live-sessions-disconnect` handler called `freeradiusRequest()` → freeradius-service (port 3010) → SQLite db/custom.db
+- Production data (radacct, LiveSession) is in PostgreSQL — the SQLite service can't find or close sessions
+- Rewrote `live-sessions-disconnect` case in `src/app/api/wifi/radius/route.ts`:
+  - Step 1 (CoA): Looks up NAS secret from PostgreSQL `nas` table, runs `radclient disconnect` (best-effort, NAS IPs may be unreachable)
+  - Step 2 (DB): Directly updates PostgreSQL `radacct` — sets acctstoptime=NOW(), acctterminatecause='Admin-Reset', calculates final acctsessiontime
+  - Also updates `LiveSession` (status='ended') and `WiFiSession` (status='completed') if records exist
+- Fixed PostgreSQL type issues:
+  - `nasipaddress` is inet type → cast `$3::inet` for comparison
+  - `LiveSession.acctSessionId` is UUID type → cast `$1::uuid` for comparison
+  - `WiFiSession` has no acctSessionId column → removed that query, adjusted update
+- Also rewrote `live-sessions-end-fallback` handler to use PostgreSQL directly (was also going through SQLite service)
+- Tested: disconnect by acctSessionId + username + nasIp → SUCCESS (session closed in radacct)
+- Tested: disconnect by username only → SUCCESS
+- Verified: disconnected session disappears from `v_active_sessions` view
+
+Stage Summary:
+- Disconnect from Active Users tab now works — closes session in PostgreSQL radacct
+- CoA to NAS is attempted but expected to fail (NAS IPs are simulated/internal)
+- Local database close is the primary disconnect mechanism and works reliably
+- No SQLite dependency for disconnect operations anymore

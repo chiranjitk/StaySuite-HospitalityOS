@@ -1701,66 +1701,172 @@ export async function POST(request: NextRequest) {
           return NextResponse.json({ success: false, error: 'Username or sessionId is required' }, { status: 400 });
         }
 
-        // 1. Try RADIUS CoA/Disconnect-Message to NAS
+        // Strip ls_ prefix if present to get bare acctSessionId
+        const bareSessionId = effectiveSessionId?.startsWith('ls_') ? effectiveSessionId.slice(3) : effectiveSessionId;
+        const disconnectUsername = username || '';
+        const disconnectNasIp = nasIp || '';
+
+        // 1. Try RADIUS CoA/Disconnect-Message to NAS (best-effort)
         let coaSuccess = false;
-        let coaResult: Record<string, unknown> | null = null;
+        let coaMessage = '';
         try {
-          coaResult = await freeradiusRequest('/api/coa/disconnect', {
-            method: 'POST',
-            body: JSON.stringify({ username, sessionId: effectiveSessionId, nasIp }),
-          });
-          coaSuccess = coaResult.success === true;
-        } catch {
-          coaSuccess = false;
+          // Look up NAS secret from PostgreSQL
+          let nasSecret = 'testing123'; // default fallback
+          let coaPort = 3799;
+          try {
+            const nasRows = await db.$queryRawUnsafe<{ nasname: string; secret: string; ports: number | null }[]>(
+              `SELECT nasname, secret, ports FROM nas WHERE nasname = $1 LIMIT 1`,
+              disconnectNasIp
+            );
+            if (nasRows.length > 0) {
+              nasSecret = nasRows[0].secret;
+              coaPort = nasRows[0].ports || 3799;
+            }
+          } catch { /* NAS lookup failed, use defaults */ }
+
+          // Build radclient attributes
+          const radclientPath = '/home/z/freeradius-install/bin/radclient';
+          const attrs = `User-Name="${disconnectUsername}"${bareSessionId ? `\nAcct-Session-Id="${bareSessionId}"` : ''}`;
+          const tmpAttrsFile = `/tmp/radclient-disconnect-${Date.now()}.txt`;
+          const { execSync } = await import('child_process');
+          const fs = await import('fs');
+
+          try {
+            fs.writeFileSync(tmpAttrsFile, attrs + '\n');
+            const cmd = `${radclientPath} -t 3 -r 1 ${disconnectNasIp}:${coaPort} disconnect ${nasSecret} < ${tmpAttrsFile} 2>&1`;
+            const output = execSync(cmd, { timeout: 5000 }).toString();
+            coaMessage = output.trim();
+            coaSuccess = output.includes('Disconnect-ACK') || output.includes('CoA-ACK') || output.includes('received');
+          } catch (execErr: unknown) {
+            coaMessage = execErr instanceof Error ? execErr.message : String(execErr);
+            // radclient returns non-zero exit code even on timeout, but may have succeeded
+            if (coaMessage.includes('Disconnect-ACK') || coaMessage.includes('CoA-ACK')) {
+              coaSuccess = true;
+            }
+          } finally {
+            try { fs.unlinkSync(tmpAttrsFile); } catch { /* ignore */ }
+          }
+        } catch (coaErr) {
+          coaMessage = coaErr instanceof Error ? coaErr.message : String(coaErr);
         }
 
-        // 2. ALWAYS end the session locally (even if CoA succeeded, for consistency)
+        // 2. ALWAYS end the session in PostgreSQL (the critical part)
         let localEnded = false;
+        let localMessage = '';
         try {
-          const localResult = await freeradiusRequest('/api/live-sessions/end-local', {
-            method: 'POST',
-            body: JSON.stringify({ sessionId: effectiveSessionId, acctSessionId: effectiveSessionId }),
-          });
-          localEnded = localResult.success === true;
-        } catch {
-          localEnded = false;
+          // Close the radacct record so it disappears from v_active_sessions view
+          // Note: nasipaddress is inet type — cast parameter to inet for comparison
+          const updateResult = await db.$executeRawUnsafe(`
+            UPDATE radacct
+            SET acctstoptime = NOW(),
+                acctterminatecause = 'Admin-Reset',
+                acctsessiontime = COALESCE(
+                  EXTRACT(EPOCH FROM (NOW() - acctstarttime))::bigint,
+                  acctsessiontime
+                ),
+                acctupdatetime = NOW()
+            WHERE acctstoptime IS NULL
+              AND ($1::text = '' OR username = $1)
+              AND ($2::text = '' OR acctsessionid = $2)
+              AND ($3::text = '' OR nasipaddress = $3::inet)
+          `, disconnectUsername, bareSessionId || '', disconnectNasIp);
+
+          // Check if any row was updated
+          const checkRows = await db.$queryRawUnsafe<{ cnt: bigint }[]>(
+            `SELECT COUNT(*) as cnt FROM radacct WHERE acctterminatecause = 'Admin-Reset' AND acctstoptime > NOW() - INTERVAL '5 seconds'`
+          );
+          localEnded = Number(checkRows[0]?.cnt || 0) > 0;
+          localMessage = localEnded ? `Closed ${checkRows[0]?.cnt} session(s) in radacct` : 'No matching active session found';
+
+          // Also mark LiveSession as ended if it exists
+          // Note: acctSessionId is UUID type — cast parameter to uuid
+          try {
+            await db.$executeRawUnsafe(`
+              UPDATE "LiveSession"
+              SET status = 'ended', "updatedAt" = NOW()
+              WHERE status = 'active'
+                AND ($1::text = '' OR "acctSessionId" = $1::uuid)
+                AND ($2::text = '' OR username = $2)
+            `, bareSessionId || '', disconnectUsername);
+          } catch {
+            // LiveSession table may not have matching record — that's OK
+          }
+
+          // WiFiSession doesn't have acctSessionId column, match by username only
+          try {
+            await db.$executeRawUnsafe(`
+              UPDATE "WiFiSession"
+              SET status = 'completed', "endTime" = NOW(), "updatedAt" = NOW()
+              WHERE status = 'active'
+                AND ($1::text = '' OR "id" = $1::uuid)
+                AND ($2::text = '' OR "macAddress" = $2)
+            `, bareSessionId || '', disconnectUsername);
+          } catch {
+            // WiFiSession table may not have matching record — that's OK
+          }
+        } catch (dbErr) {
+          localMessage = dbErr instanceof Error ? dbErr.message : String(dbErr);
         }
 
         if (coaSuccess) {
           return NextResponse.json({
             success: true,
-            message: 'Session disconnected via RADIUS CoA',
+            message: 'Session disconnected via RADIUS CoA and closed locally',
             coa: true,
+            coaMessage,
             local: localEnded,
+            localMessage,
           });
         } else if (localEnded) {
           return NextResponse.json({
             success: true,
-            message: 'RADIUS CoA unavailable — session ended locally',
+            message: 'RADIUS CoA unavailable — session closed in database',
             coa: false,
+            coaMessage,
             local: true,
+            localMessage,
           });
         } else {
           return NextResponse.json({
             success: false,
-            message: 'Failed to disconnect session',
+            message: `Failed to disconnect session: ${localMessage}`,
             coa: false,
+            coaMessage,
             local: false,
+            localMessage,
           });
         }
       }
 
       case 'live-sessions-end-fallback': {
-        // Fallback: when CoA to NAS fails, at least end the LiveSession locally
+        // Fallback: end the session in PostgreSQL directly (not via SQLite freeradius-service)
         const { sessionId, acctSessionId } = data;
-        if (!sessionId && !acctSessionId) {
+        const effectiveId = sessionId || acctSessionId;
+        if (!effectiveId) {
           return NextResponse.json({ success: false, error: 'sessionId is required' }, { status: 400 });
         }
-        const result = await freeradiusRequest('/api/live-sessions/end-local', {
-          method: 'POST',
-          body: JSON.stringify({ sessionId, acctSessionId }),
-        });
-        return NextResponse.json(result);
+        const bareId = effectiveId.startsWith('ls_') ? effectiveId.slice(3) : effectiveId;
+        try {
+          await db.$executeRawUnsafe(`
+            UPDATE radacct
+            SET acctstoptime = NOW(),
+                acctterminatecause = 'Admin-Reset',
+                acctsessiontime = COALESCE(
+                  EXTRACT(EPOCH FROM (NOW() - acctstarttime))::bigint,
+                  acctsessiontime
+                ),
+                acctupdatetime = NOW()
+            WHERE acctstoptime IS NULL
+              AND ($1::text = '' OR acctsessionid = $1)
+          `, bareId || '');
+          // Also update LiveSession (acctSessionId is UUID type)
+          try {
+            await db.$executeRawUnsafe(`UPDATE "LiveSession" SET status = 'ended', "updatedAt" = NOW() WHERE status = 'active' AND ($1::text = '' OR "acctSessionId" = $1::uuid)`, bareId || '');
+          } catch { /* ok */ }
+          return NextResponse.json({ success: true, message: 'Session ended locally' });
+        } catch (error) {
+          return NextResponse.json({ success: false, error: String(error) }, { status: 500 });
+        }
       }
 
       case 'nas-health-check': {
