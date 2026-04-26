@@ -127,7 +127,7 @@ export default function LiveSessions() {
 
   // ─── Fetch Sessions ──────────────────────────────────────────────────────────
 
-  const fetchSessions = useCallback(async (signal?: AbortSignal) => {
+  const fetchSessions = useCallback(async () => {
     setIsLoading(true);
     try {
       const params = new URLSearchParams();
@@ -136,8 +136,8 @@ export default function LiveSessions() {
       if (statusFilter !== 'all') params.append('status', statusFilter);
 
       const [sessionRes, statsRes] = await Promise.all([
-        fetch(`/api/wifi/radius?action=live-sessions-list&${params.toString()}`, { signal }),
-        fetch('/api/wifi/radius?action=live-sessions-stats', { signal }),
+        fetch(`/api/wifi/radius?action=live-sessions-list&${params.toString()}`),
+        fetch('/api/wifi/radius?action=live-sessions-stats'),
       ]);
       const sessionData = await sessionRes.json();
       const statsData = await statsRes.json();
@@ -163,13 +163,11 @@ export default function LiveSessions() {
   // ─── Auto-refresh every 10s ───────────────────────────────────────────────
 
   useEffect(() => {
-    const controller = new AbortController();
-    fetchSessions(controller.signal);
+    fetchSessions();
     if (!autoRefresh) return;
-    const interval = setInterval(() => fetchSessions(controller.signal), 10000);
+    const interval = setInterval(() => fetchSessions(), 10000);
     return () => {
       clearInterval(interval);
-      controller.abort();
     };
   }, [fetchSessions, autoRefresh]);
 
