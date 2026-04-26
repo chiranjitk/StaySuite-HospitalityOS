@@ -1697,6 +1697,8 @@ export async function POST(request: NextRequest) {
         // Accept both sessionId (LiveSession id, may have ls_ prefix) and acctSessionId (bare)
         const { sessionId, acctSessionId, username, nasIp } = data;
         const effectiveSessionId = sessionId || acctSessionId;
+        console.log('[live-sessions-disconnect] RAW data:', JSON.stringify({ sessionId, acctSessionId, username, nasIp }));
+
         if (!username && !effectiveSessionId) {
           return NextResponse.json({ success: false, error: 'Username or sessionId is required' }, { status: 400 });
         }
@@ -1704,6 +1706,7 @@ export async function POST(request: NextRequest) {
         // Strip ls_ prefix if present to get bare acctSessionId
         const bareSessionId = effectiveSessionId?.startsWith('ls_') ? effectiveSessionId.slice(3) : effectiveSessionId;
         const disconnectUsername = username || '';
+        console.log('[live-sessions-disconnect] Resolved:', { bareSessionId, disconnectUsername, nasIp: nasIp || '' });
         const disconnectNasIp = nasIp || '';
 
         // 1. Try RADIUS CoA/Disconnect-Message to NAS (best-effort)
@@ -1774,6 +1777,7 @@ export async function POST(request: NextRequest) {
               AND ($2::text = '' OR acctuniqueid = $2 OR acctsessionid = $2)
               AND ($3::text = '' OR host(nasipaddress) = host($3::inet))
           `, disconnectUsername, bareSessionId || '', disconnectNasIp);
+          console.log('[live-sessions-disconnect] DB update done, checking result...');
 
           // Check if any row was updated
           const checkRows = await db.$queryRawUnsafe<{ cnt: bigint }[]>(
@@ -1781,6 +1785,7 @@ export async function POST(request: NextRequest) {
           );
           localEnded = Number(checkRows[0]?.cnt || 0) > 0;
           localMessage = localEnded ? `Closed ${checkRows[0]?.cnt} session(s) in radacct` : 'No matching active session found';
+          console.log('[live-sessions-disconnect] localEnded:', localEnded, 'message:', localMessage);
 
           // Also mark LiveSession as ended if it exists
           // Note: acctSessionId is UUID type — cast parameter to uuid

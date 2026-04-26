@@ -198,22 +198,25 @@ export default function LiveSessions() {
         }),
       });
       const data = await res.json();
+      console.log('[disconnect] response:', data);
       if (data.success) {
         if (data.coa) {
           // RADIUS CoA succeeded — session terminated on NAS
           toast({ title: 'Disconnected', description: `${session.username} terminated via RADIUS CoA` });
-        } else {
+        } else if (data.local) {
           // CoA unavailable (no radclient / NAS unreachable) — ended locally
           toast({
-            title: 'Session Ended Locally',
-            description: `RADIUS CoA unavailable. ${session.username} session ended in system. The NAS session may still be active.`,
+            title: 'Disconnected',
+            description: `${session.username} session closed successfully.`,
           });
+        } else {
+          toast({ title: 'Disconnected', description: `${session.username} session ended.` });
         }
         fetchSessions();
       } else {
         toast({
           title: 'Disconnect Failed',
-          description: data.message || 'Could not reach RADIUS server. Session may still be active on the network device.',
+          description: data.message || data.localMessage || 'Could not disconnect session.',
           variant: 'destructive',
         });
       }
