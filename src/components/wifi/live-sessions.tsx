@@ -15,6 +15,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Switch } from '@/components/ui/switch';
+import { Checkbox } from '@/components/ui/checkbox';
 import {
   Select,
   SelectContent,
@@ -56,7 +57,6 @@ import {
   XCircle,
   Eye,
   AlertTriangle,
-  ChevronRight,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useToast } from '@/hooks/use-toast';
@@ -117,6 +117,9 @@ export default function LiveSessions() {
   const [selectedSession, setSelectedSession] = useState<LiveSession | null>(null);
   const [disconnectingId, setDisconnectingId] = useState<string | null>(null);
   const [disconnectTarget, setDisconnectTarget] = useState<LiveSession | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [isBulkDisconnecting, setIsBulkDisconnecting] = useState(false);
+  const [bulkDisconnectTarget, setBulkDisconnectTarget] = useState(false);
 
   // ─── Debounce search query (300ms) ───────────────────────────────────────
 
@@ -227,6 +230,80 @@ export default function LiveSessions() {
     }
   };
 
+  // ─── Select / Deselect ─────────────────────────────────────────────────
+
+  const toggleSelect = (id: string) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    if (selectedIds.size === sessions.length) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(sessions.map(s => s.id)));
+    }
+  };
+
+  const isAllSelected = sessions.length > 0 && selectedIds.size === sessions.length;
+  const isSomeSelected = selectedIds.size > 0 && selectedIds.size < sessions.length;
+
+  // ─── Bulk Disconnect ────────────────────────────────────────────────────
+
+  const handleBulkDisconnect = async () => {
+    if (selectedIds.size === 0) return;
+    setIsBulkDisconnecting(true);
+    setBulkDisconnectTarget(false);
+
+    const targets = sessions.filter(s => selectedIds.has(s.id));
+    let successCount = 0;
+    let failCount = 0;
+
+    // Fire all disconnect requests in parallel
+    const promises = targets.map(async (session) => {
+      const acctSessionId = session.id.startsWith('ls_') ? session.id.slice(3) : session.id;
+      try {
+        const res = await fetch('/api/wifi/radius', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'live-sessions-disconnect',
+            acctSessionId,
+            username: session.username,
+            nasIp: session.nasIp,
+          }),
+        });
+        const data = await res.json();
+        if (data.success) successCount++;
+        else failCount++;
+      } catch {
+        failCount++;
+      }
+    });
+
+    await Promise.allSettled(promises);
+    setIsBulkDisconnecting(false);
+    setSelectedIds(new Set());
+
+    if (failCount === 0) {
+      toast({
+        title: 'Bulk Disconnect Complete',
+        description: `${successCount} session${successCount !== 1 ? 's' : ''} disconnected successfully.`,
+      });
+    } else {
+      toast({
+        title: 'Bulk Disconnect Partial',
+        description: `${successCount} succeeded, ${failCount} failed.`,
+        variant: 'destructive',
+      });
+    }
+    fetchSessions();
+  };
+
   // ─── Helpers ──────────────────────────────────────────────────────────────
 
   const formatDuration = (seconds: number): string => {
@@ -285,10 +362,19 @@ export default function LiveSessions() {
   const SessionCard = ({ session }: { session: LiveSession }) => (
     <Card className={cn(
       'border',
-      session.status === 'active' && 'border-emerald-200 dark:border-emerald-800',
-      session.status === 'idle' && 'border-amber-200 dark:border-amber-800'
+      selectedIds.has(session.id) && 'border-primary ring-2 ring-primary/20',
+      session.status === 'active' && !selectedIds.has(session.id) && 'border-emerald-200 dark:border-emerald-800',
+      session.status === 'idle' && !selectedIds.has(session.id) && 'border-amber-200 dark:border-amber-800'
     )}>
       <CardContent className="p-4 space-y-3">
+        {/* Row 0: Select checkbox */}
+        <div className="flex items-center justify-end">
+          <Checkbox
+            checked={selectedIds.has(session.id)}
+            onCheckedChange={() => toggleSelect(session.id)}
+            aria-label={`Select ${session.username}`}
+          />
+        </div>
         {/* Row 1: User info + Status */}
         <div className="flex items-start justify-between gap-2">
           <div className="flex items-center gap-2 min-w-0">
@@ -378,7 +464,7 @@ export default function LiveSessions() {
             size="sm"
             className="flex-1 h-9 text-xs"
             onClick={() => confirmDisconnect(session)}
-            disabled={disconnectingId === session.id}
+            disabled={disconnectingId === session.id || isBulkDisconnecting}
           >
             {disconnectingId === session.id ? (
               <><Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />Disconnecting...</>
@@ -406,7 +492,21 @@ export default function LiveSessions() {
             Real-time active session monitoring with CoA disconnect
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 flex-wrap">
+          {selectedIds.size > 0 && (
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={() => setBulkDisconnectTarget(true)}
+              disabled={isBulkDisconnecting}
+            >
+              {isBulkDisconnecting ? (
+                <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Disconnecting {selectedIds.size}...</>
+              ) : (
+                <><Unplug className="h-4 w-4 mr-2" />Disconnect {selectedIds.size} Selected</>
+              )}
+            </Button>
+          )}
           <Button variant="outline" size="sm" onClick={fetchSessions}>
             <RefreshCw className={cn('h-4 w-4 mr-2', isLoading && 'animate-spin')} />
             Refresh
@@ -549,6 +649,23 @@ export default function LiveSessions() {
         <>
           {/* Mobile: Card Layout */}
           <div className="space-y-3 sm:hidden">
+            {/* Mobile select all bar */}
+            <div className="flex items-center justify-between px-1">
+              <label className="flex items-center gap-2 text-sm cursor-pointer">
+                <Checkbox
+                  checked={isAllSelected}
+                  ref={(el) => {
+                    if (el) (el as unknown as HTMLInputElement).indeterminate = isSomeSelected;
+                  }}
+                  onCheckedChange={toggleSelectAll}
+                  aria-label="Select all sessions"
+                />
+                <span className="text-muted-foreground">Select All ({sessions.length})</span>
+              </label>
+              {selectedIds.size > 0 && (
+                <span className="text-xs text-muted-foreground">{selectedIds.size} selected</span>
+              )}
+            </div>
             {sessions.map((session) => (
               <SessionCard key={session.id} session={session} />
             ))}
@@ -562,6 +679,16 @@ export default function LiveSessions() {
                   <Table>
                     <TableHeader>
                       <TableRow>
+                        <TableHead className="w-10">
+                          <Checkbox
+                            checked={isAllSelected}
+                            ref={(el) => {
+                              if (el) (el as unknown as HTMLInputElement).indeterminate = isSomeSelected;
+                            }}
+                            onCheckedChange={toggleSelectAll}
+                            aria-label="Select all sessions"
+                          />
+                        </TableHead>
                         <TableHead>Status</TableHead>
                         <TableHead>User / IP</TableHead>
                         <TableHead>MAC</TableHead>
@@ -576,9 +703,17 @@ export default function LiveSessions() {
                     <TableBody>
                       {sessions.map((session) => (
                         <TableRow key={session.id} className={cn(
-                          session.status === 'active' && 'bg-emerald-50/50 dark:bg-emerald-950/10',
-                          session.status === 'idle' && 'bg-amber-50/30 dark:bg-amber-950/10'
+                          selectedIds.has(session.id) && 'bg-primary/5',
+                          session.status === 'active' && !selectedIds.has(session.id) && 'bg-emerald-50/50 dark:bg-emerald-950/10',
+                          session.status === 'idle' && !selectedIds.has(session.id) && 'bg-amber-50/30 dark:bg-amber-950/10'
                         )}>
+                          <TableCell>
+                            <Checkbox
+                              checked={selectedIds.has(session.id)}
+                              onCheckedChange={() => toggleSelect(session.id)}
+                              aria-label={`Select ${session.username}`}
+                            />
+                          </TableCell>
                           <TableCell>{getStatusBadge(session.status)}</TableCell>
                           <TableCell>
                             <div className="space-y-0.5">
@@ -770,6 +905,51 @@ export default function LiveSessions() {
               </div>
             </div>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Bulk Disconnect Confirmation Dialog */}
+      <Dialog open={bulkDisconnectTarget} onOpenChange={(open) => { if (!open) setBulkDisconnectTarget(false); }}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Unplug className="h-5 w-5 text-destructive" />
+              Bulk Force Disconnect
+            </DialogTitle>
+            <DialogDescription>
+              Disconnect all selected sessions immediately.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="py-4 space-y-3">
+            <div className="p-3 rounded-lg bg-destructive/5 border border-destructive/20">
+              <p className="text-sm font-medium">{selectedIds.size} session{selectedIds.size !== 1 ? 's' : ''} selected</p>
+              <div className="mt-2 max-h-32 overflow-y-auto space-y-1">
+                {sessions.filter(s => selectedIds.has(s.id)).map(s => (
+                  <div key={s.id} className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <UserCircle className="h-3.5 w-3.5 shrink-0" />
+                    <span className="truncate">{s.username}</span>
+                    <span className="ml-auto font-mono shrink-0">{s.ipAddress || '—'}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="flex items-start gap-2 text-amber-600 dark:text-amber-400">
+              <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
+              <p className="text-xs">
+                All selected users will lose internet access immediately. This sends RADIUS Disconnect Messages for each session.
+              </p>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setBulkDisconnectTarget(false)}>Cancel</Button>
+            <Button variant="destructive" onClick={handleBulkDisconnect} disabled={isBulkDisconnecting || selectedIds.size === 0}>
+              {isBulkDisconnecting ? (
+                <><Loader2 className="h-4 w-4 mr-2 animate-spin" />Disconnecting {selectedIds.size}...</>
+              ) : (
+                <><Unplug className="h-4 w-4 mr-2" />Disconnect {selectedIds.size} Session{selectedIds.size !== 1 ? 's' : ''}</>
+              )}
+            </Button>
+          </DialogFooter>
         </DialogContent>
       </Dialog>
 
