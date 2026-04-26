@@ -215,3 +215,24 @@ Stage Summary:
 - CoA to NAS is attempted but expected to fail (NAS IPs are simulated/internal)
 - Local database close is the primary disconnect mechanism and works reliably
 - No SQLite dependency for disconnect operations anymore
+
+---
+Task ID: 5b
+Agent: Main Agent
+Task: Verify disconnect fix end-to-end — GUI confirmed working
+
+Work Log:
+- User confirmed disconnect from Active Users tab is working correctly
+- Multiple fixes applied over iterations:
+  1. Rewrote disconnect handler to use direct PostgreSQL instead of SQLite freeradius-service
+  2. Fixed column mismatch: GUI sends acctuniqueid but API was searching acctsessionid → added OR condition
+  3. Fixed inet CIDR suffix: GUI sends nasIp as 192.168.1.1/32, NAS table has 192.168.1.1 → used host() and .replace()
+  4. Fixed AbortSignal TypeError in live-sessions.tsx fetch calls
+  5. Updated toast messaging to show success response
+- Backend debug logging confirmed: POST /api/wifi/radius 200 with localEnded: true
+
+Stage Summary:
+- ✅ Disconnect from Active Users tab fully working end-to-end
+- Session closed in radacct (acctstoptime set, acctterminatecause='Admin-Reset')
+- Session disappears from v_active_sessions view after disconnect
+- No more "no matching session found" errors
