@@ -144,3 +144,25 @@ Stage Summary:
   Health dashboard, Live session stats (12 active), Content Filter (0)
 - Key PostgreSQL fixes: `?` → `$N` params, `::uuid` casts, `::timestamptz` casts,
   column quoting for case sensitivity, COALESCE for nullable bigints, GROUP BY strict mode
+---
+Task ID: 1
+Agent: main
+Task: Fix Active Users tab showing blank (only widgets had data)
+
+Work Log:
+- Investigated the issue: widgets (stats cards) showed data but the session list/table was empty
+- Found the `live-sessions-list` API endpoint in `/src/app/api/wifi/radius/route.ts` queries `v_active_sessions` view
+- PM2 error logs revealed: `TypeError: Do not know how to serialize a BigInt` at the JSON serialization step
+- Root causes identified:
+  1. **Column name mismatch**: SQL used `"downloadSpeed"` and `"uploadSpeed"` (camelCase with quotes) but the view columns are `downloadspeed` and `uploadspeed` (lowercase). PostgreSQL quoted identifiers are case-sensitive.
+  2. **BigInt serialization**: The view returns `bigint` type columns (`acctsessiontime`, `acctinputoctets`, `acctoutputoctets`) which `JSON.stringify` cannot serialize.
+- Fixed column names: `"downloadSpeed"` → `downloadspeed`, `"uploadSpeed"` → `uploadspeed` in SQL query
+- Fixed BigInt issue: Wrapped all numeric fields with `Number()` conversion and added `JSON.parse(JSON.stringify(sessions, (_, v) => typeof v === 'bigint' ? Number(v) : v))` as safety net
+- Also fixed TypeScript interface property names to match actual view columns
+- Restarted PM2 process, flushed logs, verified no errors on subsequent requests
+
+Stage Summary:
+- Active Users tab now correctly displays 5 active sessions from the database
+- Both the stats widgets AND the session list/table now show data
+- The `live-sessions-stats` endpoint was already working (uses `Number()` for BigInt)
+- No other tabs had similar column name issues (verified all view queries)

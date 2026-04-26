@@ -638,34 +638,34 @@ export async function GET(request: NextRequest) {
             room_number: string | null;
             property_name: string | null;
             plan_name: string | null;
-            downloadSpeed: number | null;
-            uploadSpeed: number | null;
+            downloadspeed: number | null;
+            uploadspeed: number | null;
           }[]>(`
             SELECT acctuniqueid, acctsessionid, username, framedipaddress,
                    callingstationid, nasipaddress, calledstationid,
                    acctstarttime, acctupdatetime, acctsessiontime,
                    acctinputoctets, acctoutputoctets, nasporttype,
                    guest_first_name, guest_last_name, room_number,
-                   property_name, plan_name, "downloadSpeed", "uploadSpeed"
+                   property_name, plan_name, downloadspeed, uploadspeed
             FROM v_active_sessions ${whereClause}
             ORDER BY acctstarttime DESC
           `, ...sqlParams);
 
           const sessions = activeSessions.map((s) => ({
             id: `ls_${s.acctuniqueid}`,
-            username: s.username,
-            ipAddress: s.framedipaddress,
-            macAddress: s.callingstationid,
-            nasIp: s.nasipaddress,
-            nasIdentifier: s.calledstationid,
+            username: s.username || '',
+            ipAddress: s.framedipaddress || '',
+            macAddress: s.callingstationid || '',
+            nasIp: s.nasipaddress || '',
+            nasIdentifier: s.calledstationid || '',
             deviceType: '',
             operatingSystem: '',
             manufacturer: '',
-            bandwidthDown: s.downloadSpeed != null ? `${s.downloadSpeed} Mbps` : null,
-            bandwidthUp: s.uploadSpeed != null ? `${s.uploadSpeed} Mbps` : null,
-            sessionTime: s.acctsessiontime || 0,
-            dataDownload: s.acctoutputoctets || 0,
-            dataUpload: s.acctinputoctets || 0,
+            bandwidthDown: s.downloadspeed != null ? `${Number(s.downloadspeed)} Mbps` : null,
+            bandwidthUp: s.uploadspeed != null ? `${Number(s.uploadspeed)} Mbps` : null,
+            sessionTime: Number(s.acctsessiontime || 0),
+            dataDownload: Number(s.acctoutputoctets || 0),
+            dataUpload: Number(s.acctinputoctets || 0),
             status: 'active' as const,
             startedAt: s.acctstarttime || '',
             lastSeenAt: s.acctupdatetime || '',
@@ -678,7 +678,8 @@ export async function GET(request: NextRequest) {
             propertyName: s.property_name || '',
           }));
 
-          return NextResponse.json({ success: true, data: sessions });
+          const safeSessions = JSON.parse(JSON.stringify(sessions, (_, v) => typeof v === 'bigint' ? Number(v) : v));
+          return NextResponse.json({ success: true, data: safeSessions });
         } catch (error) {
           console.error('[live-sessions-list] Direct query error:', error);
           // Fallback to proxy if query fails
